@@ -83,23 +83,38 @@ GROUP BY r.room_type_id, ra.date;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rta_room_type_date ON room_type_availability(room_type_id, date);
 
+-- Restaurant
+CREATE TABLE IF NOT EXISTS restaurant (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        VARCHAR(100) NOT NULL,
+  description TEXT,
+  phone       VARCHAR(30),
+  created_at  TIMESTAMPTZ DEFAULT now()
+);
+
 -- Restaurant tables
 CREATE TABLE IF NOT EXISTS restaurant_table (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  table_number VARCHAR(10)  NOT NULL UNIQUE,
-  seats        INT          NOT NULL,
-  location     VARCHAR(50),
-  status       VARCHAR(20)  DEFAULT 'active'
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  restaurant_id UUID         NOT NULL REFERENCES restaurant(id),
+  table_number  VARCHAR(10)  NOT NULL,
+  seats         INT          NOT NULL,
+  location      VARCHAR(50),
+  status        VARCHAR(20)  DEFAULT 'active',
+  UNIQUE (restaurant_id, table_number)
 );
 
 -- Time slots
 CREATE TABLE IF NOT EXISTS time_slot (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  restaurant_id    UUID         NOT NULL REFERENCES restaurant(id),
   slot_date        DATE         NOT NULL,
   slot_time        TIME         NOT NULL,
   available_seats  INT          NOT NULL,
-  UNIQUE (slot_date, slot_time)
+  UNIQUE (restaurant_id, slot_date, slot_time)
 );
+
+CREATE INDEX IF NOT EXISTS idx_restaurant_table_restaurant ON restaurant_table(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_time_slot_restaurant ON time_slot(restaurant_id);
 
 -- Restaurant reservations
 CREATE TABLE IF NOT EXISTS restaurant_reservation (

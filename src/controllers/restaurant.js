@@ -1,22 +1,72 @@
 const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
 
+// ── Restaurants ───────────────────────────────────────────────────────────────
+
+async function listRestaurants(req, res, next) {
+  try {
+    const { rows } = await pool.query('SELECT * FROM restaurant ORDER BY name');
+    res.json(rows);
+  } catch (err) { next(err); }
+}
+
+async function getRestaurant(req, res, next) {
+  try {
+    const { rows } = await pool.query('SELECT * FROM restaurant WHERE id = $1', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
+async function createRestaurant(req, res, next) {
+  try {
+    const { name, description, phone } = req.body;
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    const { rows } = await pool.query(
+      `INSERT INTO restaurant (name, description, phone) VALUES ($1, $2, $3) RETURNING *`,
+      [name, description ?? null, phone ?? null]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) { next(err); }
+}
+
+async function updateRestaurant(req, res, next) {
+  try {
+    const { name, description, phone } = req.body;
+    const { rows } = await pool.query(
+      `UPDATE restaurant SET
+         name        = COALESCE($1, name),
+         description = COALESCE($2, description),
+         phone       = COALESCE($3, phone)
+       WHERE id = $4 RETURNING *`,
+      [name, description, phone, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
 // ── Tables ────────────────────────────────────────────────────────────────────
 
 async function listTables(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT * FROM restaurant_table ORDER BY table_number');
+    const { restaurant_id } = req.params;
+    const { rows } = await pool.query(
+      'SELECT * FROM restaurant_table WHERE restaurant_id = $1 ORDER BY table_number',
+      [restaurant_id]
+    );
     res.json(rows);
   } catch (err) { next(err); }
 }
 
 async function createTable(req, res, next) {
   try {
+    const { restaurant_id } = req.params;
     const { table_number, seats, location } = req.body;
     if (!table_number || !seats) return res.status(400).json({ error: 'table_number and seats are required' });
     const { rows } = await pool.query(
-      `INSERT INTO restaurant_table (table_number, seats, location) VALUES ($1, $2, $3) RETURNING *`,
-      [table_number, seats, location ?? null]
+      `INSERT INTO restaurant_table (restaurant_id, table_number, seats, location) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [restaurant_id, table_number, seats, location ?? null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -24,6 +74,7 @@ async function createTable(req, res, next) {
 
 async function updateTable(req, res, next) {
   try {
+    const { restaurant_id, id } = req.params;
     const { table_number, seats, location, status } = req.body;
     const { rows } = await pool.query(
       `UPDATE restaurant_table SET
@@ -31,8 +82,8 @@ async function updateTable(req, res, next) {
          seats        = COALESCE($2, seats),
          location     = COALESCE($3, location),
          status       = COALESCE($4, status)
-       WHERE id = $5 RETURNING *`,
-      [table_number, seats, location, status, req.params.id]
+       WHERE id = $5 AND restaurant_id = $6 RETURNING *`,
+      [table_number, seats, location, status, id, restaurant_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Table not found' });
     res.json(rows[0]);
@@ -43,9 +94,10 @@ async function updateTable(req, res, next) {
 
 async function listSlots(req, res, next) {
   try {
+    const { restaurant_id } = req.params;
     const { date, from, to } = req.query;
-    let query = 'SELECT * FROM time_slot WHERE 1=1';
-    const params = [];
+    let query = 'SELECT * FROM time_slot WHERE restaurant_id = $1';
+    const params = [restaurant_id];
 
     if (date) {
       if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
@@ -68,14 +120,15 @@ async function listSlots(req, res, next) {
 
 async function createSlot(req, res, next) {
   try {
+    const { restaurant_id } = req.params;
     const { slot_date, slot_time, available_seats } = req.body;
     if (!slot_date || !slot_time || !available_seats) {
       return res.status(400).json({ error: 'slot_date, slot_time, and available_seats are required' });
     }
     if (!isValidDate(slot_date)) return res.status(400).json({ error: 'Invalid date format' });
     const { rows } = await pool.query(
-      `INSERT INTO time_slot (slot_date, slot_time, available_seats) VALUES ($1, $2, $3) RETURNING *`,
-      [slot_date, slot_time, available_seats]
+      `INSERT INTO time_slot (restaurant_id, slot_date, slot_time, available_seats) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [restaurant_id, slot_date, slot_time, available_seats]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -85,6 +138,7 @@ async function createSlot(req, res, next) {
 
 async function searchSlots(req, res, next) {
   try {
+    const { restaurant_id } = req.params;
     const { date, party_size } = req.query;
     if (!date || !party_size) return res.status(400).json({ error: 'date and party_size are required' });
     if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
@@ -92,29 +146,31 @@ async function searchSlots(req, res, next) {
     const { rows } = await pool.query(
       `SELECT ts.*,
               COUNT(rt.id) FILTER (WHERE rt.status = 'active') AS total_tables,
-              COUNT(rt.id) FILTER (WHERE rt.status = 'active' AND rt.seats >= $2
+              COUNT(rt.id) FILTER (WHERE rt.status = 'active' AND rt.seats >= $3
                 AND NOT EXISTS (
                   SELECT 1 FROM restaurant_reservation rr
                   WHERE rr.table_id = rt.id
                     AND rr.time_slot_id = ts.id
-                    AND rr.status NOT IN ('cancelled')
+                    AND rr.status != 'cancelled'
                 )
               ) AS available_tables
        FROM time_slot ts
        CROSS JOIN restaurant_table rt
-       WHERE ts.slot_date = $1
-         AND ts.available_seats >= $2
+       WHERE ts.restaurant_id = $1
+         AND rt.restaurant_id = $1
+         AND ts.slot_date = $2
+         AND ts.available_seats >= $3
        GROUP BY ts.id
-       HAVING COUNT(rt.id) FILTER (WHERE rt.status = 'active' AND rt.seats >= $2
+       HAVING COUNT(rt.id) FILTER (WHERE rt.status = 'active' AND rt.seats >= $3
                 AND NOT EXISTS (
                   SELECT 1 FROM restaurant_reservation rr
                   WHERE rr.table_id = rt.id
                     AND rr.time_slot_id = ts.id
-                    AND rr.status NOT IN ('cancelled')
+                    AND rr.status != 'cancelled'
                 )
               ) > 0
        ORDER BY ts.slot_time`,
-      [date, parseInt(party_size, 10)]
+      [restaurant_id, date, parseInt(party_size, 10)]
     );
     res.json(rows);
   } catch (err) { next(err); }
@@ -124,15 +180,16 @@ async function searchSlots(req, res, next) {
 
 async function listReservations(req, res, next) {
   try {
+    const { restaurant_id } = req.params;
     const { date, status, guest_id } = req.query;
     let query = `
       SELECT rr.*, ts.slot_date, ts.slot_time, rt.table_number, rt.seats, rt.location
       FROM restaurant_reservation rr
       JOIN time_slot ts ON ts.id = rr.time_slot_id
       JOIN restaurant_table rt ON rt.id = rr.table_id
-      WHERE 1=1
+      WHERE ts.restaurant_id = $1
     `;
-    const params = [];
+    const params = [restaurant_id];
     if (date) { params.push(date); query += ` AND ts.slot_date = $${params.length}`; }
     if (status) { params.push(status); query += ` AND rr.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND rr.guest_id = $${params.length}`; }
@@ -158,6 +215,7 @@ async function getReservation(req, res, next) {
 }
 
 async function createReservation(req, res, next) {
+  const { restaurant_id } = req.params;
   const { table_id, time_slot_id, guest_id, contact_name, contact_email, contact_phone, party_size, notes } = req.body;
 
   if (!table_id || !time_slot_id || !contact_name || !party_size) {
@@ -168,30 +226,25 @@ async function createReservation(req, res, next) {
   try {
     await client.query('BEGIN');
 
-    // Check table exists and is active
     const tableRes = await client.query(
-      'SELECT * FROM restaurant_table WHERE id = $1', [table_id]
+      'SELECT * FROM restaurant_table WHERE id = $1 AND restaurant_id = $2', [table_id, restaurant_id]
     );
     if (!tableRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Table not found' }); }
     if (tableRes.rows[0].status !== 'active') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Table is not active' }); }
     if (tableRes.rows[0].seats < party_size) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Table does not have enough seats' }); }
 
-    // Check time slot exists and has capacity
     const slotRes = await client.query(
-      'SELECT * FROM time_slot WHERE id = $1', [time_slot_id]
+      'SELECT * FROM time_slot WHERE id = $1 AND restaurant_id = $2', [time_slot_id, restaurant_id]
     );
     if (!slotRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Time slot not found' }); }
     if (slotRes.rows[0].available_seats < party_size) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Not enough available seats in this slot' }); }
 
-    // Check table not already booked for this slot
     const conflictRes = await client.query(
-      `SELECT id FROM restaurant_reservation
-       WHERE table_id = $1 AND time_slot_id = $2 AND status != 'cancelled'`,
+      `SELECT id FROM restaurant_reservation WHERE table_id = $1 AND time_slot_id = $2 AND status != 'cancelled'`,
       [table_id, time_slot_id]
     );
     if (conflictRes.rows.length) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Table already reserved for this time slot' }); }
 
-    // Create reservation
     const { rows } = await client.query(
       `INSERT INTO restaurant_reservation
          (table_id, time_slot_id, guest_id, contact_name, contact_email, contact_phone, party_size, notes)
@@ -199,7 +252,6 @@ async function createReservation(req, res, next) {
       [table_id, time_slot_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null]
     );
 
-    // Decrement available seats
     await client.query(
       'UPDATE time_slot SET available_seats = available_seats - $1 WHERE id = $2',
       [party_size, time_slot_id]
@@ -230,7 +282,6 @@ async function updateReservation(req, res, next) {
     );
     if (!rows.length) return res.status(404).json({ error: 'Reservation not found' });
 
-    // Restore seats if cancelled
     if (status === 'cancelled') {
       await pool.query(
         'UPDATE time_slot SET available_seats = available_seats + $1 WHERE id = $2',
@@ -243,6 +294,7 @@ async function updateReservation(req, res, next) {
 }
 
 module.exports = {
+  listRestaurants, getRestaurant, createRestaurant, updateRestaurant,
   listTables, createTable, updateTable,
   listSlots, createSlot, searchSlots,
   listReservations, getReservation, createReservation, updateReservation,
