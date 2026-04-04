@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: hotel-booking-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hotel-booking-db
+          property: connectionString
+
+databases:
+  - name: hotel-booking-db
+    databaseName: hotel_booking
+    plan: free
