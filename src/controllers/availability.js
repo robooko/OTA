@@ -138,6 +138,26 @@ async function upsertRoomAvailability(req, res, next) {
   }
 }
 
+async function listOverrides(req, res, next) {
+  try {
+    const { room_id, from, to } = req.query;
+    let query = `
+      SELECT ra.*, r.room_number, rt.name AS room_type_name, rt.base_rate
+      FROM room_availability ra
+      JOIN room r ON r.id = ra.room_id
+      JOIN room_type rt ON rt.id = r.room_type_id
+      WHERE ra.override_rate IS NOT NULL
+    `;
+    const params = [];
+    if (room_id) { params.push(room_id); query += ` AND ra.room_id = $${params.length}`; }
+    if (from) { params.push(from); query += ` AND ra.date >= $${params.length}`; }
+    if (to) { params.push(to); query += ` AND ra.date <= $${params.length}`; }
+    query += ' ORDER BY ra.date, r.room_number';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) { next(err); }
+}
+
 async function refreshView(req, res, next) {
   try {
     await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
@@ -152,5 +172,6 @@ module.exports = {
   getRoomTypeAvailability,
   searchAvailability,
   upsertRoomAvailability,
+  listOverrides,
   refreshView,
 };
