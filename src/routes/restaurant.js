@@ -15,6 +15,7 @@ router.put('/:restaurant_id/tables/:id', ctrl.updateTable);
 // Time slots (scoped to restaurant)
 router.get('/:restaurant_id/slots', ctrl.listSlots);
 router.post('/:restaurant_id/slots', ctrl.createSlot);
+router.post('/:restaurant_id/slots/bulk', ctrl.bulkCreateSlots);
 router.get('/:restaurant_id/slots/search', ctrl.searchSlots);
 
 // Reservations (scoped to restaurant)

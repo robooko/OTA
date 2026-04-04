@@ -134,6 +134,40 @@ async function createSlot(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function bulkCreateSlots(req, res, next) {
+  try {
+    const { restaurant_id } = req.params;
+    const { from, to, times, available_seats } = req.body;
+
+    if (!from || !to || !Array.isArray(times) || !times.length || !available_seats) {
+      return res.status(400).json({ error: 'from, to, times array, and available_seats are required' });
+    }
+    if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'Invalid date format' });
+    if (from > to) return res.status(400).json({ error: 'from must be before or equal to to' });
+
+    const rows = [];
+    const d = new Date(from);
+    const end = new Date(to);
+
+    while (d <= end) {
+      const date = d.toISOString().slice(0, 10);
+      for (const time of times) {
+        const { rows: inserted } = await pool.query(
+          `INSERT INTO time_slot (restaurant_id, slot_date, slot_time, available_seats)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (restaurant_id, slot_date, slot_time) DO NOTHING
+           RETURNING *`,
+          [restaurant_id, date, time, available_seats]
+        );
+        if (inserted.length) rows.push(inserted[0]);
+      }
+      d.setDate(d.getDate() + 1);
+    }
+
+    res.status(201).json({ created: rows.length, slots: rows });
+  } catch (err) { next(err); }
+}
+
 // ── Search available slots ────────────────────────────────────────────────────
 
 async function searchSlots(req, res, next) {
@@ -296,6 +330,6 @@ async function updateReservation(req, res, next) {
 module.exports = {
   listRestaurants, getRestaurant, createRestaurant, updateRestaurant,
   listTables, createTable, updateTable,
-  listSlots, createSlot, searchSlots,
+  listSlots, createSlot, bulkCreateSlots, searchSlots,
   listReservations, getReservation, createReservation, updateReservation,
 };
