@@ -9,6 +9,7 @@ const roomRoutes = require('./routes/rooms');
 const availabilityRoutes = require('./routes/availability');
 const bookingRoutes = require('./routes/bookings');
 const paymentRoutes = require('./routes/payments');
+const restaurantRoutes = require('./routes/restaurant');
 
 const app = express();
 
@@ -22,6 +23,7 @@ app.use('/api/rooms', roomRoutes);
 app.use('/api/availability', availabilityRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/restaurant', restaurantRoutes);
 
 app.use(errorHandler);
 
