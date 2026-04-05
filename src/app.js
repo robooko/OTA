@@ -12,6 +12,9 @@ const paymentRoutes = require('./routes/payments');
 const restaurantRoutes = require('./routes/restaurant');
 const spaRoutes = require('./routes/spa');
 const beachClubRoutes = require('./routes/beachClub');
+const toursRoutes = require('./routes/tours');
+const equipmentRoutes = require('./routes/equipment');
+const golfRoutes = require('./routes/golf');
 
 const app = express();
 
@@ -28,6 +31,9 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/restaurant', restaurantRoutes);
 app.use('/api/spa', spaRoutes);
 app.use('/api/beach-club', beachClubRoutes);
+app.use('/api/tours', toursRoutes);
+app.use('/api/equipment', equipmentRoutes);
+app.use('/api/golf', golfRoutes);
 
 app.use(errorHandler);
 

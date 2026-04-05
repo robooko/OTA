@@ -198,3 +198,109 @@ CREATE TABLE IF NOT EXISTS beach_booking (
 
 CREATE INDEX IF NOT EXISTS idx_beach_booking_date    ON beach_booking(date);
 CREATE INDEX IF NOT EXISTS idx_beach_booking_bed     ON beach_booking(bed_id);
+
+-- ── Tours ─────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS tour (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name           VARCHAR(100)  NOT NULL,
+  description    TEXT,
+  duration_mins  INT           NOT NULL,
+  max_group_size INT           NOT NULL,
+  price          NUMERIC(10,2) NOT NULL,
+  status         VARCHAR(20)   DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS tour_slot (
+  id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tour_id   UUID         NOT NULL REFERENCES tour(id),
+  slot_date DATE         NOT NULL,
+  slot_time TIME         NOT NULL,
+  status    VARCHAR(20)  DEFAULT 'active',
+  UNIQUE (tour_id, slot_date, slot_time)
+);
+
+CREATE TABLE IF NOT EXISTS tour_booking (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slot_id       UUID          NOT NULL REFERENCES tour_slot(id),
+  guest_id      UUID          REFERENCES guest(id),
+  contact_name  VARCHAR(100)  NOT NULL,
+  contact_email VARCHAR(255),
+  contact_phone VARCHAR(30),
+  group_size    INT           NOT NULL,
+  total_price   NUMERIC(10,2) NOT NULL,
+  status        VARCHAR(20)   DEFAULT 'confirmed',
+  notes         TEXT,
+  created_at    TIMESTAMPTZ   DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tour_slot_tour_date  ON tour_slot(tour_id, slot_date);
+CREATE INDEX IF NOT EXISTS idx_tour_booking_slot    ON tour_booking(slot_id);
+
+-- ── Equipment hire ────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS equipment (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name           VARCHAR(100)  NOT NULL,
+  type           VARCHAR(50)   NOT NULL,
+  description    TEXT,
+  quantity       INT           NOT NULL,
+  price_per_day  NUMERIC(10,2),
+  price_per_hour NUMERIC(10,2),
+  status         VARCHAR(20)   DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS equipment_hire (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  equipment_id  UUID          NOT NULL REFERENCES equipment(id),
+  guest_id      UUID          REFERENCES guest(id),
+  contact_name  VARCHAR(100)  NOT NULL,
+  contact_email VARCHAR(255),
+  contact_phone VARCHAR(30),
+  hire_date     DATE          NOT NULL,
+  quantity      INT           NOT NULL,
+  status        VARCHAR(20)   DEFAULT 'confirmed',
+  notes         TEXT,
+  created_at    TIMESTAMPTZ   DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_equipment_hire_date ON equipment_hire(hire_date);
+CREATE INDEX IF NOT EXISTS idx_equipment_hire_eq   ON equipment_hire(equipment_id);
+
+-- ── Golf ──────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS golf_course (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name             VARCHAR(100)  NOT NULL,
+  description      TEXT,
+  holes            INT           NOT NULL,
+  price_per_player NUMERIC(10,2) NOT NULL,
+  status           VARCHAR(20)   DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS tee_time (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  course_id  UUID         NOT NULL REFERENCES golf_course(id),
+  tee_date   DATE         NOT NULL,
+  tee_time   TIME         NOT NULL,
+  max_players INT         NOT NULL DEFAULT 4,
+  status     VARCHAR(20)  DEFAULT 'active',
+  UNIQUE (course_id, tee_date, tee_time)
+);
+
+CREATE TABLE IF NOT EXISTS golf_booking (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tee_time_id   UUID          NOT NULL REFERENCES tee_time(id),
+  guest_id      UUID          REFERENCES guest(id),
+  contact_name  VARCHAR(100)  NOT NULL,
+  contact_email VARCHAR(255),
+  contact_phone VARCHAR(30),
+  players       INT           NOT NULL,
+  total_price   NUMERIC(10,2) NOT NULL,
+  status        VARCHAR(20)   DEFAULT 'confirmed',
+  notes         TEXT,
+  created_at    TIMESTAMPTZ   DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tee_time_course_date ON tee_time(course_id, tee_date);
+CREATE INDEX IF NOT EXISTS idx_golf_booking_tee     ON golf_booking(tee_time_id);
