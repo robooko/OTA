@@ -10,6 +10,8 @@ const availabilityRoutes = require('./routes/availability');
 const bookingRoutes = require('./routes/bookings');
 const paymentRoutes = require('./routes/payments');
 const restaurantRoutes = require('./routes/restaurant');
+const spaRoutes = require('./routes/spa');
+const beachClubRoutes = require('./routes/beachClub');
 
 const app = express();
 
@@ -24,6 +26,8 @@ app.use('/api/availability', availabilityRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/restaurant', restaurantRoutes);
+app.use('/api/spa', spaRoutes);
+app.use('/api/beach-club', beachClubRoutes);
 
 app.use(errorHandler);
 

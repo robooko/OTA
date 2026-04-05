@@ -83,7 +83,8 @@ GROUP BY r.room_type_id, ra.date;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rta_room_type_date ON room_type_availability(room_type_id, date);
 
--- Restaurant
+-- ── Restaurant ────────────────────────────────────────────────────────────────
+
 CREATE TABLE IF NOT EXISTS restaurant (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name        VARCHAR(100) NOT NULL,
@@ -92,9 +93,8 @@ CREATE TABLE IF NOT EXISTS restaurant (
   created_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Restaurant tables
 CREATE TABLE IF NOT EXISTS restaurant_table (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   restaurant_id UUID         NOT NULL REFERENCES restaurant(id),
   table_number  VARCHAR(10)  NOT NULL,
   seats         INT          NOT NULL,
@@ -103,7 +103,6 @@ CREATE TABLE IF NOT EXISTS restaurant_table (
   UNIQUE (restaurant_id, table_number)
 );
 
--- Time slots
 CREATE TABLE IF NOT EXISTS time_slot (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   restaurant_id    UUID         NOT NULL REFERENCES restaurant(id),
@@ -113,10 +112,6 @@ CREATE TABLE IF NOT EXISTS time_slot (
   UNIQUE (restaurant_id, slot_date, slot_time)
 );
 
-CREATE INDEX IF NOT EXISTS idx_restaurant_table_restaurant ON restaurant_table(restaurant_id);
-CREATE INDEX IF NOT EXISTS idx_time_slot_restaurant ON time_slot(restaurant_id);
-
--- Restaurant reservations
 CREATE TABLE IF NOT EXISTS restaurant_reservation (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   table_id      UUID         NOT NULL REFERENCES restaurant_table(id),
@@ -131,45 +126,75 @@ CREATE TABLE IF NOT EXISTS restaurant_reservation (
   created_at    TIMESTAMPTZ  DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_restaurant_reservation_table_slot ON restaurant_reservation(table_id, time_slot_id);
-CREATE INDEX IF NOT EXISTS idx_restaurant_reservation_date ON restaurant_reservation(time_slot_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_table_restaurant   ON restaurant_table(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_time_slot_restaurant          ON time_slot(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_res_table_slot     ON restaurant_reservation(table_id, time_slot_id);
 
--- Restaurant
-CREATE TABLE IF NOT EXISTS restaurant (
+-- ── Spa ───────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS spa_treatment (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name         VARCHAR(100)  NOT NULL,
+  description  TEXT,
+  duration_mins INT          NOT NULL,
+  price        NUMERIC(10,2) NOT NULL,
+  status       VARCHAR(20)   DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS spa_therapist (
+  id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name   VARCHAR(100) NOT NULL,
+  status VARCHAR(20)  DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS spa_slot (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  therapist_id  UUID         NOT NULL REFERENCES spa_therapist(id),
+  treatment_id  UUID         NOT NULL REFERENCES spa_treatment(id),
+  slot_date     DATE         NOT NULL,
+  slot_time     TIME         NOT NULL,
+  status        VARCHAR(20)  DEFAULT 'available',
+  UNIQUE (therapist_id, slot_date, slot_time)
+);
+
+CREATE TABLE IF NOT EXISTS spa_appointment (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slot_id      UUID         NOT NULL REFERENCES spa_slot(id),
+  guest_id     UUID         REFERENCES guest(id),
+  contact_name VARCHAR(100) NOT NULL,
+  contact_email VARCHAR(255),
+  contact_phone VARCHAR(30),
+  status       VARCHAR(20)  DEFAULT 'confirmed',
+  notes        TEXT,
+  created_at   TIMESTAMPTZ  DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_spa_slot_therapist_date ON spa_slot(therapist_id, slot_date);
+CREATE INDEX IF NOT EXISTS idx_spa_slot_treatment      ON spa_slot(treatment_id);
+CREATE INDEX IF NOT EXISTS idx_spa_appointment_slot    ON spa_appointment(slot_id);
+
+-- ── Beach Club ────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS beach_bed (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name        VARCHAR(100) NOT NULL,
-  description TEXT,
-  created_at  TIMESTAMPTZ  DEFAULT now()
+  bed_number  VARCHAR(10)  NOT NULL UNIQUE,
+  zone        VARCHAR(50),
+  status      VARCHAR(20)  DEFAULT 'active'
 );
 
--- Restaurant tables
-CREATE TABLE IF NOT EXISTS restaurant_table (
+CREATE TABLE IF NOT EXISTS beach_booking (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  restaurant_id UUID         NOT NULL REFERENCES restaurant(id),
-  table_number  VARCHAR(10)  NOT NULL,
-  seats         INT          NOT NULL,
-  location      VARCHAR(50),
-  status        VARCHAR(20)  DEFAULT 'active',
-  UNIQUE (restaurant_id, table_number)
-);
-
--- Restaurant reservations
-CREATE TABLE IF NOT EXISTS restaurant_reservation (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  restaurant_id UUID         NOT NULL REFERENCES restaurant(id),
-  table_id      UUID         NOT NULL REFERENCES restaurant_table(id),
+  bed_id        UUID         NOT NULL REFERENCES beach_bed(id),
   guest_id      UUID         REFERENCES guest(id),
   contact_name  VARCHAR(100) NOT NULL,
   contact_email VARCHAR(255),
   contact_phone VARCHAR(30),
   date          DATE         NOT NULL,
-  time_slot     TIME         NOT NULL,
-  duration_mins INT          NOT NULL DEFAULT 120,
-  party_size    INT          NOT NULL,
   status        VARCHAR(20)  DEFAULT 'confirmed',
   notes         TEXT,
-  created_at    TIMESTAMPTZ  DEFAULT now()
+  created_at    TIMESTAMPTZ  DEFAULT now(),
+  UNIQUE (bed_id, date)
 );
 
-CREATE INDEX IF NOT EXISTS idx_restaurant_reservation_table_date ON restaurant_reservation(table_id, date);
-CREATE INDEX IF NOT EXISTS idx_restaurant_reservation_date ON restaurant_reservation(date);
+CREATE INDEX IF NOT EXISTS idx_beach_booking_date    ON beach_booking(date);
+CREATE INDEX IF NOT EXISTS idx_beach_booking_bed     ON beach_booking(bed_id);
