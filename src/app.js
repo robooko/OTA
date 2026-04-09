@@ -5,6 +5,7 @@ const swaggerUi = require('swagger-ui-express');
 const swaggerSpec = require('./docs/swagger');
 const errorHandler = require('./middleware/errorHandler');
 
+const authRoutes = require('./routes/auth');
 const guestRoutes = require('./routes/guests');
 const roomTypeRoutes = require('./routes/roomTypes');
 const roomRoutes = require('./routes/rooms');
@@ -25,6 +26,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.use('/api/auth', authRoutes);
 
 app.use('/api/guests', guestRoutes);
 app.use('/api/room-types', roomTypeRoutes);

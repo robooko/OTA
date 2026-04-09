@@ -1,18 +1,19 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/tours');
+const { authenticate, requireRole } = require('../middleware/auth');
 
 // Tours
 router.get('/', ctrl.listTours);
-router.post('/', ctrl.createTour);
-router.put('/:id', ctrl.updateTour);
+router.post('/', authenticate, requireRole('admin'), ctrl.createTour);
+router.put('/:id', authenticate, requireRole('admin'), ctrl.updateTour);
 
 // Slots
-router.post('/slots/bulk', ctrl.bulkCreateSlots);
+router.post('/slots/bulk', authenticate, requireRole('admin', 'staff'), ctrl.bulkCreateSlots);
 router.get('/slots/search', ctrl.searchSlots);
 
 // Bookings
-router.get('/bookings', ctrl.listBookings);
+router.get('/bookings', authenticate, requireRole('admin', 'staff'), ctrl.listBookings);
 router.post('/bookings', ctrl.createBooking);
-router.put('/bookings/:id', ctrl.updateBooking);
+router.put('/bookings/:id', authenticate, requireRole('admin', 'staff'), ctrl.updateBooking);
 
 module.exports = router;

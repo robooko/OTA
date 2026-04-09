@@ -1,27 +1,28 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/restaurant');
+const { authenticate, requireRole } = require('../middleware/auth');
 
 // Restaurants
 router.get('/', ctrl.listRestaurants);
 router.get('/:id', ctrl.getRestaurant);
-router.post('/', ctrl.createRestaurant);
-router.put('/:id', ctrl.updateRestaurant);
+router.post('/', authenticate, requireRole('admin'), ctrl.createRestaurant);
+router.put('/:id', authenticate, requireRole('admin'), ctrl.updateRestaurant);
 
-// Tables (scoped to restaurant)
+// Tables
 router.get('/:restaurant_id/tables', ctrl.listTables);
-router.post('/:restaurant_id/tables', ctrl.createTable);
-router.put('/:restaurant_id/tables/:id', ctrl.updateTable);
+router.post('/:restaurant_id/tables', authenticate, requireRole('admin'), ctrl.createTable);
+router.put('/:restaurant_id/tables/:id', authenticate, requireRole('admin'), ctrl.updateTable);
 
-// Time slots (scoped to restaurant)
+// Slots
 router.get('/:restaurant_id/slots', ctrl.listSlots);
-router.post('/:restaurant_id/slots', ctrl.createSlot);
-router.post('/:restaurant_id/slots/bulk', ctrl.bulkCreateSlots);
+router.post('/:restaurant_id/slots', authenticate, requireRole('admin', 'staff'), ctrl.createSlot);
+router.post('/:restaurant_id/slots/bulk', authenticate, requireRole('admin', 'staff'), ctrl.bulkCreateSlots);
 router.get('/:restaurant_id/slots/search', ctrl.searchSlots);
 
-// Reservations (scoped to restaurant)
-router.get('/:restaurant_id/reservations', ctrl.listReservations);
-router.get('/:restaurant_id/reservations/:id', ctrl.getReservation);
+// Reservations
+router.get('/:restaurant_id/reservations', authenticate, requireRole('admin', 'staff'), ctrl.listReservations);
+router.get('/:restaurant_id/reservations/:id', authenticate, ctrl.getReservation);
 router.post('/:restaurant_id/reservations', ctrl.createReservation);
-router.put('/:restaurant_id/reservations/:id', ctrl.updateReservation);
+router.put('/:restaurant_id/reservations/:id', authenticate, requireRole('admin', 'staff'), ctrl.updateReservation);
 
 module.exports = router;

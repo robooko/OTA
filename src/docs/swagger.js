@@ -9,7 +9,9 @@ const swaggerSpec = {
     { url: 'https://ota-u6ii.onrender.com', description: 'Production' },
     { url: 'http://localhost:3000', description: 'Local' },
   ],
+  security: [{ bearerAuth: [] }],
   tags: [
+    { name: 'Auth' },
     { name: 'Guests' },
     { name: 'Room Types' },
     { name: 'Rooms' },
@@ -24,6 +26,13 @@ const swaggerSpec = {
     { name: 'Golf' },
   ],
   components: {
+    securitySchemes: {
+      bearerAuth: {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+      },
+    },
     schemas: {
       Error: {
         type: 'object',
@@ -80,6 +89,20 @@ const swaggerSpec = {
     },
   },
   paths: {
+    // ── Auth ────────────────────────────────────────────────────────────────
+    '/api/auth/register': {
+      post: { tags: ['Auth'], summary: 'Register a new user', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'email', 'password'], properties: { name: { type: 'string' }, email: { type: 'string', format: 'email' }, password: { type: 'string', format: 'password' }, role: { type: 'string', enum: ['admin', 'staff', 'guest'], default: 'staff' } } } } } }, responses: { 201: { description: 'User created with JWT token' } } },
+    },
+    '/api/auth/login': {
+      post: { tags: ['Auth'], summary: 'Login and receive JWT token', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['email', 'password'], properties: { email: { type: 'string', format: 'email' }, password: { type: 'string', format: 'password' } } } } } }, responses: { 200: { description: 'JWT token' }, 401: { description: 'Invalid credentials' } } },
+    },
+    '/api/auth/me': {
+      get: { tags: ['Auth'], summary: 'Get current user', responses: { 200: { description: 'Current user profile' } } },
+    },
+    '/api/auth/users': {
+      get: { tags: ['Auth'], summary: 'List all users (admin only)', responses: { 200: { description: 'Array of users' }, 403: { description: 'Forbidden' } } },
+    },
+
     // ── Guests ──────────────────────────────────────────────────────────────
     '/api/guests': {
       get: {

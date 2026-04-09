@@ -83,6 +83,17 @@ GROUP BY r.room_type_id, ra.date;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rta_room_type_date ON room_type_availability(room_type_id, date);
 
+-- ── Auth ─────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS api_user (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name          VARCHAR(100) NOT NULL,
+  email         VARCHAR(255) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  role          VARCHAR(20)  NOT NULL DEFAULT 'staff',
+  created_at    TIMESTAMPTZ  DEFAULT now()
+);
+
 -- ── Restaurant ────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS restaurant (
