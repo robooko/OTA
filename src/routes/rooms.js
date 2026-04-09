@@ -1,10 +1,10 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/rooms');
-const { authenticate, requireRole } = require('../middleware/auth');
+const { requireApiKey } = require('../middleware/apiKey');
 
 router.get('/', ctrl.listRooms);
 router.get('/:id', ctrl.getRoom);
-router.post('/', authenticate, requireRole('admin'), ctrl.createRoom);
-router.put('/:id', authenticate, requireRole('admin'), ctrl.updateRoom);
+router.post('/', requireApiKey, ctrl.createRoom);
+router.put('/:id', requireApiKey, ctrl.updateRoom);
 
 module.exports = router;

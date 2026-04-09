@@ -1,16 +1,15 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/extras');
-const { authenticate, requireRole } = require('../middleware/auth');
 const { requireApiKey } = require('../middleware/apiKey');
 
 // Extras catalogue
 router.get('/', requireApiKey, ctrl.listExtras);
-router.post('/', authenticate, requireRole('admin', 'staff'), ctrl.createExtra);
-router.put('/:id', authenticate, requireRole('admin', 'staff'), ctrl.updateExtra);
+router.post('/', requireApiKey, ctrl.createExtra);
+router.put('/:id', requireApiKey, ctrl.updateExtra);
 
-// Booking extras (nested under bookings)
+// Booking extras
 router.get('/booking/:booking_id', requireApiKey, ctrl.listBookingExtras);
 router.post('/booking/:booking_id', requireApiKey, ctrl.addBookingExtra);
-router.delete('/booking/:booking_id/:id', authenticate, requireRole('admin', 'staff'), ctrl.removeBookingExtra);
+router.delete('/booking/:booking_id/:id', requireApiKey, ctrl.removeBookingExtra);
 
 module.exports = router;

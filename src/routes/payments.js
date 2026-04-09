@@ -1,9 +1,9 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/payments');
-const { authenticate, requireRole } = require('../middleware/auth');
+const { requireApiKey } = require('../middleware/apiKey');
 
-router.get('/booking/:booking_id', authenticate, ctrl.listPayments);
-router.post('/', authenticate, requireRole('admin', 'staff'), ctrl.createPayment);
-router.put('/:id', authenticate, requireRole('admin', 'staff'), ctrl.updatePayment);
+router.get('/booking/:booking_id', requireApiKey, ctrl.listPayments);
+router.post('/', requireApiKey, ctrl.createPayment);
+router.put('/:id', requireApiKey, ctrl.updatePayment);
 
 module.exports = router;

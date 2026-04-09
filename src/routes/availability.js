@@ -1,12 +1,12 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/availability');
-const { authenticate, requireRole } = require('../middleware/auth');
+const { requireApiKey } = require('../middleware/apiKey');
 
 router.get('/search', ctrl.searchAvailability);
 router.get('/types', ctrl.getRoomTypeAvailability);
-router.get('/overrides', authenticate, requireRole('admin', 'staff'), ctrl.listOverrides);
+router.get('/overrides', requireApiKey, ctrl.listOverrides);
 router.get('/rooms/:room_id', ctrl.getRoomAvailability);
-router.put('/rooms/:room_id', authenticate, requireRole('admin', 'staff'), ctrl.upsertRoomAvailability);
-router.post('/refresh', authenticate, requireRole('admin'), ctrl.refreshView);
+router.put('/rooms/:room_id', requireApiKey, ctrl.upsertRoomAvailability);
+router.post('/refresh', requireApiKey, ctrl.refreshView);
 
 module.exports = router;
