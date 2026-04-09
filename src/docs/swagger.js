@@ -133,6 +133,9 @@ const swaggerSpec = {
         responses: { 201: { description: 'Guest created' } },
       },
     },
+    '/api/guests/lookup': {
+      get: { tags: ['Guests'], summary: 'Look up guest by email', security: [{ apiKey: [] }], parameters: [{ name: 'email', in: 'query', required: true, schema: { type: 'string', format: 'email' } }], responses: { 200: { description: 'Guest found' }, 404: { description: 'Guest not found' } } },
+    },
     '/api/guests/{id}': {
       get: { tags: ['Guests'], summary: 'Get guest by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Guest' }, 404: { description: 'Not found' } } },
       put: { tags: ['Guests'], summary: 'Update guest', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { first_name: { type: 'string' }, last_name: { type: 'string' }, email: { type: 'string' }, phone: { type: 'string' } } } } } }, responses: { 200: { description: 'Updated guest' } } },
