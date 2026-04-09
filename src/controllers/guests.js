@@ -37,6 +37,18 @@ async function createGuest(req, res, next) {
   }
 }
 
+async function lookupGuest(req, res, next) {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ error: 'email is required' });
+    const { rows } = await pool.query('SELECT * FROM guest WHERE email = $1', [email]);
+    if (!rows.length) return res.status(404).json({ error: 'Guest not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function updateGuest(req, res, next) {
   try {
     const { first_name, last_name, email, phone } = req.body;
@@ -67,4 +79,4 @@ async function deleteGuest(req, res, next) {
   }
 }
 
-module.exports = { listGuests, getGuest, createGuest, updateGuest, deleteGuest };
+module.exports = { listGuests, getGuest, lookupGuest, createGuest, updateGuest, deleteGuest };

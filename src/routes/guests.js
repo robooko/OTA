@@ -4,6 +4,7 @@ const { authenticate, requireRole } = require('../middleware/auth');
 const { requireApiKey } = require('../middleware/apiKey');
 
 router.get('/', authenticate, ctrl.listGuests);
+router.get('/lookup', requireApiKey, ctrl.lookupGuest);
 router.get('/:id', authenticate, ctrl.getGuest);
 router.post('/', requireApiKey, ctrl.createGuest);
 router.put('/:id', authenticate, requireRole('admin', 'staff'), ctrl.updateGuest);
