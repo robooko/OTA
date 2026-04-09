@@ -6,10 +6,13 @@ async function listBookings(req, res, next) {
     const { status, guest_id, from, to } = req.query;
     let query = `
       SELECT b.*, g.first_name, g.last_name, g.email,
-             r.room_number, r.room_type_id
+             r.room_number, r.floor,
+             rt.id AS room_type_id, rt.name AS room_type_name,
+             rt.description AS room_type_description, rt.max_occupancy, rt.base_rate
       FROM booking b
-      JOIN guest g ON g.id = b.guest_id
-      JOIN room  r ON r.id = b.room_id
+      JOIN guest g     ON g.id  = b.guest_id
+      JOIN room r      ON r.id  = b.room_id
+      JOIN room_type rt ON rt.id = r.room_type_id
       WHERE 1=1
     `;
     const params = [];
