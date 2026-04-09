@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/tours');
 const { authenticate, requireRole } = require('../middleware/auth');
+const { requireApiKey } = require('../middleware/apiKey');
 
 // Tours
 router.get('/', ctrl.listTours);
@@ -13,7 +14,7 @@ router.get('/slots/search', ctrl.searchSlots);
 
 // Bookings
 router.get('/bookings', authenticate, requireRole('admin', 'staff'), ctrl.listBookings);
-router.post('/bookings', ctrl.createBooking);
+router.post('/bookings', requireApiKey, ctrl.createBooking);
 router.put('/bookings/:id', authenticate, requireRole('admin', 'staff'), ctrl.updateBooking);
 
 module.exports = router;

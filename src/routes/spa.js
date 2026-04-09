@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/spa');
 const { authenticate, requireRole } = require('../middleware/auth');
+const { requireApiKey } = require('../middleware/apiKey');
 
 // Treatments
 router.get('/treatments', ctrl.listTreatments);
@@ -18,7 +19,7 @@ router.get('/slots/search', ctrl.searchSlots);
 
 // Appointments
 router.get('/appointments', authenticate, requireRole('admin', 'staff'), ctrl.listAppointments);
-router.post('/appointments', ctrl.createAppointment);
+router.post('/appointments', requireApiKey, ctrl.createAppointment);
 router.put('/appointments/:id', authenticate, requireRole('admin', 'staff'), ctrl.updateAppointment);
 
 module.exports = router;
