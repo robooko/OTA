@@ -83,6 +83,27 @@ GROUP BY r.room_type_id, ra.date;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rta_room_type_date ON room_type_availability(room_type_id, date);
 
+-- ── Extras ───────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS extra (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        VARCHAR(100)  NOT NULL,
+  description TEXT,
+  price       NUMERIC(10,2) NOT NULL,
+  status      VARCHAR(20)   DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS booking_extra (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID          NOT NULL REFERENCES booking(id),
+  extra_id   UUID          NOT NULL REFERENCES extra(id),
+  quantity   INT           NOT NULL DEFAULT 1,
+  unit_price NUMERIC(10,2) NOT NULL,
+  created_at TIMESTAMPTZ   DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_booking_extra_booking ON booking_extra(booking_id);
+
 -- ── Auth ─────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS api_user (

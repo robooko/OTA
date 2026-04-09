@@ -24,6 +24,7 @@ const swaggerSpec = {
     { name: 'Tours' },
     { name: 'Equipment' },
     { name: 'Golf' },
+    { name: 'Extras' },
   ],
   components: {
     securitySchemes: {
@@ -302,6 +303,22 @@ const swaggerSpec = {
     '/api/golf/bookings': {
       get: { tags: ['Golf'], summary: 'List golf bookings', parameters: [{ name: 'date', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'status', in: 'query', schema: { type: 'string' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of bookings' } } },
       post: { tags: ['Golf'], summary: 'Book a tee time', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['tee_time_id', 'contact_name', 'players'], properties: { tee_time_id: { type: 'string', format: 'uuid' }, guest_id: { type: 'string', format: 'uuid' }, contact_name: { type: 'string' }, contact_email: { type: 'string' }, contact_phone: { type: 'string' }, players: { type: 'integer' }, notes: { type: 'string' } } } } } }, responses: { 201: { description: 'Booking created with total price' }, 409: { description: 'Not enough spots' } } },
+    },
+
+    // ── Extras ────────────────────────────────────────────────────────────────
+    '/api/extras': {
+      get: { tags: ['Extras'], summary: 'List active extras (API key)', security: [{ apiKey: [] }], responses: { 200: { description: 'Array of extras' } } },
+      post: { tags: ['Extras'], summary: 'Create extra (admin/staff)', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'price'], properties: { name: { type: 'string' }, description: { type: 'string' }, price: { type: 'number' } } } } } }, responses: { 201: { description: 'Created extra' }, 400: { description: 'Validation error' } } },
+    },
+    '/api/extras/{id}': {
+      put: { tags: ['Extras'], summary: 'Update extra (admin/staff)', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, price: { type: 'number' }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated extra' }, 404: { description: 'Not found' } } },
+    },
+    '/api/extras/booking/{booking_id}': {
+      get: { tags: ['Extras'], summary: 'List extras on a booking (API key)', security: [{ apiKey: [] }], parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of booking extras with name and totals' } } },
+      post: { tags: ['Extras'], summary: 'Add extra to booking (API key)', security: [{ apiKey: [] }], parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['extra_id'], properties: { extra_id: { type: 'string', format: 'uuid' }, quantity: { type: 'integer', default: 1 } } } } } }, responses: { 201: { description: 'Extra added with locked unit_price and total' }, 404: { description: 'Extra or booking not found' } } },
+    },
+    '/api/extras/booking/{booking_id}/{id}': {
+      delete: { tags: ['Extras'], summary: 'Remove extra from booking (admin/staff)', parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 204: { description: 'Removed' }, 404: { description: 'Not found' } } },
     },
   },
 };
