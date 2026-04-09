@@ -1,6 +1,8 @@
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./docs/swagger');
 const errorHandler = require('./middleware/errorHandler');
 
 const guestRoutes = require('./routes/guests');
@@ -18,9 +20,11 @@ const golfRoutes = require('./routes/golf');
 
 const app = express();
 
-app.use(helmet());
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(express.json());
+
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 app.use('/api/guests', guestRoutes);
 app.use('/api/room-types', roomTypeRoutes);
