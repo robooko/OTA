@@ -9,7 +9,7 @@ const swaggerSpec = {
     { url: 'https://ota-u6ii.onrender.com', description: 'Production' },
     { url: 'http://localhost:3000', description: 'Local' },
   ],
-  security: [{ bearerAuth: [] }],
+  security: [{ apiKey: [] }],
   tags: [
     { name: 'Auth' },
     { name: 'Guests' },
@@ -28,10 +28,10 @@ const swaggerSpec = {
   ],
   components: {
     securitySchemes: {
-      bearerAuth: {
-        type: 'http',
-        scheme: 'bearer',
-        bearerFormat: 'JWT',
+      apiKey: {
+        type: 'apiKey',
+        in: 'header',
+        name: 'x-api-key',
       },
     },
     schemas: {
