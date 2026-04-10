@@ -158,6 +158,21 @@ async function listOverrides(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function deleteOverride(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { rows } = await pool.query(
+      `UPDATE room_availability
+       SET override_rate = NULL, block_reason = NULL
+       WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Availability record not found' });
+    await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
 async function refreshView(req, res, next) {
   try {
     await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
@@ -173,5 +188,6 @@ module.exports = {
   searchAvailability,
   upsertRoomAvailability,
   listOverrides,
+  deleteOverride,
   refreshView,
 };
