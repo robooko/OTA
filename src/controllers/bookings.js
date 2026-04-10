@@ -8,11 +8,25 @@ async function listBookings(req, res, next) {
       SELECT b.*, g.first_name, g.last_name, g.email,
              r.room_number, r.floor,
              rt.id AS room_type_id, rt.name AS room_type_name,
-             rt.description AS room_type_description, rt.max_occupancy, rt.base_rate
+             rt.description AS room_type_description, rt.max_occupancy, rt.base_rate,
+             COALESCE(
+               json_agg(
+                 json_build_object(
+                   'id', be.id,
+                   'extra_id', be.extra_id,
+                   'name', e.name,
+                   'quantity', be.quantity,
+                   'unit_price', be.unit_price,
+                   'total', (be.quantity * be.unit_price)
+                 )
+               ) FILTER (WHERE be.id IS NOT NULL), '[]'
+             ) AS extras
       FROM booking b
-      JOIN guest g     ON g.id  = b.guest_id
-      JOIN room r      ON r.id  = b.room_id
+      JOIN guest g      ON g.id  = b.guest_id
+      JOIN room r       ON r.id  = b.room_id
       JOIN room_type rt ON rt.id = r.room_type_id
+      LEFT JOIN booking_extra be ON be.booking_id = b.id
+      LEFT JOIN extra e          ON e.id = be.extra_id
       WHERE 1=1
     `;
     const params = [];
@@ -22,6 +36,7 @@ async function listBookings(req, res, next) {
     if (from) { params.push(from); query += ` AND b.check_in >= $${params.length}`; }
     if (to) { params.push(to); query += ` AND b.check_out <= $${params.length}`; }
 
+    query += ' GROUP BY b.id, g.first_name, g.last_name, g.email, r.room_number, r.floor, rt.id, rt.name, rt.description, rt.max_occupancy, rt.base_rate';
     query += ' ORDER BY b.created_at DESC';
     const { rows } = await pool.query(query, params);
     res.json(rows);
