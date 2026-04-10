@@ -3,12 +3,13 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- Guests
 CREATE TABLE IF NOT EXISTS guest (
-  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  first_name VARCHAR(100)  NOT NULL,
-  last_name  VARCHAR(100)  NOT NULL,
-  email      VARCHAR(255)  NOT NULL UNIQUE,
-  phone      VARCHAR(30),
-  created_at TIMESTAMPTZ   DEFAULT now()
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  clerk_user_id VARCHAR(100) UNIQUE,
+  first_name    VARCHAR(100) NOT NULL,
+  last_name     VARCHAR(100) NOT NULL,
+  email         VARCHAR(255) NOT NULL UNIQUE,
+  phone         VARCHAR(30),
+  created_at    TIMESTAMPTZ  DEFAULT now()
 );
 
 -- Room types
