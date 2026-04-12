@@ -19,6 +19,7 @@ const toursRoutes = require('./routes/tours');
 const equipmentRoutes = require('./routes/equipment');
 const golfRoutes = require('./routes/golf');
 const extrasRoutes = require('./routes/extras');
+const roomServiceRoutes = require('./routes/roomService');
 
 const app = express();
 
@@ -43,6 +44,7 @@ app.use('/api/tours', toursRoutes);
 app.use('/api/equipment', equipmentRoutes);
 app.use('/api/golf', golfRoutes);
 app.use('/api/extras', extrasRoutes);
+app.use('/api/room-service', roomServiceRoutes);
 
 app.use(errorHandler);
 

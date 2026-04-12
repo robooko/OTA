@@ -337,3 +337,36 @@ CREATE TABLE IF NOT EXISTS golf_booking (
 
 CREATE INDEX IF NOT EXISTS idx_tee_time_course_date ON tee_time(course_id, tee_date);
 CREATE INDEX IF NOT EXISTS idx_golf_booking_tee     ON golf_booking(tee_time_id);
+
+-- ── Room Service ──────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS room_service_item (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        VARCHAR(100)  NOT NULL,
+  description TEXT,
+  category    VARCHAR(50),
+  price       NUMERIC(10,2) NOT NULL,
+  status      VARCHAR(20)   DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS room_service_order (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id  UUID         NOT NULL REFERENCES booking(id),
+  guest_id    UUID         REFERENCES guest(id),
+  status      VARCHAR(20)  DEFAULT 'pending',
+  notes       TEXT,
+  total_price NUMERIC(10,2) NOT NULL DEFAULT 0,
+  created_at  TIMESTAMPTZ  DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS room_service_order_item (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id    UUID          NOT NULL REFERENCES room_service_order(id) ON DELETE CASCADE,
+  item_id     UUID          REFERENCES room_service_item(id),
+  item_name   VARCHAR(100)  NOT NULL,
+  quantity    INT           NOT NULL DEFAULT 1,
+  unit_price  NUMERIC(10,2) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rs_order_booking ON room_service_order(booking_id);
+CREATE INDEX IF NOT EXISTS idx_rs_order_guest   ON room_service_order(guest_id);
