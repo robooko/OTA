@@ -105,6 +105,27 @@ async function updateGuest(req, res, next) {
   }
 }
 
+async function getGuestSummary(req, res, next) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT
+         COUNT(*)                                            AS total_stays,
+         COALESCE(SUM(total_price), 0)                      AS total_spent,
+         COALESCE(AVG(check_out - check_in), 0)             AS avg_nights,
+         COALESCE(SUM(check_out - check_in), 0)             AS total_nights,
+         MAX(check_in)                                      AS last_stay,
+         COUNT(*) FILTER (WHERE status = 'confirmed')       AS confirmed,
+         COUNT(*) FILTER (WHERE status = 'cancelled')       AS cancelled
+       FROM booking
+       WHERE guest_id = $1`,
+      [req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function deleteGuest(req, res, next) {
   try {
     const { rows } = await pool.query('DELETE FROM guest WHERE id = $1 RETURNING id', [req.params.id]);
@@ -115,4 +136,4 @@ async function deleteGuest(req, res, next) {
   }
 }
 
-module.exports = { listGuests, getGuest, lookupGuest, createGuest, updateGuest, deleteGuest };
+module.exports = { listGuests, getGuest, lookupGuest, getGuestSummary, createGuest, updateGuest, deleteGuest };
