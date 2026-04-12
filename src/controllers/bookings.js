@@ -3,7 +3,7 @@ const { isValidDate } = require('../middleware/validate');
 
 async function listBookings(req, res, next) {
   try {
-    const { status, guest_id, from, to } = req.query;
+    const { status, guest_id, from, to, skip, take } = req.query;
     let query = `
       SELECT b.*, g.first_name, g.last_name, g.email,
              r.room_number, r.floor,
@@ -38,6 +38,10 @@ async function listBookings(req, res, next) {
 
     query += ' GROUP BY b.id, g.first_name, g.last_name, g.email, r.room_number, r.floor, rt.id, rt.name, rt.description, rt.max_occupancy, rt.base_rate';
     query += ' ORDER BY b.created_at DESC';
+
+    if (take) { params.push(parseInt(take, 10)); query += ` LIMIT $${params.length}`; }
+    if (skip) { params.push(parseInt(skip, 10)); query += ` OFFSET $${params.length}`; }
+
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) {
