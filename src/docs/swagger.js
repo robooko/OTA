@@ -130,6 +130,7 @@ const swaggerSpec = {
           status: { type: 'string', enum: ['pending', 'confirmed', 'preparing', 'delivered', 'cancelled'] },
           notes: { type: 'string' },
           total_price: { type: 'number' },
+          scheduled_for: { type: 'string', format: 'date-time', description: 'Optional delivery time e.g. 07:30 next morning' },
           created_at: { type: 'string', format: 'date-time' },
           items: { type: 'array', items: { $ref: '#/components/schemas/RoomServiceOrderItem' } },
         },
@@ -390,7 +391,7 @@ const swaggerSpec = {
     },
     '/api/room-service/orders': {
       get: { tags: ['Room Service'], summary: 'List orders', parameters: [{ name: 'booking_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'status', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Array of orders with line items' } } },
-      post: { tags: ['Room Service'], summary: 'Place an order', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['booking_id', 'items'], properties: { booking_id: { type: 'string', format: 'uuid' }, guest_id: { type: 'string', format: 'uuid' }, notes: { type: 'string' }, items: { type: 'array', items: { type: 'object', required: ['item_id'], properties: { item_id: { type: 'string', format: 'uuid' }, quantity: { type: 'integer', default: 1 } } } } } } } } }, responses: { 201: { description: 'Order created with locked prices' }, 404: { description: 'Booking or item not found' } } },
+      post: { tags: ['Room Service'], summary: 'Place an order', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['booking_id', 'items'], properties: { booking_id: { type: 'string', format: 'uuid' }, guest_id: { type: 'string', format: 'uuid' }, notes: { type: 'string' }, scheduled_for: { type: 'string', format: 'date-time', description: 'Optional scheduled delivery time' }, items: { type: 'array', items: { type: 'object', required: ['item_id'], properties: { item_id: { type: 'string', format: 'uuid' }, quantity: { type: 'integer', default: 1 } } } } } } } } }, responses: { 201: { description: 'Order created with locked prices' }, 404: { description: 'Booking or item not found' } } },
     },
     '/api/room-service/orders/{id}': {
       get: { tags: ['Room Service'], summary: 'Get order by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Order with line items' }, 404: { description: 'Not found' } } },

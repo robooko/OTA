@@ -99,7 +99,7 @@ async function getOrder(req, res, next) {
 
 async function createOrder(req, res, next) {
   try {
-    const { booking_id, guest_id, items, notes } = req.body;
+    const { booking_id, guest_id, items, notes, scheduled_for } = req.body;
     if (!booking_id || !Array.isArray(items) || !items.length) {
       return res.status(400).json({ error: 'booking_id and items array are required' });
     }
@@ -135,9 +135,9 @@ async function createOrder(req, res, next) {
 
       // Create order
       const { rows: order } = await client.query(
-        `INSERT INTO room_service_order (booking_id, guest_id, notes, total_price)
-         VALUES ($1, $2, $3, $4) RETURNING *`,
-        [booking_id, guest_id || null, notes || null, total]
+        `INSERT INTO room_service_order (booking_id, guest_id, notes, scheduled_for, total_price)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [booking_id, guest_id || null, notes || null, scheduled_for || null, total]
       );
 
       // Insert line items

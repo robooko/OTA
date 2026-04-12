@@ -353,10 +353,11 @@ CREATE TABLE IF NOT EXISTS room_service_order (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   booking_id  UUID         NOT NULL REFERENCES booking(id),
   guest_id    UUID         REFERENCES guest(id),
-  status      VARCHAR(20)  DEFAULT 'pending',
-  notes       TEXT,
-  total_price NUMERIC(10,2) NOT NULL DEFAULT 0,
-  created_at  TIMESTAMPTZ  DEFAULT now()
+  status         VARCHAR(20)  DEFAULT 'pending',
+  notes          TEXT,
+  scheduled_for  TIMESTAMPTZ,
+  total_price    NUMERIC(10,2) NOT NULL DEFAULT 0,
+  created_at     TIMESTAMPTZ  DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS room_service_order_item (
