@@ -99,6 +99,41 @@ const swaggerSpec = {
           status: { type: 'string', enum: ['active', 'inactive'] },
         },
       },
+      RoomServiceItem: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          name: { type: 'string' },
+          description: { type: 'string' },
+          category: { type: 'string' },
+          price: { type: 'number' },
+          status: { type: 'string', enum: ['active', 'inactive'] },
+        },
+      },
+      RoomServiceOrderItem: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          item_id: { type: 'string', format: 'uuid' },
+          item_name: { type: 'string' },
+          quantity: { type: 'integer' },
+          unit_price: { type: 'number' },
+          total: { type: 'number' },
+        },
+      },
+      RoomServiceOrder: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          booking_id: { type: 'string', format: 'uuid' },
+          guest_id: { type: 'string', format: 'uuid' },
+          status: { type: 'string', enum: ['pending', 'confirmed', 'preparing', 'delivered', 'cancelled'] },
+          notes: { type: 'string' },
+          total_price: { type: 'number' },
+          created_at: { type: 'string', format: 'date-time' },
+          items: { type: 'array', items: { $ref: '#/components/schemas/RoomServiceOrderItem' } },
+        },
+      },
       BookingExtra: {
         type: 'object',
         properties: {
