@@ -109,17 +109,24 @@ async function getGuestSummary(req, res, next) {
   try {
     const { rows } = await pool.query(
       `SELECT
-         COUNT(DISTINCT b.id)                                       AS total_stays,
-         COALESCE(SUM(b.total_price), 0)                            AS total_spent,
-         COALESCE(AVG(b.check_out - b.check_in), 0)                 AS avg_nights,
-         COALESCE(SUM(b.check_out - b.check_in), 0)                 AS total_nights,
-         MAX(b.check_in)                                            AS last_stay,
-         COUNT(DISTINCT b.id) FILTER (WHERE b.status = 'confirmed') AS confirmed,
-         COUNT(DISTINCT b.id) FILTER (WHERE b.status = 'cancelled') AS cancelled,
-         COALESCE(SUM(be.quantity * be.unit_price), 0)              AS total_extras_spent,
-         COUNT(DISTINCT be.id)                                      AS total_extras
+         COUNT(*)                                            AS total_stays,
+         COALESCE(SUM(b.total_price), 0)                    AS total_spent,
+         COALESCE(AVG(b.check_out - b.check_in), 0)         AS avg_nights,
+         COALESCE(SUM(b.check_out - b.check_in), 0)         AS total_nights,
+         MAX(b.check_in)                                    AS last_stay,
+         COUNT(*) FILTER (WHERE b.status = 'confirmed')     AS confirmed,
+         COUNT(*) FILTER (WHERE b.status = 'cancelled')     AS cancelled,
+         COALESCE((
+           SELECT SUM(be.quantity * be.unit_price)
+           FROM booking_extra be
+           WHERE be.booking_id IN (SELECT id FROM booking WHERE guest_id = $1)
+         ), 0)                                              AS total_extras_spent,
+         COALESCE((
+           SELECT COUNT(*)
+           FROM booking_extra be
+           WHERE be.booking_id IN (SELECT id FROM booking WHERE guest_id = $1)
+         ), 0)                                              AS total_extras
        FROM booking b
-       LEFT JOIN booking_extra be ON be.booking_id = b.id
        WHERE b.guest_id = $1`,
       [req.params.id]
     );
