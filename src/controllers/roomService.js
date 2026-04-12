@@ -49,7 +49,7 @@ async function updateItem(req, res, next) {
 
 async function listOrders(req, res, next) {
   try {
-    const { booking_id, guest_id, status } = req.query;
+    const { booking_id, guest_id, status, skip, take } = req.query;
     let query = `
       SELECT o.*,
              json_agg(json_build_object(
@@ -69,6 +69,8 @@ async function listOrders(req, res, next) {
     if (guest_id)   { params.push(guest_id);   query += ` AND o.guest_id = $${params.length}`; }
     if (status)     { params.push(status);     query += ` AND o.status = $${params.length}`; }
     query += ' GROUP BY o.id ORDER BY o.created_at DESC';
+    if (take) { params.push(parseInt(take, 10)); query += ` LIMIT $${params.length}`; }
+    if (skip) { params.push(parseInt(skip, 10)); query += ` OFFSET $${params.length}`; }
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) { next(err); }
