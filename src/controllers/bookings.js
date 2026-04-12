@@ -36,14 +36,35 @@ async function listBookings(req, res, next) {
     if (from) { params.push(from); query += ` AND b.check_in >= $${params.length}`; }
     if (to) { params.push(to); query += ` AND b.check_out <= $${params.length}`; }
 
+    // Count query (same filters, no pagination)
+    const countQuery = `SELECT COUNT(DISTINCT b.id) FROM booking b
+      JOIN guest g      ON g.id  = b.guest_id
+      JOIN room r       ON r.id  = b.room_id
+      JOIN room_type rt ON rt.id = r.room_type_id
+      WHERE 1=1
+      ${status  ? `AND b.status = $1` : ''}
+      ${guest_id ? `AND b.guest_id = $${status ? 2 : 1}` : ''}
+      ${from    ? `AND b.check_in >= $${params.filter((_, i) => i < (status ? 1 : 0) + (guest_id ? 1 : 0)).length + 1}` : ''}
+      ${to      ? `AND b.check_out <= $${params.filter((_, i) => i < (status ? 1 : 0) + (guest_id ? 1 : 0) + (from ? 1 : 0)).length + 1}` : ''}
+    `;
+
     query += ' GROUP BY b.id, g.first_name, g.last_name, g.email, r.room_number, r.floor, rt.id, rt.name, rt.description, rt.max_occupancy, rt.base_rate';
     query += ' ORDER BY b.created_at DESC';
 
     if (take) { params.push(parseInt(take, 10)); query += ` LIMIT $${params.length}`; }
     if (skip) { params.push(parseInt(skip, 10)); query += ` OFFSET $${params.length}`; }
 
-    const { rows } = await pool.query(query, params);
-    res.json(rows);
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      pool.query(query, params),
+      pool.query(`SELECT COUNT(DISTINCT b.id) AS total FROM booking b WHERE 1=1
+        ${status   ? ` AND b.status = $1` : ''}
+        ${guest_id ? ` AND b.guest_id = $${status ? 2 : 1}` : ''}
+        ${from     ? ` AND b.check_in >= $${[status, guest_id].filter(Boolean).length + 1}` : ''}
+        ${to       ? ` AND b.check_out <= $${[status, guest_id, from].filter(Boolean).length + 1}` : ''}
+      `, [status, guest_id, from, to].filter(Boolean))
+    ]);
+
+    res.json({ total: parseInt(countRows[0].total, 10), data: rows });
   } catch (err) {
     next(err);
   }

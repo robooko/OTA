@@ -69,10 +69,19 @@ async function listOrders(req, res, next) {
     if (guest_id)   { params.push(guest_id);   query += ` AND o.guest_id = $${params.length}`; }
     if (status)     { params.push(status);     query += ` AND o.status = $${params.length}`; }
     query += ' GROUP BY o.id ORDER BY o.created_at DESC';
+
+    const [{ rows: countRows }] = await Promise.all([
+      pool.query(`SELECT COUNT(DISTINCT o.id) AS total FROM room_service_order o WHERE 1=1
+        ${booking_id ? ` AND o.booking_id = $1` : ''}
+        ${guest_id   ? ` AND o.guest_id = $${booking_id ? 2 : 1}` : ''}
+        ${status     ? ` AND o.status = $${[booking_id, guest_id].filter(Boolean).length + 1}` : ''}
+      `, [booking_id, guest_id, status].filter(Boolean))
+    ]);
+
     if (take) { params.push(parseInt(take, 10)); query += ` LIMIT $${params.length}`; }
     if (skip) { params.push(parseInt(skip, 10)); query += ` OFFSET $${params.length}`; }
     const { rows } = await pool.query(query, params);
-    res.json(rows);
+    res.json({ total: parseInt(countRows[0].total, 10), data: rows });
   } catch (err) { next(err); }
 }
 
