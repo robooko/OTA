@@ -98,7 +98,7 @@ async function listHires(req, res, next) {
 }
 
 async function createHire(req, res, next) {
-  const { equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, quantity, notes, golf_booking_id } = req.body;
+  const { equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, quantity, notes, golf_booking_id, rate_type = 'per_day', duration = 1 } = req.body;
   if (!equipment_id || !contact_name || !hire_date || !quantity) {
     return res.status(400).json({ error: 'equipment_id, contact_name, hire_date, and quantity are required' });
   }
@@ -125,12 +125,13 @@ async function createHire(req, res, next) {
     }
 
     const eq = eqRes.rows[0];
-    const total_price = (parseFloat(eq.price_per_day || 0) * quantity).toFixed(2);
+    const rate = rate_type === 'per_hour' ? parseFloat(eq.price_per_hour || 0) : parseFloat(eq.price_per_day || 0);
+    const total_price = (rate * quantity * duration).toFixed(2);
 
     const { rows } = await client.query(
-      `INSERT INTO equipment_hire (equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, quantity, notes, golf_booking_id, total_price)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [equipment_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, hire_date, quantity, notes ?? null, golf_booking_id ?? null, total_price]
+      `INSERT INTO equipment_hire (equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, quantity, rate_type, duration, notes, golf_booking_id, total_price)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+      [equipment_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, hire_date, quantity, rate_type, duration, notes ?? null, golf_booking_id ?? null, total_price]
     );
 
     await client.query('COMMIT');
