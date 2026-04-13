@@ -111,16 +111,23 @@ async function listBookings(req, res, next) {
   try {
     const { date, status, guest_id } = req.query;
     let query = `
-      SELECT gb.*, tt.tee_date, tt.tee_time, gc.name AS course_name, gc.holes, gc.price_per_player
+      SELECT gb.*, tt.tee_date, tt.tee_time, gc.name AS course_name, gc.holes, gc.price_per_player,
+             COALESCE(json_agg(json_build_object(
+               'id', gbi.id, 'item_id', gbi.item_id, 'item_name', gbi.item_name,
+               'quantity', gbi.quantity, 'unit_price', gbi.unit_price,
+               'total', (gbi.quantity * gbi.unit_price)
+             )) FILTER (WHERE gbi.id IS NOT NULL), '[]') AS proshop_items
       FROM golf_booking gb
       JOIN tee_time tt ON tt.id = gb.tee_time_id
       JOIN golf_course gc ON gc.id = tt.course_id
+      LEFT JOIN golf_booking_item gbi ON gbi.booking_id = gb.id
       WHERE 1=1
     `;
     const params = [];
     if (date) { params.push(date); query += ` AND tt.tee_date = $${params.length}`; }
     if (status) { params.push(status); query += ` AND gb.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND gb.guest_id = $${params.length}`; }
+    query += ' GROUP BY gb.id, tt.tee_date, tt.tee_time, gc.name, gc.holes, gc.price_per_player';
     query += ' ORDER BY tt.tee_date, tt.tee_time';
     const { rows } = await pool.query(query, params);
     res.json(rows);
