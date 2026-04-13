@@ -109,7 +109,7 @@ async function searchTeeTimes(req, res, next) {
 
 async function listBookings(req, res, next) {
   try {
-    const { date, status, guest_id } = req.query;
+    const { date, status, guest_id, skip, take } = req.query;
     let query = `
       SELECT gb.*, tt.tee_date, tt.tee_time, gc.name AS course_name, gc.holes, gc.price_per_player,
              COALESCE(json_agg(json_build_object(
@@ -129,8 +129,21 @@ async function listBookings(req, res, next) {
     if (guest_id) { params.push(guest_id); query += ` AND gb.guest_id = $${params.length}`; }
     query += ' GROUP BY gb.id, tt.tee_date, tt.tee_time, gc.name, gc.holes, gc.price_per_player';
     query += ' ORDER BY tt.tee_date, tt.tee_time';
+
+    const [{ rows: countRows }] = await Promise.all([
+      pool.query(`SELECT COUNT(DISTINCT gb.id) AS total FROM golf_booking gb
+        JOIN tee_time tt ON tt.id = gb.tee_time_id
+        WHERE 1=1
+        ${date     ? ` AND tt.tee_date = $1` : ''}
+        ${status   ? ` AND gb.status = $${date ? 2 : 1}` : ''}
+        ${guest_id ? ` AND gb.guest_id = $${[date, status].filter(Boolean).length + 1}` : ''}
+      `, [date, status, guest_id].filter(Boolean))
+    ]);
+
+    if (take) { params.push(parseInt(take, 10)); query += ` LIMIT $${params.length}`; }
+    if (skip) { params.push(parseInt(skip, 10)); query += ` OFFSET $${params.length}`; }
     const { rows } = await pool.query(query, params);
-    res.json(rows);
+    res.json({ total: parseInt(countRows[0].total, 10), data: rows });
   } catch (err) { next(err); }
 }
 
