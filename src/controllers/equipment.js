@@ -79,7 +79,7 @@ async function searchEquipment(req, res, next) {
 
 async function listHires(req, res, next) {
   try {
-    const { date, status, guest_id } = req.query;
+    const { date, status, guest_id, golf_booking_id } = req.query;
     let query = `
       SELECT eh.*, e.name AS equipment_name, e.type, e.price_per_day, e.price_per_hour
       FROM equipment_hire eh
@@ -87,9 +87,10 @@ async function listHires(req, res, next) {
       WHERE 1=1
     `;
     const params = [];
-    if (date) { params.push(date); query += ` AND eh.hire_date = $${params.length}`; }
-    if (status) { params.push(status); query += ` AND eh.status = $${params.length}`; }
-    if (guest_id) { params.push(guest_id); query += ` AND eh.guest_id = $${params.length}`; }
+    if (date)            { params.push(date);            query += ` AND eh.hire_date = $${params.length}`; }
+    if (status)          { params.push(status);          query += ` AND eh.status = $${params.length}`; }
+    if (guest_id)        { params.push(guest_id);        query += ` AND eh.guest_id = $${params.length}`; }
+    if (golf_booking_id) { params.push(golf_booking_id); query += ` AND eh.golf_booking_id = $${params.length}`; }
     query += ' ORDER BY eh.hire_date, e.name';
     const { rows } = await pool.query(query, params);
     res.json(rows);
@@ -97,7 +98,7 @@ async function listHires(req, res, next) {
 }
 
 async function createHire(req, res, next) {
-  const { equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, quantity, notes } = req.body;
+  const { equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, quantity, notes, golf_booking_id } = req.body;
   if (!equipment_id || !contact_name || !hire_date || !quantity) {
     return res.status(400).json({ error: 'equipment_id, contact_name, hire_date, and quantity are required' });
   }
@@ -124,9 +125,9 @@ async function createHire(req, res, next) {
     }
 
     const { rows } = await client.query(
-      `INSERT INTO equipment_hire (equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, quantity, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [equipment_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, hire_date, quantity, notes ?? null]
+      `INSERT INTO equipment_hire (equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, quantity, notes, golf_booking_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [equipment_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, hire_date, quantity, notes ?? null, golf_booking_id ?? null]
     );
 
     await client.query('COMMIT');

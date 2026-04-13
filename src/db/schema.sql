@@ -292,9 +292,10 @@ CREATE TABLE IF NOT EXISTS equipment_hire (
   contact_phone VARCHAR(30),
   hire_date     DATE          NOT NULL,
   quantity      INT           NOT NULL,
-  status        VARCHAR(20)   DEFAULT 'confirmed',
-  notes         TEXT,
-  created_at    TIMESTAMPTZ   DEFAULT now()
+  status           VARCHAR(20)   DEFAULT 'confirmed',
+  notes            TEXT,
+  golf_booking_id  UUID          REFERENCES golf_booking(id),
+  created_at       TIMESTAMPTZ   DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_equipment_hire_date ON equipment_hire(hire_date);
