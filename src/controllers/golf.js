@@ -75,9 +75,13 @@ async function bulkCreateTeeTimes(req, res, next) {
 
 async function searchTeeTimes(req, res, next) {
   try {
-    const { date, course_id, players } = req.query;
-    if (!date) return res.status(400).json({ error: 'date is required' });
-    if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
+    const { date, from, to, course_id, players } = req.query;
+
+    // Support single date or date range
+    const start = from || date;
+    const end = to || date;
+    if (!start) return res.status(400).json({ error: 'date or from/to is required' });
+    if (!isValidDate(start) || !isValidDate(end)) return res.status(400).json({ error: 'Invalid date format' });
 
     let query = `
       SELECT tt.*, gc.name AS course_name, gc.holes, gc.price_per_player,
@@ -86,15 +90,16 @@ async function searchTeeTimes(req, res, next) {
       FROM tee_time tt
       JOIN golf_course gc ON gc.id = tt.course_id
       LEFT JOIN golf_booking gb ON gb.tee_time_id = tt.id
-      WHERE tt.tee_date = $1
+      WHERE tt.tee_date >= $1
+        AND tt.tee_date <= $2
         AND tt.status = 'active'
         AND gc.status = 'active'
     `;
-    const params = [date];
+    const params = [start, end];
     if (course_id) { params.push(course_id); query += ` AND tt.course_id = $${params.length}`; }
     query += ' GROUP BY tt.id, gc.id';
     if (players) { query += ` HAVING tt.max_players - COALESCE(SUM(gb.players) FILTER (WHERE gb.status != 'cancelled'), 0) >= ${parseInt(players, 10)}`; }
-    query += ' ORDER BY tt.tee_time';
+    query += ' ORDER BY tt.tee_date, tt.tee_time';
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) { next(err); }
