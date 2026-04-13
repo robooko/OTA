@@ -124,10 +124,13 @@ async function createHire(req, res, next) {
       return res.status(409).json({ error: `Only ${available} available on this date` });
     }
 
+    const eq = eqRes.rows[0];
+    const total_price = (parseFloat(eq.price_per_day || 0) * quantity).toFixed(2);
+
     const { rows } = await client.query(
-      `INSERT INTO equipment_hire (equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, quantity, notes, golf_booking_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [equipment_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, hire_date, quantity, notes ?? null, golf_booking_id ?? null]
+      `INSERT INTO equipment_hire (equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, quantity, notes, golf_booking_id, total_price)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [equipment_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, hire_date, quantity, notes ?? null, golf_booking_id ?? null, total_price]
     );
 
     await client.query('COMMIT');

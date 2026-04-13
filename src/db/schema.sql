@@ -295,6 +295,7 @@ CREATE TABLE IF NOT EXISTS equipment_hire (
   status           VARCHAR(20)   DEFAULT 'confirmed',
   notes            TEXT,
   golf_booking_id  UUID          REFERENCES golf_booking(id),
+  total_price      NUMERIC(10,2),
   created_at       TIMESTAMPTZ   DEFAULT now()
 );
 
