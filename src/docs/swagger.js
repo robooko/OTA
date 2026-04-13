@@ -26,6 +26,7 @@ const swaggerSpec = {
     { name: 'Golf' },
     { name: 'Extras' },
     { name: 'Room Service' },
+    { name: 'Pro Shop' },
   ],
   components: {
     securitySchemes: {
@@ -398,6 +399,21 @@ const swaggerSpec = {
     },
     '/api/room-service/orders/{id}/status': {
       put: { tags: ['Room Service'], summary: 'Update order status', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['pending', 'confirmed', 'preparing', 'delivered', 'cancelled'] } } } } } }, responses: { 200: { description: 'Updated order' }, 404: { description: 'Not found' } } },
+    },
+    // ── Pro Shop ──────────────────────────────────────────────────────────────
+    '/api/proshop/items': {
+      get: { tags: ['Pro Shop'], summary: 'List catalogue items', security: [], parameters: [{ name: 'category', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Array of items' } } },
+      post: { tags: ['Pro Shop'], summary: 'Create catalogue item', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'price'], properties: { name: { type: 'string' }, description: { type: 'string' }, category: { type: 'string' }, price: { type: 'number' } } } } } }, responses: { 201: { description: 'Created' } } },
+    },
+    '/api/proshop/items/{id}': {
+      put: { tags: ['Pro Shop'], summary: 'Update catalogue item', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, category: { type: 'string' }, price: { type: 'number' }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Not found' } } },
+    },
+    '/api/proshop/booking/{booking_id}': {
+      get: { tags: ['Pro Shop'], summary: 'List items on a golf booking', parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of items with totals' } } },
+      post: { tags: ['Pro Shop'], summary: 'Add item to golf booking', parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['item_id'], properties: { item_id: { type: 'string', format: 'uuid' }, quantity: { type: 'integer', default: 1 } } } } } }, responses: { 201: { description: 'Item added with locked unit_price' }, 404: { description: 'Item or booking not found' } } },
+    },
+    '/api/proshop/booking/{booking_id}/{id}': {
+      delete: { tags: ['Pro Shop'], summary: 'Remove item from golf booking', parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 204: { description: 'Removed' }, 404: { description: 'Not found' } } },
     },
   },
 };
