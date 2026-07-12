@@ -137,6 +137,23 @@ an explicit query param (this endpoint stays public).
 - `requireRole` is unchanged, and gets applied consistently to
   admin-only write endpoints across modules where it isn't already.
 
+### Amendment: removing the global `requireApiKey` gate
+
+Discovered during planning (not visible from a grep for `authenticate`/
+`requireRole` alone): nearly every route — guests, rooms, room types,
+availability writes, bookings, payments, extras — is currently gated by a
+separate `requireApiKey` middleware (`src/middleware/apiKey.js`), a single
+global shared secret from `process.env.API_KEY` checked via the
+`X-Api-Key` header. It is independent of the JWT/`api_user` system and
+doesn't identify a caller or property — only "is this a trusted caller at
+all."
+
+Resolution: `requireApiKey` is removed from every route it currently
+guards, replaced by `authenticate` (JWT) per the pattern above. The
+`apiKey.js` middleware file, its usages, and the `API_KEY` env var become
+dead and are deleted as part of this work. Only `GET /api/availability/search`
+stays public with no gate at all.
+
 ## Query-scoping pattern in controllers
 
 - Every query touching a scoped table adds `property_id = req.property_id`
