@@ -3,8 +3,8 @@ const pool = require('../db');
 async function listPayments(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT * FROM payment WHERE booking_id = $1 ORDER BY paid_at DESC NULLS LAST',
-      [req.params.booking_id]
+      'SELECT * FROM payment WHERE booking_id = $1 AND property_id = $2 ORDER BY paid_at DESC NULLS LAST',
+      [req.params.booking_id, req.property_id]
     );
     res.json(rows);
   } catch (err) {
@@ -19,16 +19,19 @@ async function createPayment(req, res, next) {
       return res.status(400).json({ error: 'booking_id and amount are required' });
     }
 
-    // Verify booking exists
-    const bookingCheck = await pool.query('SELECT id FROM booking WHERE id = $1', [booking_id]);
+    // Verify booking exists and belongs to the caller's property
+    const bookingCheck = await pool.query(
+      'SELECT id FROM booking WHERE id = $1 AND property_id = $2', [booking_id, req.property_id]
+    );
     if (!bookingCheck.rows.length) {
       return res.status(404).json({ error: 'Booking not found' });
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO payment (booking_id, amount, method, status, paid_at)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      `INSERT INTO payment (property_id, booking_id, amount, method, status, paid_at)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
       [
+        req.property_id,
         booking_id,
         amount,
         method || null,
@@ -53,8 +56,8 @@ async function updatePayment(req, res, next) {
          status  = COALESCE($1, status),
          method  = COALESCE($2, method),
          paid_at = COALESCE($3, paid_at)
-       WHERE id = $4 RETURNING *`,
-      [status, method, paidAt ?? null, req.params.id]
+       WHERE id = $4 AND property_id = $5 RETURNING *`,
+      [status, method, paidAt ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Payment not found' });
     res.json(rows[0]);

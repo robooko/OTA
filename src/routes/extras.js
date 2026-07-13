@@ -1,15 +1,15 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/extras');
-const { requireApiKey } = require('../middleware/apiKey');
+const { authenticate } = require('../middleware/auth');
 
 // Extras catalogue
-router.get('/', requireApiKey, ctrl.listExtras);
-router.post('/', requireApiKey, ctrl.createExtra);
-router.put('/:id', requireApiKey, ctrl.updateExtra);
+router.get('/', authenticate, ctrl.listExtras);
+router.post('/', authenticate, ctrl.createExtra);
+router.put('/:id', authenticate, ctrl.updateExtra);
 
 // Booking extras
-router.get('/booking/:booking_id', requireApiKey, ctrl.listBookingExtras);
-router.post('/booking/:booking_id', requireApiKey, ctrl.addBookingExtra);
-router.delete('/booking/:booking_id/:id', requireApiKey, ctrl.removeBookingExtra);
+router.get('/booking/:booking_id', authenticate, ctrl.listBookingExtras);
+router.post('/booking/:booking_id', authenticate, ctrl.addBookingExtra);
+router.delete('/booking/:booking_id/:id', authenticate, ctrl.removeBookingExtra);
 
 module.exports = router;

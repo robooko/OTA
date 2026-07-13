@@ -4,7 +4,10 @@ const pool = require('../db');
 
 async function listExtras(req, res, next) {
   try {
-    const { rows } = await pool.query("SELECT * FROM extra WHERE status = 'active' ORDER BY name");
+    const { rows } = await pool.query(
+      "SELECT * FROM extra WHERE status = 'active' AND property_id = $1 ORDER BY name",
+      [req.property_id]
+    );
     res.json(rows);
   } catch (err) { next(err); }
 }
@@ -14,8 +17,8 @@ async function createExtra(req, res, next) {
     const { name, description, price } = req.body;
     if (!name || !price) return res.status(400).json({ error: 'name and price are required' });
     const { rows } = await pool.query(
-      `INSERT INTO extra (name, description, price) VALUES ($1, $2, $3) RETURNING *`,
-      [name, description ?? null, price]
+      `INSERT INTO extra (property_id, name, description, price) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [req.property_id, name, description ?? null, price]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -30,8 +33,8 @@ async function updateExtra(req, res, next) {
          description = COALESCE($2, description),
          price       = COALESCE($3, price),
          status      = COALESCE($4, status)
-       WHERE id = $5 RETURNING *`,
-      [name, description, price, status, req.params.id]
+       WHERE id = $5 AND property_id = $6 RETURNING *`,
+      [name, description, price, status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Extra not found' });
     res.json(rows[0]);
@@ -42,6 +45,11 @@ async function updateExtra(req, res, next) {
 
 async function listBookingExtras(req, res, next) {
   try {
+    const bookingCheck = await pool.query(
+      'SELECT id FROM booking WHERE id = $1 AND property_id = $2', [req.params.booking_id, req.property_id]
+    );
+    if (!bookingCheck.rows.length) return res.status(404).json({ error: 'Booking not found' });
+
     const { rows } = await pool.query(
       `SELECT be.*, e.name, e.description
        FROM booking_extra be
@@ -60,10 +68,15 @@ async function addBookingExtra(req, res, next) {
     const { extra_id, quantity } = req.body;
     if (!extra_id) return res.status(400).json({ error: 'extra_id is required' });
 
-    const extraRes = await pool.query("SELECT * FROM extra WHERE id = $1 AND status = 'active'", [extra_id]);
+    const extraRes = await pool.query(
+      "SELECT * FROM extra WHERE id = $1 AND status = 'active' AND property_id = $2",
+      [extra_id, req.property_id]
+    );
     if (!extraRes.rows.length) return res.status(404).json({ error: 'Extra not found' });
 
-    const bookingRes = await pool.query('SELECT id FROM booking WHERE id = $1', [booking_id]);
+    const bookingRes = await pool.query(
+      'SELECT id FROM booking WHERE id = $1 AND property_id = $2', [booking_id, req.property_id]
+    );
     if (!bookingRes.rows.length) return res.status(404).json({ error: 'Booking not found' });
 
     const unit_price = extraRes.rows[0].price;
@@ -81,8 +94,12 @@ async function addBookingExtra(req, res, next) {
 async function removeBookingExtra(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'DELETE FROM booking_extra WHERE id = $1 AND booking_id = $2 RETURNING id',
-      [req.params.id, req.params.booking_id]
+      `DELETE FROM booking_extra be
+       USING booking b
+       WHERE be.id = $1 AND be.booking_id = $2
+         AND b.id = be.booking_id AND b.property_id = $3
+       RETURNING be.id`,
+      [req.params.id, req.params.booking_id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Extra not found on this booking' });
     res.status(204).end();
