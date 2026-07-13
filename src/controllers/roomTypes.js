@@ -2,7 +2,10 @@ const pool = require('../db');
 
 async function listRoomTypes(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT * FROM room_type ORDER BY name');
+    const { rows } = await pool.query(
+      'SELECT * FROM room_type WHERE property_id = $1 ORDER BY name',
+      [req.property_id]
+    );
     res.json(rows);
   } catch (err) {
     next(err);
@@ -11,7 +14,10 @@ async function listRoomTypes(req, res, next) {
 
 async function getRoomType(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT * FROM room_type WHERE id = $1', [req.params.id]);
+    const { rows } = await pool.query(
+      'SELECT * FROM room_type WHERE id = $1 AND property_id = $2',
+      [req.params.id, req.property_id]
+    );
     if (!rows.length) return res.status(404).json({ error: 'Room type not found' });
     res.json(rows[0]);
   } catch (err) {
@@ -26,9 +32,9 @@ async function createRoomType(req, res, next) {
       return res.status(400).json({ error: 'name, max_occupancy, and base_rate are required' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO room_type (name, description, max_occupancy, base_rate)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [name, description || null, max_occupancy, base_rate]
+      `INSERT INTO room_type (property_id, name, description, max_occupancy, base_rate)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [req.property_id, name, description || null, max_occupancy, base_rate]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -45,8 +51,8 @@ async function updateRoomType(req, res, next) {
          description   = COALESCE($2, description),
          max_occupancy = COALESCE($3, max_occupancy),
          base_rate     = COALESCE($4, base_rate)
-       WHERE id = $5 RETURNING *`,
-      [name, description, max_occupancy, base_rate, req.params.id]
+       WHERE id = $5 AND property_id = $6 RETURNING *`,
+      [name, description, max_occupancy, base_rate, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Room type not found' });
     res.json(rows[0]);

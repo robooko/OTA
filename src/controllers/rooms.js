@@ -7,11 +7,12 @@ async function listRooms(req, res, next) {
       SELECT r.*, rt.name AS room_type_name
       FROM room r
       JOIN room_type rt ON rt.id = r.room_type_id
+      WHERE r.property_id = $1
     `;
-    const params = [];
+    const params = [req.property_id];
     if (room_type_id) {
-      query += ' WHERE r.room_type_id = $1';
       params.push(room_type_id);
+      query += ` AND r.room_type_id = $${params.length}`;
     }
     query += ' ORDER BY r.room_number';
     const { rows } = await pool.query(query, params);
@@ -27,8 +28,8 @@ async function getRoom(req, res, next) {
       `SELECT r.*, rt.name AS room_type_name
        FROM room r
        JOIN room_type rt ON rt.id = r.room_type_id
-       WHERE r.id = $1`,
-      [req.params.id]
+       WHERE r.id = $1 AND r.property_id = $2`,
+      [req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Room not found' });
     res.json(rows[0]);
@@ -44,9 +45,9 @@ async function createRoom(req, res, next) {
       return res.status(400).json({ error: 'room_type_id and room_number are required' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO room (room_type_id, room_number, floor, status)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [room_type_id, room_number, floor || null, status || 'active']
+      `INSERT INTO room (property_id, room_type_id, room_number, floor, status)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [req.property_id, room_type_id, room_number, floor || null, status || 'active']
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -65,8 +66,8 @@ async function updateRoom(req, res, next) {
          room_number  = COALESCE($2, room_number),
          floor        = COALESCE($3, floor),
          status       = COALESCE($4, status)
-       WHERE id = $5 RETURNING *`,
-      [room_type_id, room_number, floor, status, req.params.id]
+       WHERE id = $5 AND property_id = $6 RETURNING *`,
+      [room_type_id, room_number, floor, status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Room not found' });
     res.json(rows[0]);
