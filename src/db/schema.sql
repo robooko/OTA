@@ -270,41 +270,6 @@ CREATE TABLE IF NOT EXISTS tour_booking (
 CREATE INDEX IF NOT EXISTS idx_tour_slot_tour_date  ON tour_slot(tour_id, slot_date);
 CREATE INDEX IF NOT EXISTS idx_tour_booking_slot    ON tour_booking(slot_id);
 
--- ── Equipment hire ────────────────────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS equipment (
-  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name           VARCHAR(100)  NOT NULL,
-  type           VARCHAR(50)   NOT NULL,
-  description    TEXT,
-  quantity       INT           NOT NULL,
-  price_per_day  NUMERIC(10,2),
-  price_per_hour NUMERIC(10,2),
-  status         VARCHAR(20)   DEFAULT 'active'
-);
-
-CREATE TABLE IF NOT EXISTS equipment_hire (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  equipment_id  UUID          NOT NULL REFERENCES equipment(id),
-  guest_id      UUID          REFERENCES guest(id),
-  contact_name  VARCHAR(100)  NOT NULL,
-  contact_email VARCHAR(255),
-  contact_phone VARCHAR(30),
-  hire_date     DATE          NOT NULL,
-  quantity      INT           NOT NULL,
-  status           VARCHAR(20)   DEFAULT 'confirmed',
-  notes            TEXT,
-  start_time       TIME,
-  rate_type        VARCHAR(10)   DEFAULT 'per_day',
-  duration         NUMERIC(5,2)  DEFAULT 1,
-  golf_booking_id  UUID          REFERENCES golf_booking(id),
-  total_price      NUMERIC(10,2),
-  created_at       TIMESTAMPTZ   DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_equipment_hire_date ON equipment_hire(hire_date);
-CREATE INDEX IF NOT EXISTS idx_equipment_hire_eq   ON equipment_hire(equipment_id);
-
 -- ── Golf ──────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS golf_course (
@@ -342,6 +307,41 @@ CREATE TABLE IF NOT EXISTS golf_booking (
 
 CREATE INDEX IF NOT EXISTS idx_tee_time_course_date ON tee_time(course_id, tee_date);
 CREATE INDEX IF NOT EXISTS idx_golf_booking_tee     ON golf_booking(tee_time_id);
+
+-- ── Equipment hire ────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS equipment (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name           VARCHAR(100)  NOT NULL,
+  type           VARCHAR(50)   NOT NULL,
+  description    TEXT,
+  quantity       INT           NOT NULL,
+  price_per_day  NUMERIC(10,2),
+  price_per_hour NUMERIC(10,2),
+  status         VARCHAR(20)   DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS equipment_hire (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  equipment_id  UUID          NOT NULL REFERENCES equipment(id),
+  guest_id      UUID          REFERENCES guest(id),
+  contact_name  VARCHAR(100)  NOT NULL,
+  contact_email VARCHAR(255),
+  contact_phone VARCHAR(30),
+  hire_date     DATE          NOT NULL,
+  quantity      INT           NOT NULL,
+  status           VARCHAR(20)   DEFAULT 'confirmed',
+  notes            TEXT,
+  start_time       TIME,
+  rate_type        VARCHAR(10)   DEFAULT 'per_day',
+  duration         NUMERIC(5,2)  DEFAULT 1,
+  golf_booking_id  UUID          REFERENCES golf_booking(id),
+  total_price      NUMERIC(10,2),
+  created_at       TIMESTAMPTZ   DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_equipment_hire_date ON equipment_hire(hire_date);
+CREATE INDEX IF NOT EXISTS idx_equipment_hire_eq   ON equipment_hire(equipment_id);
 
 -- ── Room Service ──────────────────────────────────────────────────────────────
 
