@@ -1,3 +1,8 @@
+-- Properties
+INSERT INTO property (id, name, status) VALUES
+  ('e1000000-0000-0000-0000-000000000001', 'Ocean View Resort', 'active'),
+  ('e1000000-0000-0000-0000-000000000002', 'Mountain Lodge',    'active');
+
 -- Seed data for hotel booking API
 -- Run after schema.sql
 

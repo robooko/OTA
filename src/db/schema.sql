@@ -1,6 +1,14 @@
 -- Enable pgcrypto for gen_random_uuid()
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- Properties (tenants)
+CREATE TABLE IF NOT EXISTS property (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       VARCHAR(100) NOT NULL,
+  status     VARCHAR(20)  DEFAULT 'active',
+  created_at TIMESTAMPTZ  DEFAULT now()
+);
+
 -- Guests
 CREATE TABLE IF NOT EXISTS guest (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
