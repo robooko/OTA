@@ -12,35 +12,48 @@ CREATE TABLE IF NOT EXISTS property (
 -- Guests
 CREATE TABLE IF NOT EXISTS guest (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  clerk_user_id VARCHAR(100) UNIQUE,
+  property_id   UUID NOT NULL REFERENCES property(id),
+  clerk_user_id VARCHAR(100),
   first_name    VARCHAR(100) NOT NULL,
   last_name     VARCHAR(100) NOT NULL,
-  email         VARCHAR(255) NOT NULL UNIQUE,
+  email         VARCHAR(255) NOT NULL,
   phone         VARCHAR(30),
-  created_at    TIMESTAMPTZ  DEFAULT now()
+  created_at    TIMESTAMPTZ  DEFAULT now(),
+  UNIQUE (property_id, email),
+  UNIQUE (property_id, clerk_user_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_guest_property ON guest(property_id);
 
 -- Room types
 CREATE TABLE IF NOT EXISTS room_type (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id    UUID            NOT NULL REFERENCES property(id),
   name           VARCHAR(100)    NOT NULL,
   description    TEXT,
   max_occupancy  INT             NOT NULL,
   base_rate      NUMERIC(10,2)   NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_room_type_property ON room_type(property_id);
+
 -- Rooms
 CREATE TABLE IF NOT EXISTS room (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id  UUID          NOT NULL REFERENCES property(id),
   room_type_id UUID          NOT NULL REFERENCES room_type(id),
-  room_number  VARCHAR(10)   NOT NULL UNIQUE,
+  room_number  VARCHAR(10)   NOT NULL,
   floor        INT,
-  status       VARCHAR(20)   DEFAULT 'active'
+  status       VARCHAR(20)   DEFAULT 'active',
+  UNIQUE (property_id, room_number)
 );
+
+CREATE INDEX IF NOT EXISTS idx_room_property ON room(property_id);
 
 -- Room availability
 CREATE TABLE IF NOT EXISTS room_availability (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID          NOT NULL REFERENCES property(id),
   room_id       UUID          NOT NULL REFERENCES room(id),
   date          DATE          NOT NULL,
   is_available  BOOLEAN       DEFAULT true,
@@ -74,6 +87,7 @@ CREATE TABLE IF NOT EXISTS payment (
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_room_availability_room_date ON room_availability(room_id, date);
+CREATE INDEX IF NOT EXISTS idx_room_availability_property_date ON room_availability(property_id, date);
 CREATE INDEX IF NOT EXISTS idx_booking_room_dates         ON booking(room_id, check_in, check_out);
 CREATE INDEX IF NOT EXISTS idx_booking_guest              ON booking(guest_id);
 
