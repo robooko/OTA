@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS room_availability (
 -- Bookings
 CREATE TABLE IF NOT EXISTS booking (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID          NOT NULL REFERENCES property(id),
   guest_id    UUID          NOT NULL REFERENCES guest(id),
   room_id     UUID          NOT NULL REFERENCES room(id),
   check_in    DATE          NOT NULL,
@@ -77,19 +78,21 @@ CREATE TABLE IF NOT EXISTS booking (
 
 -- Payments
 CREATE TABLE IF NOT EXISTS payment (
-  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  booking_id UUID          NOT NULL REFERENCES booking(id),
-  amount     NUMERIC(10,2) NOT NULL,
-  method     VARCHAR(30),
-  status     VARCHAR(20)   DEFAULT 'pending',
-  paid_at    TIMESTAMPTZ
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID          NOT NULL REFERENCES property(id),
+  booking_id  UUID          NOT NULL REFERENCES booking(id),
+  amount      NUMERIC(10,2) NOT NULL,
+  method      VARCHAR(30),
+  status      VARCHAR(20)   DEFAULT 'pending',
+  paid_at     TIMESTAMPTZ
 );
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_room_availability_room_date ON room_availability(room_id, date);
 CREATE INDEX IF NOT EXISTS idx_room_availability_property_date ON room_availability(property_id, date);
-CREATE INDEX IF NOT EXISTS idx_booking_room_dates         ON booking(room_id, check_in, check_out);
-CREATE INDEX IF NOT EXISTS idx_booking_guest              ON booking(guest_id);
+CREATE INDEX IF NOT EXISTS idx_booking_room_dates         ON booking(property_id, room_id, check_in, check_out);
+CREATE INDEX IF NOT EXISTS idx_booking_guest              ON booking(property_id, guest_id);
+CREATE INDEX IF NOT EXISTS idx_payment_property           ON payment(property_id);
 
 -- Materialised view
 CREATE MATERIALIZED VIEW IF NOT EXISTS room_type_availability AS
@@ -111,11 +114,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_rta_property_type_date ON room_type_availa
 
 CREATE TABLE IF NOT EXISTS extra (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID          NOT NULL REFERENCES property(id),
   name        VARCHAR(100)  NOT NULL,
   description TEXT,
   price       NUMERIC(10,2) NOT NULL,
   status      VARCHAR(20)   DEFAULT 'active'
 );
+
+CREATE INDEX IF NOT EXISTS idx_extra_property ON extra(property_id);
 
 CREATE TABLE IF NOT EXISTS booking_extra (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),

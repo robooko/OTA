@@ -84,8 +84,9 @@ INSERT INTO guest (id, property_id, first_name, last_name, email, phone) VALUES
 
 -- Sample bookings
 -- Alice: Standard room 102, Apr 15-18 (3 nights @ $120 = $360)
-INSERT INTO booking (id, guest_id, room_id, check_in, check_out, guests, total_price, status) VALUES
+INSERT INTO booking (id, property_id, guest_id, room_id, check_in, check_out, guests, total_price, status) VALUES
   ('d1000000-0000-0000-0000-000000000001',
+   'e1000000-0000-0000-0000-000000000001',
    'c1000000-0000-0000-0000-000000000001',
    'b1000000-0000-0000-0000-000000000002',
    '2026-04-15', '2026-04-18', 1, 360.00, 'confirmed');
@@ -97,8 +98,9 @@ WHERE room_id = 'b1000000-0000-0000-0000-000000000002'
   AND date >= '2026-04-15' AND date < '2026-04-18';
 
 -- Bob: Deluxe room 401, Apr 20-23 (3 nights @ $180 = $540)
-INSERT INTO booking (id, guest_id, room_id, check_in, check_out, guests, total_price, status) VALUES
+INSERT INTO booking (id, property_id, guest_id, room_id, check_in, check_out, guests, total_price, status) VALUES
   ('d1000000-0000-0000-0000-000000000002',
+   'e1000000-0000-0000-0000-000000000001',
    'c1000000-0000-0000-0000-000000000002',
    'b1000000-0000-0000-0000-000000000006',
    '2026-04-20', '2026-04-23', 2, 540.00, 'confirmed');
@@ -109,8 +111,9 @@ WHERE room_id = 'b1000000-0000-0000-0000-000000000006'
   AND date >= '2026-04-20' AND date < '2026-04-23';
 
 -- Carol: Suite 601, May 5-10 (5 nights @ $350 = $1750)
-INSERT INTO booking (id, guest_id, room_id, check_in, check_out, guests, total_price, status) VALUES
+INSERT INTO booking (id, property_id, guest_id, room_id, check_in, check_out, guests, total_price, status) VALUES
   ('d1000000-0000-0000-0000-000000000003',
+   'e1000000-0000-0000-0000-000000000001',
    'c1000000-0000-0000-0000-000000000003',
    'b1000000-0000-0000-0000-000000000011',
    '2026-05-05', '2026-05-10', 2, 1750.00, 'confirmed');
@@ -121,19 +124,20 @@ WHERE room_id = 'b1000000-0000-0000-0000-000000000011'
   AND date >= '2026-05-05' AND date < '2026-05-10';
 
 -- David: Family room, Apr 5-7, already checked out
-INSERT INTO booking (id, guest_id, room_id, check_in, check_out, guests, total_price, status) VALUES
+INSERT INTO booking (id, property_id, guest_id, room_id, check_in, check_out, guests, total_price, status) VALUES
   ('d1000000-0000-0000-0000-000000000004',
+   'e1000000-0000-0000-0000-000000000001',
    'c1000000-0000-0000-0000-000000000004',
    'b1000000-0000-0000-0000-000000000009',
    '2026-04-05', '2026-04-07', 3, 480.00, 'checked_out');
 
 -- Sample payments
-INSERT INTO payment (booking_id, amount, method, status, paid_at) VALUES
-  ('d1000000-0000-0000-0000-000000000001', 360.00, 'card',          'completed', '2026-04-14 10:00:00+00'),
-  ('d1000000-0000-0000-0000-000000000002', 540.00, 'card',          'completed', '2026-04-19 14:30:00+00'),
-  ('d1000000-0000-0000-0000-000000000003', 875.00, 'bank_transfer', 'completed', '2026-05-01 09:00:00+00'),
-  ('d1000000-0000-0000-0000-000000000003', 875.00, 'bank_transfer', 'completed', '2026-05-04 09:00:00+00'),
-  ('d1000000-0000-0000-0000-000000000004', 480.00, 'cash',          'completed', '2026-04-07 11:00:00+00');
+INSERT INTO payment (property_id, booking_id, amount, method, status, paid_at) VALUES
+  ('e1000000-0000-0000-0000-000000000001', 'd1000000-0000-0000-0000-000000000001', 360.00, 'card',          'completed', '2026-04-14 10:00:00+00'),
+  ('e1000000-0000-0000-0000-000000000001', 'd1000000-0000-0000-0000-000000000002', 540.00, 'card',          'completed', '2026-04-19 14:30:00+00'),
+  ('e1000000-0000-0000-0000-000000000001', 'd1000000-0000-0000-0000-000000000003', 875.00, 'bank_transfer', 'completed', '2026-05-01 09:00:00+00'),
+  ('e1000000-0000-0000-0000-000000000001', 'd1000000-0000-0000-0000-000000000003', 875.00, 'bank_transfer', 'completed', '2026-05-04 09:00:00+00'),
+  ('e1000000-0000-0000-0000-000000000001', 'd1000000-0000-0000-0000-000000000004', 480.00, 'cash',          'completed', '2026-04-07 11:00:00+00');
 
 -- Refresh materialised view
 REFRESH MATERIALIZED VIEW room_type_availability;
