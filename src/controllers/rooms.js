@@ -44,6 +44,13 @@ async function createRoom(req, res, next) {
     if (!room_type_id || !room_number) {
       return res.status(400).json({ error: 'room_type_id and room_number are required' });
     }
+    const roomTypeRes = await pool.query(
+      `SELECT id FROM room_type WHERE id = $1 AND property_id = $2`,
+      [room_type_id, req.property_id]
+    );
+    if (!roomTypeRes.rows.length) {
+      return res.status(400).json({ error: 'Invalid room_type_id' });
+    }
     const { rows } = await pool.query(
       `INSERT INTO room (property_id, room_type_id, room_number, floor, status)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
@@ -60,6 +67,15 @@ async function createRoom(req, res, next) {
 async function updateRoom(req, res, next) {
   try {
     const { room_type_id, room_number, floor, status } = req.body;
+    if (room_type_id) {
+      const roomTypeRes = await pool.query(
+        `SELECT id FROM room_type WHERE id = $1 AND property_id = $2`,
+        [room_type_id, req.property_id]
+      );
+      if (!roomTypeRes.rows.length) {
+        return res.status(400).json({ error: 'Invalid room_type_id' });
+      }
+    }
     const { rows } = await pool.query(
       `UPDATE room SET
          room_type_id = COALESCE($1, room_type_id),
@@ -73,6 +89,7 @@ async function updateRoom(req, res, next) {
     res.json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Room number already exists' });
+    if (err.code === '23503') return res.status(400).json({ error: 'Invalid room_type_id' });
     next(err);
   }
 }
