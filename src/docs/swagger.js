@@ -9,7 +9,7 @@ const swaggerSpec = {
     { url: 'https://ota-u6ii.onrender.com', description: 'Production' },
     { url: 'http://localhost:3000', description: 'Local' },
   ],
-  security: [{ apiKey: [] }],
+  security: [{ bearerAuth: [] }],
   tags: [
     { name: 'Auth' },
     { name: 'Guests' },
@@ -30,10 +30,10 @@ const swaggerSpec = {
   ],
   components: {
     securitySchemes: {
-      apiKey: {
-        type: 'apiKey',
-        in: 'header',
-        name: 'x-api-key',
+      bearerAuth: {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
       },
     },
     schemas: {
@@ -153,7 +153,7 @@ const swaggerSpec = {
   paths: {
     // ── Auth ────────────────────────────────────────────────────────────────
     '/api/auth/register': {
-      post: { tags: ['Auth'], summary: 'Register a new user', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'email', 'password'], properties: { name: { type: 'string' }, email: { type: 'string', format: 'email' }, password: { type: 'string', format: 'password' }, role: { type: 'string', enum: ['admin', 'staff', 'guest'], default: 'staff' } } } } } }, responses: { 201: { description: 'User created with JWT token' } } },
+      post: { tags: ['Auth'], summary: 'Register a new staff/admin account for the caller\'s own property (admin only)', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'email', 'password'], properties: { name: { type: 'string' }, email: { type: 'string', format: 'email' }, password: { type: 'string', format: 'password' }, role: { type: 'string', enum: ['admin', 'staff', 'guest'], default: 'staff' } } } } } }, responses: { 201: { description: 'User created with JWT token' } } },
     },
     '/api/auth/login': {
       post: { tags: ['Auth'], summary: 'Login and receive JWT token', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['email', 'password'], properties: { email: { type: 'string', format: 'email' }, password: { type: 'string', format: 'password' } } } } } }, responses: { 200: { description: 'JWT token' }, 401: { description: 'Invalid credentials' } } },
@@ -196,7 +196,7 @@ const swaggerSpec = {
       },
     },
     '/api/guests/lookup': {
-      get: { tags: ['Guests'], summary: 'Look up guest by email', security: [{ apiKey: [] }], parameters: [{ name: 'email', in: 'query', required: true, schema: { type: 'string', format: 'email' } }], responses: { 200: { description: 'Guest found' }, 404: { description: 'Guest not found' } } },
+      get: { tags: ['Guests'], summary: 'Look up guest by email', parameters: [{ name: 'email', in: 'query', required: true, schema: { type: 'string', format: 'email' } }], responses: { 200: { description: 'Guest found' }, 404: { description: 'Guest not found' } } },
     },
     '/api/guests/{id}': {
       get: { tags: ['Guests'], summary: 'Get guest by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Guest' }, 404: { description: 'Not found' } } },
@@ -226,7 +226,7 @@ const swaggerSpec = {
 
     // ── Availability ─────────────────────────────────────────────────────────
     '/api/availability/search': {
-      get: { tags: ['Availability'], summary: 'Search available room types', parameters: [{ name: 'check_in', in: 'query', required: true, schema: { type: 'string', format: 'date' } }, { name: 'check_out', in: 'query', required: true, schema: { type: 'string', format: 'date' } }, { name: 'guests', in: 'query', required: true, schema: { type: 'integer' } }], responses: { 200: { description: 'Available room types with rates' } } },
+      get: { tags: ['Availability'], summary: 'Search available room types (public)', security: [], parameters: [{ name: 'check_in', in: 'query', required: true, schema: { type: 'string', format: 'date' } }, { name: 'check_out', in: 'query', required: true, schema: { type: 'string', format: 'date' } }, { name: 'guests', in: 'query', required: true, schema: { type: 'integer' } }, { name: 'property_id', in: 'query', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Available room types with rates' } } },
     },
     '/api/availability/rooms/{room_id}': {
       get: { tags: ['Availability'], summary: 'Get availability for a room', parameters: [{ name: 'room_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'to', in: 'query', schema: { type: 'string', format: 'date' } }], responses: { 200: { description: 'Availability records' } } },
@@ -375,8 +375,8 @@ const swaggerSpec = {
       put: { tags: ['Extras'], summary: 'Update extra (admin/staff)', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, price: { type: 'number' }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated extra' }, 404: { description: 'Not found' } } },
     },
     '/api/extras/booking/{booking_id}': {
-      get: { tags: ['Extras'], summary: 'List extras on a booking (API key)', security: [{ apiKey: [] }], parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of booking extras with name and totals' } } },
-      post: { tags: ['Extras'], summary: 'Add extra to booking (API key)', security: [{ apiKey: [] }], parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['extra_id'], properties: { extra_id: { type: 'string', format: 'uuid' }, quantity: { type: 'integer', default: 1 } } } } } }, responses: { 201: { description: 'Extra added with locked unit_price and total' }, 404: { description: 'Extra or booking not found' } } },
+      get: { tags: ['Extras'], summary: 'List extras on a booking', parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of booking extras with name and totals' } } },
+      post: { tags: ['Extras'], summary: 'Add extra to booking', parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['extra_id'], properties: { extra_id: { type: 'string', format: 'uuid' }, quantity: { type: 'integer', default: 1 } } } } } }, responses: { 201: { description: 'Extra added with locked unit_price and total' }, 404: { description: 'Extra or booking not found' } } },
     },
     '/api/extras/booking/{booking_id}/{id}': {
       delete: { tags: ['Extras'], summary: 'Remove extra from booking (admin/staff)', parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 204: { description: 'Removed' }, 404: { description: 'Not found' } } },
