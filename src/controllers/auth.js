@@ -20,12 +20,15 @@ async function register(req, res, next) {
 
     const password_hash = await bcrypt.hash(password, 12);
     const { rows } = await pool.query(
-      `INSERT INTO api_user (name, email, password_hash, role) VALUES ($1, $2, $3, $4)
-       RETURNING id, name, email, role, created_at`,
-      [name, email, password_hash, assignedRole]
+      `INSERT INTO api_user (property_id, name, email, password_hash, role) VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, property_id, name, email, role, created_at`,
+      [req.property_id, name, email, password_hash, assignedRole]
     );
 
-    const token = jwt.sign({ id: rows[0].id, role: rows[0].role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+    const token = jwt.sign(
+      { id: rows[0].id, role: rows[0].role, property_id: rows[0].property_id },
+      JWT_SECRET, { expiresIn: JWT_EXPIRES_IN }
+    );
     res.status(201).json({ user: rows[0], token });
   } catch (err) { next(err); }
 }
@@ -43,15 +46,21 @@ async function login(req, res, next) {
     const valid = await bcrypt.compare(password, rows[0].password_hash);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const token = jwt.sign({ id: rows[0].id, role: rows[0].role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
-    res.json({ user: { id: rows[0].id, name: rows[0].name, email: rows[0].email, role: rows[0].role }, token });
+    const token = jwt.sign(
+      { id: rows[0].id, role: rows[0].role, property_id: rows[0].property_id },
+      JWT_SECRET, { expiresIn: JWT_EXPIRES_IN }
+    );
+    res.json({
+      user: { id: rows[0].id, name: rows[0].name, email: rows[0].email, role: rows[0].role, property_id: rows[0].property_id },
+      token,
+    });
   } catch (err) { next(err); }
 }
 
 async function me(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT id, name, email, role, created_at FROM api_user WHERE id = $1', [req.user.id]
+      'SELECT id, property_id, name, email, role, created_at FROM api_user WHERE id = $1', [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
     res.json(rows[0]);
@@ -60,7 +69,10 @@ async function me(req, res, next) {
 
 async function listUsers(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT id, name, email, role, created_at FROM api_user ORDER BY created_at');
+    const { rows } = await pool.query(
+      'SELECT id, name, email, role, created_at FROM api_user WHERE property_id = $1 ORDER BY created_at',
+      [req.property_id]
+    );
     res.json(rows);
   } catch (err) { next(err); }
 }
@@ -74,8 +86,8 @@ async function updateUser(req, res, next) {
       `UPDATE api_user SET
          name = COALESCE($1, name),
          role = COALESCE($2, role)
-       WHERE id = $3 RETURNING id, name, email, role`,
-      [name, role, req.params.id]
+       WHERE id = $3 AND property_id = $4 RETURNING id, name, email, role`,
+      [name, role, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
     res.json(rows[0]);

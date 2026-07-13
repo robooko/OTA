@@ -3,6 +3,17 @@ INSERT INTO property (id, name, status) VALUES
   ('e1000000-0000-0000-0000-000000000001', 'Ocean View Resort', 'active'),
   ('e1000000-0000-0000-0000-000000000002', 'Mountain Lodge',    'active');
 
+-- Bootstrap admin per property (password: "changeme123")
+INSERT INTO api_user (id, property_id, name, email, password_hash, role) VALUES
+  ('f1000000-0000-0000-0000-000000000001',
+   'e1000000-0000-0000-0000-000000000001',
+   'Ocean View Admin', 'admin@oceanview.example.com',
+   '$2b$12$AeG.yVLwhNPTxp2WeowJ8OZ6J9m4Kyn/sasVTECO/nHbxaBXMzycu', 'admin'),
+  ('f1000000-0000-0000-0000-000000000002',
+   'e1000000-0000-0000-0000-000000000002',
+   'Mountain Lodge Admin', 'admin@mountainlodge.example.com',
+   '$2b$12$AeG.yVLwhNPTxp2WeowJ8OZ6J9m4Kyn/sasVTECO/nHbxaBXMzycu', 'admin');
+
 -- Seed data for hotel booking API
 -- Run after schema.sql
 

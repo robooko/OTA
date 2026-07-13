@@ -117,12 +117,15 @@ CREATE INDEX IF NOT EXISTS idx_booking_extra_booking ON booking_extra(booking_id
 
 CREATE TABLE IF NOT EXISTS api_user (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID NOT NULL REFERENCES property(id),
   name          VARCHAR(100) NOT NULL,
   email         VARCHAR(255) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
   role          VARCHAR(20)  NOT NULL DEFAULT 'staff',
   created_at    TIMESTAMPTZ  DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_api_user_property ON api_user(property_id);
 
 -- ── Restaurant ────────────────────────────────────────────────────────────────
 
