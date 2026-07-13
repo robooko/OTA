@@ -2,7 +2,10 @@ const pool = require('../db');
 
 async function listGuests(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT * FROM guest ORDER BY created_at DESC');
+    const { rows } = await pool.query(
+      'SELECT * FROM guest WHERE property_id = $1 ORDER BY created_at DESC',
+      [req.property_id]
+    );
     res.json(rows);
   } catch (err) {
     next(err);
@@ -11,7 +14,10 @@ async function listGuests(req, res, next) {
 
 async function getGuest(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT * FROM guest WHERE id = $1', [req.params.id]);
+    const { rows } = await pool.query(
+      'SELECT * FROM guest WHERE id = $1 AND property_id = $2',
+      [req.params.id, req.property_id]
+    );
     if (!rows.length) return res.status(404).json({ error: 'Guest not found' });
     res.json(rows[0]);
   } catch (err) {
@@ -26,9 +32,9 @@ async function createGuest(req, res, next) {
       return res.status(400).json({ error: 'first_name, last_name, and email are required' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO guest (clerk_user_id, first_name, last_name, email, phone)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [clerk_user_id || null, first_name, last_name, email, phone || null]
+      `INSERT INTO guest (property_id, clerk_user_id, first_name, last_name, email, phone)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [req.property_id, clerk_user_id || null, first_name, last_name, email, phone || null]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -52,8 +58,8 @@ async function lookupGuest(req, res, next) {
     // 1. Try clerk_user_id first
     if (clerk_user_id) {
       const { rows } = await pool.query(
-        'SELECT * FROM guest WHERE clerk_user_id = $1',
-        [clerk_user_id]
+        'SELECT * FROM guest WHERE clerk_user_id = $1 AND property_id = $2',
+        [clerk_user_id, req.property_id]
       );
       if (rows.length) return res.json(rows[0]);
     }
@@ -61,8 +67,8 @@ async function lookupGuest(req, res, next) {
     // 2. Fall back to email, then link clerk_user_id
     if (email) {
       const { rows } = await pool.query(
-        'SELECT * FROM guest WHERE email = $1',
-        [email]
+        'SELECT * FROM guest WHERE email = $1 AND property_id = $2',
+        [email, req.property_id]
       );
       if (!rows.length) return res.status(404).json({ error: 'Guest not found' });
 
@@ -94,8 +100,8 @@ async function updateGuest(req, res, next) {
          last_name     = COALESCE($3, last_name),
          email         = COALESCE($4, email),
          phone         = COALESCE($5, phone)
-       WHERE id = $6 RETURNING *`,
-      [clerk_user_id, first_name, last_name, email, phone, req.params.id]
+       WHERE id = $6 AND property_id = $7 RETURNING *`,
+      [clerk_user_id, first_name, last_name, email, phone, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Guest not found' });
     res.json(rows[0]);
@@ -107,6 +113,12 @@ async function updateGuest(req, res, next) {
 
 async function getGuestSummary(req, res, next) {
   try {
+    const guestRes = await pool.query(
+      'SELECT id FROM guest WHERE id = $1 AND property_id = $2',
+      [req.params.id, req.property_id]
+    );
+    if (!guestRes.rows.length) return res.status(404).json({ error: 'Guest not found' });
+
     const { rows } = await pool.query(
       `SELECT
          COUNT(*)                                            AS total_stays,
@@ -119,16 +131,16 @@ async function getGuestSummary(req, res, next) {
          COALESCE((
            SELECT SUM(be.quantity * be.unit_price)
            FROM booking_extra be
-           WHERE be.booking_id IN (SELECT id FROM booking WHERE guest_id = $1)
+           WHERE be.booking_id IN (SELECT id FROM booking WHERE guest_id = $1 AND property_id = $2)
          ), 0)                                              AS total_extras_spent,
          COALESCE((
            SELECT COUNT(*)
            FROM booking_extra be
-           WHERE be.booking_id IN (SELECT id FROM booking WHERE guest_id = $1)
+           WHERE be.booking_id IN (SELECT id FROM booking WHERE guest_id = $1 AND property_id = $2)
          ), 0)                                              AS total_extras
        FROM booking b
-       WHERE b.guest_id = $1`,
-      [req.params.id]
+       WHERE b.guest_id = $1 AND b.property_id = $2`,
+      [req.params.id, req.property_id]
     );
     res.json(rows[0]);
   } catch (err) {
@@ -138,7 +150,10 @@ async function getGuestSummary(req, res, next) {
 
 async function deleteGuest(req, res, next) {
   try {
-    const { rows } = await pool.query('DELETE FROM guest WHERE id = $1 RETURNING id', [req.params.id]);
+    const { rows } = await pool.query(
+      'DELETE FROM guest WHERE id = $1 AND property_id = $2 RETURNING id',
+      [req.params.id, req.property_id]
+    );
     if (!rows.length) return res.status(404).json({ error: 'Guest not found' });
     res.status(204).end();
   } catch (err) {

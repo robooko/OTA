@@ -1,13 +1,13 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/guests');
-const { requireApiKey } = require('../middleware/apiKey');
+const { authenticate } = require('../middleware/auth');
 
-router.get('/', requireApiKey, ctrl.listGuests);
-router.get('/lookup', requireApiKey, ctrl.lookupGuest);
-router.get('/:id', requireApiKey, ctrl.getGuest);
-router.get('/:id/summary', requireApiKey, ctrl.getGuestSummary);
-router.post('/', requireApiKey, ctrl.createGuest);
-router.put('/:id', requireApiKey, ctrl.updateGuest);
-router.delete('/:id', requireApiKey, ctrl.deleteGuest);
+router.get('/', authenticate, ctrl.listGuests);
+router.get('/lookup', authenticate, ctrl.lookupGuest);
+router.get('/:id', authenticate, ctrl.getGuest);
+router.get('/:id/summary', authenticate, ctrl.getGuestSummary);
+router.post('/', authenticate, ctrl.createGuest);
+router.put('/:id', authenticate, ctrl.updateGuest);
+router.delete('/:id', authenticate, ctrl.deleteGuest);
 
 module.exports = router;
