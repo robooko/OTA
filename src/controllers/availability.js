@@ -6,6 +6,11 @@ async function getRoomAvailability(req, res, next) {
     const { room_id } = req.params;
     const { from, to } = req.query;
 
+    const roomCheck = await pool.query(
+      'SELECT id FROM room WHERE id = $1 AND property_id = $2', [room_id, req.property_id]
+    );
+    if (!roomCheck.rows.length) return res.status(404).json({ error: 'Room not found' });
+
     let query = 'SELECT * FROM room_availability WHERE room_id = $1';
     const params = [room_id];
 
@@ -29,8 +34,8 @@ async function getRoomTypeAvailability(req, res, next) {
   try {
     const { from, to, room_type_id } = req.query;
 
-    let query = 'SELECT * FROM room_type_availability WHERE 1=1';
-    const params = [];
+    let query = 'SELECT * FROM room_type_availability WHERE property_id = $1';
+    const params = [req.property_id];
 
     if (from) {
       if (!isValidDate(from)) return res.status(400).json({ error: 'Invalid from date' });
@@ -57,10 +62,10 @@ async function getRoomTypeAvailability(req, res, next) {
 
 async function searchAvailability(req, res, next) {
   try {
-    const { check_in, check_out, guests } = req.query;
+    const { check_in, check_out, guests, property_id } = req.query;
 
-    if (!check_in || !check_out || !guests) {
-      return res.status(400).json({ error: 'check_in, check_out, and guests are required' });
+    if (!check_in || !check_out || !guests || !property_id) {
+      return res.status(400).json({ error: 'check_in, check_out, guests, and property_id are required' });
     }
     if (!isValidDate(check_in) || !isValidDate(check_out)) {
       return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
@@ -79,13 +84,14 @@ async function searchAvailability(req, res, next) {
          MIN(rta.min_rate)        AS from_rate
        FROM room_type_availability rta
        JOIN room_type rt ON rt.id = rta.room_type_id
-       WHERE rta.date >= $1
-         AND rta.date <  $2
-         AND rt.max_occupancy >= $3
+       WHERE rta.property_id = $1
+         AND rta.date >= $2
+         AND rta.date <  $3
+         AND rt.max_occupancy >= $4
        GROUP BY rta.room_type_id, rt.name, rt.description, rt.max_occupancy
        HAVING MIN(rta.available_rooms) > 0
        ORDER BY from_rate ASC`,
-      [check_in, check_out, parseInt(guests, 10)]
+      [property_id, check_in, check_out, parseInt(guests, 10)]
     );
     res.json(rows);
   } catch (err) {
@@ -102,6 +108,11 @@ async function upsertRoomAvailability(req, res, next) {
       return res.status(400).json({ error: 'dates array is required' });
     }
 
+    const roomCheck = await pool.query(
+      'SELECT id FROM room WHERE id = $1 AND property_id = $2', [room_id, req.property_id]
+    );
+    if (!roomCheck.rows.length) return res.status(404).json({ error: 'Room not found' });
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -113,14 +124,14 @@ async function upsertRoomAvailability(req, res, next) {
           return res.status(400).json({ error: `Invalid date: ${date}` });
         }
         const { rows } = await client.query(
-          `INSERT INTO room_availability (room_id, date, is_available, override_rate, block_reason)
-           VALUES ($1, $2, $3, $4, $5)
+          `INSERT INTO room_availability (property_id, room_id, date, is_available, override_rate, block_reason)
+           VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (room_id, date) DO UPDATE SET
              is_available  = EXCLUDED.is_available,
              override_rate = EXCLUDED.override_rate,
              block_reason  = EXCLUDED.block_reason
            RETURNING *`,
-          [room_id, date, is_available ?? true, override_rate ?? null, block_reason ?? null]
+          [req.property_id, room_id, date, is_available ?? true, override_rate ?? null, block_reason ?? null]
         );
         results.push(rows[0]);
       }
@@ -146,9 +157,9 @@ async function listOverrides(req, res, next) {
       FROM room_availability ra
       JOIN room r ON r.id = ra.room_id
       JOIN room_type rt ON rt.id = r.room_type_id
-      WHERE ra.override_rate IS NOT NULL
+      WHERE ra.override_rate IS NOT NULL AND ra.property_id = $1
     `;
-    const params = [];
+    const params = [req.property_id];
     if (room_id) { params.push(room_id); query += ` AND ra.room_id = $${params.length}`; }
     if (from) { params.push(from); query += ` AND ra.date >= $${params.length}`; }
     if (to) { params.push(to); query += ` AND ra.date <= $${params.length}`; }
@@ -164,8 +175,8 @@ async function deleteOverride(req, res, next) {
     const { rows } = await pool.query(
       `UPDATE room_availability
        SET override_rate = NULL, block_reason = NULL
-       WHERE id = $1 RETURNING *`,
-      [id]
+       WHERE id = $1 AND property_id = $2 RETURNING *`,
+      [id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Availability record not found' });
     await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');

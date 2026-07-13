@@ -94,6 +94,7 @@ CREATE INDEX IF NOT EXISTS idx_booking_guest              ON booking(guest_id);
 -- Materialised view
 CREATE MATERIALIZED VIEW IF NOT EXISTS room_type_availability AS
 SELECT
+  r.property_id,
   r.room_type_id,
   ra.date,
   COUNT(*)                                        AS total_rooms,
@@ -102,9 +103,9 @@ SELECT
 FROM room_availability ra
 JOIN room      r  ON r.id  = ra.room_id
 JOIN room_type rt ON rt.id = r.room_type_id
-GROUP BY r.room_type_id, ra.date;
+GROUP BY r.property_id, r.room_type_id, ra.date;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_rta_room_type_date ON room_type_availability(room_type_id, date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rta_property_type_date ON room_type_availability(property_id, room_type_id, date);
 
 -- ── Extras ───────────────────────────────────────────────────────────────────
 
