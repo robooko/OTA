@@ -368,7 +368,7 @@ const swaggerSpec = {
 
     // ── Extras ────────────────────────────────────────────────────────────────
     '/api/extras': {
-      get: { tags: ['Extras'], summary: 'List active extras (API key)', security: [{ apiKey: [] }], responses: { 200: { description: 'Array of extras' } } },
+      get: { tags: ['Extras'], summary: 'List active extras', responses: { 200: { description: 'Array of extras' } } },
       post: { tags: ['Extras'], summary: 'Create extra (admin/staff)', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'price'], properties: { name: { type: 'string' }, description: { type: 'string' }, price: { type: 'number' } } } } } }, responses: { 201: { description: 'Created extra' }, 400: { description: 'Validation error' } } },
     },
     '/api/extras/{id}': {

@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { isValidDate } = require('../middleware/validate');
+const { isValidDate, isValidUuid } = require('../middleware/validate');
 
 async function getRoomAvailability(req, res, next) {
   try {
@@ -66,6 +66,9 @@ async function searchAvailability(req, res, next) {
 
     if (!check_in || !check_out || !guests || !property_id) {
       return res.status(400).json({ error: 'check_in, check_out, guests, and property_id are required' });
+    }
+    if (!isValidUuid(property_id)) {
+      return res.status(400).json({ error: 'Invalid property_id' });
     }
     if (!isValidDate(check_in) || !isValidDate(check_out)) {
       return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });

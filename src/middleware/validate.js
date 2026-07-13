@@ -12,4 +12,8 @@ function isValidDate(str) {
   return /^\d{4}-\d{2}-\d{2}$/.test(str) && !isNaN(Date.parse(str));
 }
 
-module.exports = { requireFields, isValidDate };
+function isValidUuid(str) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+}
+
+module.exports = { requireFields, isValidDate, isValidUuid };

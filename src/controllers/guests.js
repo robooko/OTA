@@ -75,8 +75,8 @@ async function lookupGuest(req, res, next) {
       // Link clerk_user_id if provided and not yet set
       if (clerk_user_id && !rows[0].clerk_user_id) {
         const { rows: updated } = await pool.query(
-          'UPDATE guest SET clerk_user_id = $1 WHERE id = $2 RETURNING *',
-          [clerk_user_id, rows[0].id]
+          'UPDATE guest SET clerk_user_id = $1 WHERE id = $2 AND property_id = $3 RETURNING *',
+          [clerk_user_id, rows[0].id, req.property_id]
         );
         return res.json(updated[0]);
       }
