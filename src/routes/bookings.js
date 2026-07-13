@@ -1,11 +1,11 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/bookings');
-const { requireApiKey } = require('../middleware/apiKey');
+const { authenticate } = require('../middleware/auth');
 
-router.get('/', requireApiKey, ctrl.listBookings);
-router.get('/:id', requireApiKey, ctrl.getBooking);
-router.post('/', requireApiKey, ctrl.createBooking);
-router.put('/:id', requireApiKey, ctrl.updateBooking);
-router.delete('/:id', requireApiKey, ctrl.cancelBooking);
+router.get('/', authenticate, ctrl.listBookings);
+router.get('/:id', authenticate, ctrl.getBooking);
+router.post('/', authenticate, ctrl.createBooking);
+router.put('/:id', authenticate, ctrl.updateBooking);
+router.delete('/:id', authenticate, ctrl.cancelBooking);
 
 module.exports = router;

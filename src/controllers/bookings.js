@@ -27,26 +27,17 @@ async function listBookings(req, res, next) {
       JOIN room_type rt ON rt.id = r.room_type_id
       LEFT JOIN booking_extra be ON be.booking_id = b.id
       LEFT JOIN extra e          ON e.id = be.extra_id
-      WHERE 1=1
+      WHERE b.property_id = $1
     `;
-    const params = [];
+    const params = [req.property_id];
+    let countQuery = 'SELECT COUNT(*) AS total FROM booking b WHERE b.property_id = $1';
 
-    if (status) { params.push(status); query += ` AND b.status = $${params.length}`; }
-    if (guest_id) { params.push(guest_id); query += ` AND b.guest_id = $${params.length}`; }
-    if (from) { params.push(from); query += ` AND b.check_in >= $${params.length}`; }
-    if (to) { params.push(to); query += ` AND b.check_out <= $${params.length}`; }
+    if (status) { params.push(status); query += ` AND b.status = $${params.length}`; countQuery += ` AND b.status = $${params.length}`; }
+    if (guest_id) { params.push(guest_id); query += ` AND b.guest_id = $${params.length}`; countQuery += ` AND b.guest_id = $${params.length}`; }
+    if (from) { params.push(from); query += ` AND b.check_in >= $${params.length}`; countQuery += ` AND b.check_in >= $${params.length}`; }
+    if (to) { params.push(to); query += ` AND b.check_out <= $${params.length}`; countQuery += ` AND b.check_out <= $${params.length}`; }
 
-    // Count query (same filters, no pagination)
-    const countQuery = `SELECT COUNT(DISTINCT b.id) FROM booking b
-      JOIN guest g      ON g.id  = b.guest_id
-      JOIN room r       ON r.id  = b.room_id
-      JOIN room_type rt ON rt.id = r.room_type_id
-      WHERE 1=1
-      ${status  ? `AND b.status = $1` : ''}
-      ${guest_id ? `AND b.guest_id = $${status ? 2 : 1}` : ''}
-      ${from    ? `AND b.check_in >= $${params.filter((_, i) => i < (status ? 1 : 0) + (guest_id ? 1 : 0)).length + 1}` : ''}
-      ${to      ? `AND b.check_out <= $${params.filter((_, i) => i < (status ? 1 : 0) + (guest_id ? 1 : 0) + (from ? 1 : 0)).length + 1}` : ''}
-    `;
+    const filterParams = [...params]; // snapshot before pagination params are appended below
 
     query += ' GROUP BY b.id, g.first_name, g.last_name, g.email, r.room_number, r.floor, rt.id, rt.name, rt.description, rt.max_occupancy, rt.base_rate';
     query += ' ORDER BY b.created_at DESC';
@@ -56,12 +47,7 @@ async function listBookings(req, res, next) {
 
     const [{ rows }, { rows: countRows }] = await Promise.all([
       pool.query(query, params),
-      pool.query(`SELECT COUNT(DISTINCT b.id) AS total FROM booking b WHERE 1=1
-        ${status   ? ` AND b.status = $1` : ''}
-        ${guest_id ? ` AND b.guest_id = $${status ? 2 : 1}` : ''}
-        ${from     ? ` AND b.check_in >= $${[status, guest_id].filter(Boolean).length + 1}` : ''}
-        ${to       ? ` AND b.check_out <= $${[status, guest_id, from].filter(Boolean).length + 1}` : ''}
-      `, [status, guest_id, from, to].filter(Boolean))
+      pool.query(countQuery, filterParams),
     ]);
 
     res.json({ total: parseInt(countRows[0].total, 10), data: rows });
@@ -81,8 +67,8 @@ async function getBooking(req, res, next) {
        JOIN guest     g  ON g.id  = b.guest_id
        JOIN room      r  ON r.id  = b.room_id
        JOIN room_type rt ON rt.id = r.room_type_id
-       WHERE b.id = $1`,
-      [req.params.id]
+       WHERE b.id = $1 AND b.property_id = $2`,
+      [req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
 
@@ -120,12 +106,12 @@ async function createBooking(req, res, next) {
   try {
     await client.query('BEGIN');
 
-    // Check room exists and is active
+    // Check room exists, is active, and belongs to the caller's property
     const roomRes = await client.query(
       `SELECT r.id, r.status, rt.base_rate
        FROM room r JOIN room_type rt ON rt.id = r.room_type_id
-       WHERE r.id = $1`,
-      [room_id]
+       WHERE r.id = $1 AND r.property_id = $2`,
+      [room_id, req.property_id]
     );
     if (!roomRes.rows.length) {
       await client.query('ROLLBACK');
@@ -134,6 +120,14 @@ async function createBooking(req, res, next) {
     if (roomRes.rows[0].status !== 'active') {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Room is not active' });
+    }
+
+    const guestRes = await client.query(
+      'SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, req.property_id]
+    );
+    if (!guestRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Guest not found' });
     }
 
     // Check availability for every night
@@ -171,10 +165,11 @@ async function createBooking(req, res, next) {
     const overlapRes = await client.query(
       `SELECT id FROM booking
        WHERE room_id = $1
+         AND property_id = $4
          AND status = 'confirmed'
          AND check_in  < $3
          AND check_out > $2`,
-      [room_id, check_in, check_out]
+      [room_id, check_in, check_out, req.property_id]
     );
     if (overlapRes.rows.length) {
       await client.query('ROLLBACK');
@@ -191,9 +186,9 @@ async function createBooking(req, res, next) {
 
     // Insert booking
     const bookingRes = await client.query(
-      `INSERT INTO booking (guest_id, room_id, check_in, check_out, guests, total_price)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [guest_id, room_id, check_in, check_out, guests || 1, total.toFixed(2)]
+      `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.property_id, guest_id, room_id, check_in, check_out, guests || 1, total.toFixed(2)]
     );
 
     // Mark availability as unavailable
@@ -223,8 +218,8 @@ async function updateBooking(req, res, next) {
       `UPDATE booking SET
          status = COALESCE($1, status),
          guests = COALESCE($2, guests)
-       WHERE id = $3 RETURNING *`,
-      [status, guests, req.params.id]
+       WHERE id = $3 AND property_id = $4 RETURNING *`,
+      [status, guests, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
     res.json(rows[0]);
@@ -239,8 +234,8 @@ async function cancelBooking(req, res, next) {
     await client.query('BEGIN');
 
     const { rows } = await client.query(
-      `UPDATE booking SET status = 'cancelled' WHERE id = $1 AND status != 'cancelled' RETURNING *`,
-      [req.params.id]
+      `UPDATE booking SET status = 'cancelled' WHERE id = $1 AND property_id = $2 AND status != 'cancelled' RETURNING *`,
+      [req.params.id, req.property_id]
     );
     if (!rows.length) {
       await client.query('ROLLBACK');
