@@ -29,4 +29,7 @@ INSERT INTO time_slot (restaurant_id, slot_date, slot_time, available_seats)
 SELECT nr.id, d::date, tm.slot_time, 18
 FROM new_restaurant nr
 CROSS JOIN generate_series(CURRENT_DATE, CURRENT_DATE + INTERVAL '6 days', '1 day') AS d
-CROSS JOIN (VALUES ('13:00'::time), ('20:00'::time)) AS tm(slot_time);
+CROSS JOIN (
+  SELECT ('19:00'::time + (n * INTERVAL '15 min'))::time AS slot_time
+  FROM generate_series(0, 8) AS n
+) AS tm;
