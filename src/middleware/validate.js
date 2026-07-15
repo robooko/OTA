@@ -16,4 +16,8 @@ function isValidUuid(str) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 }
 
-module.exports = { requireFields, isValidDate, isValidUuid };
+function isValidTime(str) {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(str);
+}
+
+module.exports = { requireFields, isValidDate, isValidUuid, isValidTime };

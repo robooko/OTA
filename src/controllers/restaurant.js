@@ -1,5 +1,13 @@
 const pool = require('../db');
-const { isValidDate } = require('../middleware/validate');
+const { isValidDate, isValidTime } = require('../middleware/validate');
+
+function addMinutesToTime(timeStr, minutesToAdd) {
+  const [h, m] = timeStr.split(':').map(Number);
+  const total = h * 60 + m + minutesToAdd;
+  const hh = Math.floor(total / 60) % 24;
+  const mm = total % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
 
 // ── Restaurants ───────────────────────────────────────────────────────────────
 
@@ -213,45 +221,71 @@ async function getReservation(req, res, next) {
 
 async function createReservation(req, res, next) {
   const { restaurant_id } = req.params;
-  const { table_id, time_slot_id, guest_id, contact_name, contact_email, contact_phone, party_size, notes } = req.body;
+  const { reservation_date, start_time, location, guest_id, contact_name, contact_email, contact_phone, party_size, notes } = req.body;
 
-  if (!table_id || !time_slot_id || !contact_name || !party_size) {
-    return res.status(400).json({ error: 'table_id, time_slot_id, contact_name, and party_size are required' });
+  if (!reservation_date || !start_time || !contact_name || !party_size) {
+    return res.status(400).json({ error: 'reservation_date, start_time, contact_name, and party_size are required' });
+  }
+  if (!isValidDate(reservation_date)) return res.status(400).json({ error: 'Invalid date format' });
+  if (!isValidTime(start_time)) return res.status(400).json({ error: 'Invalid start_time format, use HH:MM' });
+  if (!Number.isInteger(party_size) || party_size <= 0) {
+    return res.status(400).json({ error: 'party_size must be a positive integer' });
   }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    const tableRes = await client.query(
-      'SELECT * FROM restaurant_table WHERE id = $1 AND restaurant_id = $2', [table_id, restaurant_id]
-    );
-    if (!tableRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Table not found' }); }
-    if (tableRes.rows[0].status !== 'active') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Table is not active' }); }
-    if (tableRes.rows[0].seats < party_size) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Table does not have enough seats' }); }
+    const restaurantRes = await client.query('SELECT * FROM restaurant WHERE id = $1', [restaurant_id]);
+    if (!restaurantRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Restaurant not found' });
+    }
+    const restaurant = restaurantRes.rows[0];
+    const serviceStart = restaurant.service_start.slice(0, 5);
+    const serviceEnd = restaurant.service_end.slice(0, 5);
+    const end_time = addMinutesToTime(start_time, restaurant.default_duration_minutes);
 
-    const slotRes = await client.query(
-      'SELECT * FROM time_slot WHERE id = $1 AND restaurant_id = $2', [time_slot_id, restaurant_id]
-    );
-    if (!slotRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Time slot not found' }); }
-    if (slotRes.rows[0].available_seats < party_size) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Not enough available seats in this slot' }); }
+    if (start_time < serviceStart || end_time > serviceEnd) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'start_time is outside service hours' });
+    }
 
-    const conflictRes = await client.query(
-      `SELECT id FROM restaurant_reservation WHERE table_id = $1 AND time_slot_id = $2 AND status != 'cancelled'`,
-      [table_id, time_slot_id]
+    const { rows: candidates } = await client.query(
+      `SELECT id FROM restaurant_table
+       WHERE restaurant_id = $1
+         AND status = 'active'
+         AND seats >= $2
+         AND ($3::varchar IS NULL OR location = $3)
+       ORDER BY seats ASC
+       FOR UPDATE SKIP LOCKED`,
+      [restaurant_id, party_size, location ?? null]
     );
-    if (conflictRes.rows.length) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Table already reserved for this time slot' }); }
+
+    let assignedTableId = null;
+    for (const table of candidates) {
+      const overlapRes = await client.query(
+        `SELECT id FROM restaurant_reservation
+         WHERE table_id = $1
+           AND reservation_date = $2
+           AND status != 'cancelled'
+           AND start_time < $4
+           AND end_time   > $3`,
+        [table.id, reservation_date, start_time, end_time]
+      );
+      if (!overlapRes.rows.length) { assignedTableId = table.id; break; }
+    }
+
+    if (!assignedTableId) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'No tables available for this time' });
+    }
 
     const { rows } = await client.query(
       `INSERT INTO restaurant_reservation
-         (table_id, time_slot_id, guest_id, contact_name, contact_email, contact_phone, party_size, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [table_id, time_slot_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null]
-    );
-
-    await client.query(
-      'UPDATE time_slot SET available_seats = available_seats - $1 WHERE id = $2',
-      [party_size, time_slot_id]
+         (table_id, reservation_date, start_time, end_time, guest_id, contact_name, contact_email, contact_phone, party_size, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [assignedTableId, reservation_date, start_time, end_time, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null]
     );
 
     await client.query('COMMIT');
