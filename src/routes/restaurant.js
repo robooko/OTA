@@ -13,11 +13,8 @@ router.get('/:restaurant_id/tables', ctrl.listTables);
 router.post('/:restaurant_id/tables', requireApiKey, ctrl.createTable);
 router.put('/:restaurant_id/tables/:id', requireApiKey, ctrl.updateTable);
 
-// Slots
-router.get('/:restaurant_id/slots', ctrl.listSlots);
-router.post('/:restaurant_id/slots', requireApiKey, ctrl.createSlot);
-router.post('/:restaurant_id/slots/bulk', requireApiKey, ctrl.bulkCreateSlots);
-router.get('/:restaurant_id/slots/search', ctrl.searchSlots);
+// Availability
+router.get('/:restaurant_id/availability/search', ctrl.searchAvailability);
 
 // Reservations
 router.get('/:restaurant_id/reservations', requireApiKey, ctrl.listReservations);

@@ -97,123 +97,79 @@ async function updateTable(req, res, next) {
   } catch (err) { next(err); }
 }
 
-// ── Time slots ────────────────────────────────────────────────────────────────
+// ── Availability search ─────────────────────────────────────────────────────
 
-async function listSlots(req, res, next) {
+async function searchAvailability(req, res, next) {
   try {
     const { restaurant_id } = req.params;
-    const { date, from, to } = req.query;
-    let query = 'SELECT * FROM time_slot WHERE restaurant_id = $1';
-    const params = [restaurant_id];
+    const { from, to, party_size, location } = req.query;
 
-    if (date) {
-      if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
-      params.push(date); query += ` AND slot_date = $${params.length}`;
-    }
-    if (from) {
-      if (!isValidDate(from)) return res.status(400).json({ error: 'Invalid from date' });
-      params.push(from); query += ` AND slot_date >= $${params.length}`;
-    }
-    if (to) {
-      if (!isValidDate(to)) return res.status(400).json({ error: 'Invalid to date' });
-      params.push(to); query += ` AND slot_date <= $${params.length}`;
-    }
-
-    query += ' ORDER BY slot_date, slot_time';
-    const { rows } = await pool.query(query, params);
-    res.json(rows);
-  } catch (err) { next(err); }
-}
-
-async function createSlot(req, res, next) {
-  try {
-    const { restaurant_id } = req.params;
-    const { slot_date, slot_time, available_seats } = req.body;
-    if (!slot_date || !slot_time || !available_seats) {
-      return res.status(400).json({ error: 'slot_date, slot_time, and available_seats are required' });
-    }
-    if (!isValidDate(slot_date)) return res.status(400).json({ error: 'Invalid date format' });
-    const { rows } = await pool.query(
-      `INSERT INTO time_slot (restaurant_id, slot_date, slot_time, available_seats) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [restaurant_id, slot_date, slot_time, available_seats]
-    );
-    res.status(201).json(rows[0]);
-  } catch (err) { next(err); }
-}
-
-async function bulkCreateSlots(req, res, next) {
-  try {
-    const { restaurant_id } = req.params;
-    const { from, to, times, available_seats } = req.body;
-
-    if (!from || !to || !Array.isArray(times) || !times.length || !available_seats) {
-      return res.status(400).json({ error: 'from, to, times array, and available_seats are required' });
+    if (!from || !to || !party_size) {
+      return res.status(400).json({ error: 'from, to, and party_size are required' });
     }
     if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'Invalid date format' });
     if (from > to) return res.status(400).json({ error: 'from must be before or equal to to' });
-
-    const rows = [];
-    const d = new Date(from);
-    const end = new Date(to);
-
-    while (d <= end) {
-      const date = d.toISOString().slice(0, 10);
-      for (const time of times) {
-        const { rows: inserted } = await pool.query(
-          `INSERT INTO time_slot (restaurant_id, slot_date, slot_time, available_seats)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (restaurant_id, slot_date, slot_time) DO NOTHING
-           RETURNING *`,
-          [restaurant_id, date, time, available_seats]
-        );
-        if (inserted.length) rows.push(inserted[0]);
-      }
-      d.setDate(d.getDate() + 1);
+    const partySize = parseInt(party_size, 10);
+    if (!Number.isInteger(partySize) || partySize <= 0) {
+      return res.status(400).json({ error: 'party_size must be a positive integer' });
     }
 
-    res.status(201).json({ created: rows.length, slots: rows });
-  } catch (err) { next(err); }
-}
-
-// ── Search available slots ────────────────────────────────────────────────────
-
-async function searchSlots(req, res, next) {
-  try {
-    const { restaurant_id } = req.params;
-    const { date, party_size } = req.query;
-    if (!date || !party_size) return res.status(400).json({ error: 'date and party_size are required' });
-    if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
+    const restaurantRes = await pool.query('SELECT id FROM restaurant WHERE id = $1', [restaurant_id]);
+    if (!restaurantRes.rows.length) return res.status(404).json({ error: 'Restaurant not found' });
 
     const { rows } = await pool.query(
-      `SELECT ts.*,
-              COUNT(rt.id) FILTER (WHERE rt.status = 'active') AS total_tables,
-              COUNT(rt.id) FILTER (WHERE rt.status = 'active' AND rt.seats >= $3
-                AND NOT EXISTS (
-                  SELECT 1 FROM restaurant_reservation rr
-                  WHERE rr.table_id = rt.id
-                    AND rr.time_slot_id = ts.id
-                    AND rr.status != 'cancelled'
-                )
-              ) AS available_tables
-       FROM time_slot ts
+      `WITH r AS (
+         SELECT service_start, service_end, slot_interval_minutes, default_duration_minutes
+         FROM restaurant WHERE id = $1
+       ),
+       candidate_times AS (
+         SELECT generate_series(
+           DATE '2000-01-01' + r.service_start,
+           DATE '2000-01-01' + r.service_end - (r.default_duration_minutes || ' minutes')::interval,
+           (r.slot_interval_minutes || ' minutes')::interval
+         )::time AS start_time
+         FROM r
+       ),
+       candidate_dates AS (
+         SELECT generate_series($2::date, $3::date, '1 day')::date AS reservation_date
+       )
+       SELECT
+         to_char(cd.reservation_date, 'YYYY-MM-DD') AS reservation_date,
+         ct.start_time,
+         rt.location,
+         COUNT(rt.id) AS available_tables
+       FROM candidate_dates cd
+       CROSS JOIN candidate_times ct
        CROSS JOIN restaurant_table rt
-       WHERE ts.restaurant_id = $1
-         AND rt.restaurant_id = $1
-         AND ts.slot_date = $2
-         AND ts.available_seats >= $3
-       GROUP BY ts.id
-       HAVING COUNT(rt.id) FILTER (WHERE rt.status = 'active' AND rt.seats >= $3
-                AND NOT EXISTS (
-                  SELECT 1 FROM restaurant_reservation rr
-                  WHERE rr.table_id = rt.id
-                    AND rr.time_slot_id = ts.id
-                    AND rr.status != 'cancelled'
-                )
-              ) > 0
-       ORDER BY ts.slot_time`,
-      [restaurant_id, date, parseInt(party_size, 10)]
+       WHERE rt.restaurant_id = $1
+         AND rt.status = 'active'
+         AND rt.seats >= $4
+         AND ($5::varchar IS NULL OR rt.location = $5)
+         AND NOT EXISTS (
+           SELECT 1 FROM restaurant_reservation rr
+           CROSS JOIN r
+           WHERE rr.table_id = rt.id
+             AND rr.reservation_date = cd.reservation_date
+             AND rr.status != 'cancelled'
+             AND rr.start_time < ct.start_time + (r.default_duration_minutes || ' minutes')::interval
+             AND rr.end_time   > ct.start_time
+         )
+       GROUP BY cd.reservation_date, ct.start_time, rt.location
+       HAVING COUNT(rt.id) > 0
+       ORDER BY cd.reservation_date, ct.start_time, rt.location`,
+      [restaurant_id, from, to, partySize, location ?? null]
     );
-    res.json(rows);
+
+    const byDate = new Map();
+    for (const row of rows) {
+      if (!byDate.has(row.reservation_date)) byDate.set(row.reservation_date, []);
+      byDate.get(row.reservation_date).push({
+        time: row.start_time.slice(0, 5),
+        location: row.location,
+        available_tables: parseInt(row.available_tables, 10),
+      });
+    }
+    res.json([...byDate.entries()].map(([date, slots]) => ({ date, slots })));
   } catch (err) { next(err); }
 }
 
@@ -337,6 +293,6 @@ async function updateReservation(req, res, next) {
 module.exports = {
   listRestaurants, getRestaurant, createRestaurant, updateRestaurant,
   listTables, createTable, updateTable,
-  listSlots, createSlot, bulkCreateSlots, searchSlots,
+  searchAvailability,
   listReservations, getReservation, createReservation, updateReservation,
 };
