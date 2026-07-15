@@ -804,18 +804,18 @@ async function createReservation(req, res, next) {
 }
 ```
 
-- [ ] **Step 5: Verify** (`$RID` = Bonito's restaurant id, as in Task 3)
+- [ ] **Step 5: Verify** (`$RID` = Bonito's restaurant id, as in Task 3; `POST /reservations` still requires `X-Api-Key` — that route's auth middleware is unchanged by this task)
 
 ```bash
 curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST "http://localhost:3000/api/restaurant/$RID/reservations" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-Api-Key: $API_KEY" \
   -d '{"reservation_date":"2026-07-16","start_time":"19:00","party_size":2,"contact_name":"Alice"}'
 ```
 Expected: `201` with `reservation_date:"2026-07-16"`, `start_time:"19:00:00"`, `end_time:"20:30:00"`, and a `table_id` UUID.
 
 ```bash
 curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST "http://localhost:3000/api/restaurant/$RID/reservations" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-Api-Key: $API_KEY" \
   -d '{"reservation_date":"2026-07-16","start_time":"21:15","party_size":2,"contact_name":"Bob"}'
 ```
 Expected: `400 {"error":"start_time is outside service hours"}` — `21:15 + 90min = 22:45`, past `service_end` (`22:30`).
@@ -1112,10 +1112,10 @@ Set up a restaurant with exactly one qualifying table for a 6-person party (Boni
 ```bash
 RID=$(curl -s http://localhost:3000/api/restaurant | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).find(r=>r.name==='Bonito').id))")
 (curl -s -w "\nSTATUS:%{http_code}\n" -X POST "http://localhost:3000/api/restaurant/$RID/reservations" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-Api-Key: $API_KEY" \
   -d '{"reservation_date":"2026-07-20","start_time":"19:00","party_size":6,"contact_name":"Party A"}' &
 curl -s -w "\nSTATUS:%{http_code}\n" -X POST "http://localhost:3000/api/restaurant/$RID/reservations" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-Api-Key: $API_KEY" \
   -d '{"reservation_date":"2026-07-20","start_time":"19:00","party_size":6,"contact_name":"Party B"}' &
 wait)
 ```
@@ -1125,7 +1125,7 @@ Expected: exactly one response shows `STATUS:201`, the other shows `STATUS:409 {
 
 ```bash
 curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST "http://localhost:3000/api/restaurant/$RID/reservations" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-Api-Key: $API_KEY" \
   -d '{"reservation_date":"2026-07-21","start_time":"21:30","party_size":2,"contact_name":"Late Party"}'
 ```
 Expected: `400 {"error":"start_time is outside service hours"}` (`21:30 + 90min = 23:00`, past `service_end` `22:30`).
