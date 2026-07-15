@@ -151,11 +151,15 @@ CREATE INDEX IF NOT EXISTS idx_api_user_property ON api_user(property_id);
 -- ── Restaurant ────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS restaurant (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name        VARCHAR(100) NOT NULL,
-  description TEXT,
-  phone       VARCHAR(30),
-  created_at  TIMESTAMPTZ DEFAULT now()
+  id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                      VARCHAR(100) NOT NULL,
+  description               TEXT,
+  phone                     VARCHAR(30),
+  service_start             TIME         NOT NULL,
+  service_end               TIME         NOT NULL,
+  slot_interval_minutes     INT          NOT NULL DEFAULT 15,
+  default_duration_minutes  INT          NOT NULL,
+  created_at                TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS restaurant_table (
@@ -168,32 +172,24 @@ CREATE TABLE IF NOT EXISTS restaurant_table (
   UNIQUE (restaurant_id, table_number)
 );
 
-CREATE TABLE IF NOT EXISTS time_slot (
-  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  restaurant_id    UUID         NOT NULL REFERENCES restaurant(id),
-  slot_date        DATE         NOT NULL,
-  slot_time        TIME         NOT NULL,
-  available_seats  INT          NOT NULL,
-  UNIQUE (restaurant_id, slot_date, slot_time)
-);
-
 CREATE TABLE IF NOT EXISTS restaurant_reservation (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  table_id      UUID         NOT NULL REFERENCES restaurant_table(id),
-  time_slot_id  UUID         NOT NULL REFERENCES time_slot(id),
-  guest_id      UUID         REFERENCES guest(id),
-  contact_name  VARCHAR(100) NOT NULL,
-  contact_email VARCHAR(255),
-  contact_phone VARCHAR(30),
-  party_size    INT          NOT NULL,
-  status        VARCHAR(20)  DEFAULT 'confirmed',
-  notes         TEXT,
-  created_at    TIMESTAMPTZ  DEFAULT now()
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  table_id         UUID         NOT NULL REFERENCES restaurant_table(id),
+  reservation_date DATE         NOT NULL,
+  start_time       TIME         NOT NULL,
+  end_time         TIME         NOT NULL,
+  guest_id         UUID         REFERENCES guest(id),
+  contact_name     VARCHAR(100) NOT NULL,
+  contact_email    VARCHAR(255),
+  contact_phone    VARCHAR(30),
+  party_size       INT          NOT NULL,
+  status           VARCHAR(20)  DEFAULT 'confirmed',
+  notes            TEXT,
+  created_at       TIMESTAMPTZ  DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_restaurant_table_restaurant   ON restaurant_table(restaurant_id);
-CREATE INDEX IF NOT EXISTS idx_time_slot_restaurant          ON time_slot(restaurant_id);
-CREATE INDEX IF NOT EXISTS idx_restaurant_res_table_slot     ON restaurant_reservation(table_id, time_slot_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_table_restaurant    ON restaurant_table(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_res_table_date_time ON restaurant_reservation(table_id, reservation_date, start_time);
 
 -- ── Spa ───────────────────────────────────────────────────────────────────────
 
