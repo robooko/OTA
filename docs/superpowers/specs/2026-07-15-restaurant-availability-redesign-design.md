@@ -238,9 +238,13 @@ is edited in place and applied to a freshly reset dev database):
 - `schema.sql`: add the 4 `restaurant` columns, drop `time_slot`, alter
   `restaurant_reservation`, update indexes.
 - `seed-restaurant-bonito.sql`: set Bonito's `service_start`/`service_end`/
-  `slot_interval_minutes`/`default_duration_minutes` to `19:00`, `21:00`,
-  `15`, and `90` (a 90-minute default dinner reservation), and drop the old
-  direct `time_slot` inserts.
+  `slot_interval_minutes`/`default_duration_minutes` to `19:00`, `22:30`,
+  `15`, and `90` (a 90-minute default dinner reservation). `service_end` is
+  `22:30`, not `21:00` as originally sketched — with a 90-minute duration, a
+  2-hour window only yields 3 bookable start times (19:00-19:30); widening
+  to `22:30` restores 9 start times (19:00-21:00 every 15 min), matching the
+  slot count this restaurant had before the redesign. Drop the old direct
+  `time_slot` inserts.
 - Applying the change is a reset: drop/recreate the dev database (local and
   the `otadb` instance the live Render service uses), rerun `schema.sql`,
   then the seed files. The reservations created during this session's live
