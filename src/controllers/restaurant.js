@@ -188,17 +188,16 @@ async function listReservations(req, res, next) {
     const { restaurant_id } = req.params;
     const { date, status, guest_id } = req.query;
     let query = `
-      SELECT rr.*, ts.slot_date, ts.slot_time, rt.table_number, rt.seats, rt.location
+      SELECT rr.*, rt.table_number, rt.seats, rt.location
       FROM restaurant_reservation rr
-      JOIN time_slot ts ON ts.id = rr.time_slot_id
       JOIN restaurant_table rt ON rt.id = rr.table_id
-      WHERE ts.restaurant_id = $1
+      WHERE rt.restaurant_id = $1
     `;
     const params = [restaurant_id];
-    if (date) { params.push(date); query += ` AND ts.slot_date = $${params.length}`; }
+    if (date) { params.push(date); query += ` AND rr.reservation_date = $${params.length}`; }
     if (status) { params.push(status); query += ` AND rr.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND rr.guest_id = $${params.length}`; }
-    query += ' ORDER BY ts.slot_date, ts.slot_time';
+    query += ' ORDER BY rr.reservation_date, rr.start_time';
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) { next(err); }
@@ -207,9 +206,8 @@ async function listReservations(req, res, next) {
 async function getReservation(req, res, next) {
   try {
     const { rows } = await pool.query(
-      `SELECT rr.*, ts.slot_date, ts.slot_time, rt.table_number, rt.seats, rt.location
+      `SELECT rr.*, rt.table_number, rt.seats, rt.location
        FROM restaurant_reservation rr
-       JOIN time_slot ts ON ts.id = rr.time_slot_id
        JOIN restaurant_table rt ON rt.id = rr.table_id
        WHERE rr.id = $1`,
       [req.params.id]
@@ -312,14 +310,6 @@ async function updateReservation(req, res, next) {
       [status, notes, contact_name, contact_email, contact_phone, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Reservation not found' });
-
-    if (status === 'cancelled') {
-      await pool.query(
-        'UPDATE time_slot SET available_seats = available_seats + $1 WHERE id = $2',
-        [rows[0].party_size, rows[0].time_slot_id]
-      );
-    }
-
     res.json(rows[0]);
   } catch (err) { next(err); }
 }
