@@ -20,11 +20,14 @@ async function getRestaurant(req, res, next) {
 
 async function createRestaurant(req, res, next) {
   try {
-    const { name, description, phone } = req.body;
-    if (!name) return res.status(400).json({ error: 'name is required' });
+    const { name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes } = req.body;
+    if (!name || !service_start || !service_end || !default_duration_minutes) {
+      return res.status(400).json({ error: 'name, service_start, service_end, and default_duration_minutes are required' });
+    }
     const { rows } = await pool.query(
-      `INSERT INTO restaurant (name, description, phone) VALUES ($1, $2, $3) RETURNING *`,
-      [name, description ?? null, phone ?? null]
+      `INSERT INTO restaurant (name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [name, description ?? null, phone ?? null, service_start, service_end, slot_interval_minutes ?? 15, default_duration_minutes]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -32,14 +35,18 @@ async function createRestaurant(req, res, next) {
 
 async function updateRestaurant(req, res, next) {
   try {
-    const { name, description, phone } = req.body;
+    const { name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes } = req.body;
     const { rows } = await pool.query(
       `UPDATE restaurant SET
-         name        = COALESCE($1, name),
-         description = COALESCE($2, description),
-         phone       = COALESCE($3, phone)
-       WHERE id = $4 RETURNING *`,
-      [name, description, phone, req.params.id]
+         name                     = COALESCE($1, name),
+         description              = COALESCE($2, description),
+         phone                    = COALESCE($3, phone),
+         service_start            = COALESCE($4, service_start),
+         service_end              = COALESCE($5, service_end),
+         slot_interval_minutes    = COALESCE($6, slot_interval_minutes),
+         default_duration_minutes = COALESCE($7, default_duration_minutes)
+       WHERE id = $8 RETURNING *`,
+      [name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
     res.json(rows[0]);
