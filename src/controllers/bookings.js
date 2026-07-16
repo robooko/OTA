@@ -150,7 +150,7 @@ async function createBooking(req, res, next) {
 
     const availMap = {};
     for (const row of availRes.rows) {
-      availMap[row.date.toISOString().slice(0, 10)] = row;
+      availMap[row.date] = row;
     }
 
     for (const date of required) {
