@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS restaurant_reservation (
   start_time       TIME         NOT NULL,
   end_time         TIME         NOT NULL,
   guest_id         UUID         REFERENCES guest(id),
+  clerk_user_id    VARCHAR(100),
   contact_name     VARCHAR(100) NOT NULL,
   contact_email    VARCHAR(255),
   contact_phone    VARCHAR(30),
@@ -190,6 +191,7 @@ CREATE TABLE IF NOT EXISTS restaurant_reservation (
 
 CREATE INDEX IF NOT EXISTS idx_restaurant_table_restaurant    ON restaurant_table(restaurant_id);
 CREATE INDEX IF NOT EXISTS idx_restaurant_res_table_date_time ON restaurant_reservation(table_id, reservation_date, start_time);
+CREATE INDEX IF NOT EXISTS idx_restaurant_res_clerk_user      ON restaurant_reservation(clerk_user_id);
 
 -- ── Spa ───────────────────────────────────────────────────────────────────────
 
