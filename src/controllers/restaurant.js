@@ -186,7 +186,7 @@ async function searchAvailability(req, res, next) {
 async function listReservations(req, res, next) {
   try {
     const { restaurant_id } = req.params;
-    const { date, status, guest_id } = req.query;
+    const { date, status, guest_id, clerk_user_id } = req.query;
     let query = `
       SELECT rr.*, rt.table_number, rt.seats, rt.location
       FROM restaurant_reservation rr
@@ -197,6 +197,7 @@ async function listReservations(req, res, next) {
     if (date) { params.push(date); query += ` AND rr.reservation_date = $${params.length}`; }
     if (status) { params.push(status); query += ` AND rr.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND rr.guest_id = $${params.length}`; }
+    if (clerk_user_id) { params.push(clerk_user_id); query += ` AND rr.clerk_user_id = $${params.length}`; }
     query += ' ORDER BY rr.reservation_date, rr.start_time';
     const { rows } = await pool.query(query, params);
     res.json(rows);
@@ -219,7 +220,7 @@ async function getReservation(req, res, next) {
 
 async function createReservation(req, res, next) {
   const { restaurant_id } = req.params;
-  const { reservation_date, start_time, location, guest_id, contact_name, contact_email, contact_phone, party_size, notes } = req.body;
+  const { reservation_date, start_time, location, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes } = req.body;
 
   if (!reservation_date || !start_time || !contact_name || !party_size) {
     return res.status(400).json({ error: 'reservation_date, start_time, contact_name, and party_size are required' });
@@ -281,9 +282,9 @@ async function createReservation(req, res, next) {
 
     const { rows } = await client.query(
       `INSERT INTO restaurant_reservation
-         (table_id, reservation_date, start_time, end_time, guest_id, contact_name, contact_email, contact_phone, party_size, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [assignedTableId, reservation_date, start_time, end_time, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null]
+         (table_id, reservation_date, start_time, end_time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [assignedTableId, reservation_date, start_time, end_time, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null]
     );
 
     await client.query('COMMIT');
