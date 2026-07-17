@@ -14,6 +14,10 @@ function isoDayOfWeek(dateStr) {
   return jsDay === 0 ? 7 : jsDay;
 }
 
+function isValidClosedDays(arr) {
+  return Array.isArray(arr) && arr.every((d) => Number.isInteger(d) && d >= 1 && d <= 7);
+}
+
 // ── Restaurants ───────────────────────────────────────────────────────────────
 
 async function listRestaurants(req, res, next) {
@@ -33,14 +37,17 @@ async function getRestaurant(req, res, next) {
 
 async function createRestaurant(req, res, next) {
   try {
-    const { name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes } = req.body;
+    const { name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes, closed_days } = req.body;
     if (!name || !service_start || !service_end || !default_duration_minutes) {
       return res.status(400).json({ error: 'name, service_start, service_end, and default_duration_minutes are required' });
     }
+    if (closed_days !== undefined && !isValidClosedDays(closed_days)) {
+      return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
+    }
     const { rows } = await pool.query(
-      `INSERT INTO restaurant (name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [name, description ?? null, phone ?? null, service_start, service_end, slot_interval_minutes ?? 15, default_duration_minutes]
+      `INSERT INTO restaurant (name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes, closed_days)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [name, description ?? null, phone ?? null, service_start, service_end, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? []]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -48,7 +55,10 @@ async function createRestaurant(req, res, next) {
 
 async function updateRestaurant(req, res, next) {
   try {
-    const { name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes } = req.body;
+    const { name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes, closed_days } = req.body;
+    if (closed_days !== undefined && !isValidClosedDays(closed_days)) {
+      return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
+    }
     const { rows } = await pool.query(
       `UPDATE restaurant SET
          name                     = COALESCE($1, name),
@@ -57,9 +67,10 @@ async function updateRestaurant(req, res, next) {
          service_start            = COALESCE($4, service_start),
          service_end              = COALESCE($5, service_end),
          slot_interval_minutes    = COALESCE($6, slot_interval_minutes),
-         default_duration_minutes = COALESCE($7, default_duration_minutes)
-       WHERE id = $8 RETURNING *`,
-      [name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes, req.params.id]
+         default_duration_minutes = COALESCE($7, default_duration_minutes),
+         closed_days              = COALESCE($8, closed_days)
+       WHERE id = $9 RETURNING *`,
+      [name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes, closed_days, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
     res.json(rows[0]);
