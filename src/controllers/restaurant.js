@@ -9,6 +9,11 @@ function addMinutesToTime(timeStr, minutesToAdd) {
   return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 
+function isoDayOfWeek(dateStr) {
+  const jsDay = new Date(`${dateStr}T00:00:00Z`).getUTCDay();
+  return jsDay === 0 ? 7 : jsDay;
+}
+
 // ── Restaurants ───────────────────────────────────────────────────────────────
 
 async function listRestaurants(req, res, next) {
@@ -244,6 +249,12 @@ async function createReservation(req, res, next) {
       return res.status(404).json({ error: 'Restaurant not found' });
     }
     const restaurant = restaurantRes.rows[0];
+
+    if (restaurant.closed_days.includes(isoDayOfWeek(reservation_date))) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Restaurant is closed on this day' });
+    }
+
     const serviceStart = restaurant.service_start.slice(0, 5);
     const serviceEnd = restaurant.service_end.slice(0, 5);
     const end_time = addMinutesToTime(start_time, restaurant.default_duration_minutes);
