@@ -127,7 +127,7 @@ async function searchAvailability(req, res, next) {
 
     const { rows } = await pool.query(
       `WITH r AS (
-         SELECT service_start, service_end, slot_interval_minutes, default_duration_minutes
+         SELECT service_start, service_end, slot_interval_minutes, default_duration_minutes, closed_days
          FROM restaurant WHERE id = $1
        ),
        candidate_times AS (
@@ -139,7 +139,10 @@ async function searchAvailability(req, res, next) {
          FROM r
        ),
        candidate_dates AS (
-         SELECT generate_series($2::date, $3::date, '1 day')::date AS reservation_date
+         SELECT gs::date AS reservation_date
+         FROM generate_series($2::date, $3::date, '1 day') AS gs
+         CROSS JOIN r
+         WHERE NOT (EXTRACT(ISODOW FROM gs)::int = ANY(r.closed_days))
        )
        SELECT
          to_char(cd.reservation_date, 'YYYY-MM-DD') AS reservation_date,
