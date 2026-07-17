@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS restaurant (
   service_end               TIME         NOT NULL,
   slot_interval_minutes     INT          NOT NULL DEFAULT 15,
   default_duration_minutes  INT          NOT NULL,
+  closed_days               SMALLINT[]   NOT NULL DEFAULT '{}',
   created_at                TIMESTAMPTZ DEFAULT now()
 );
 
