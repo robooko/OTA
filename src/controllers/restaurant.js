@@ -272,6 +272,18 @@ async function createReservation(req, res, next) {
       return res.status(400).json({ error: 'Restaurant is closed on this day' });
     }
 
+    const seasonRes = await client.query(
+      `SELECT 1 FROM restaurant_seasonal_closure
+       WHERE restaurant_id = $1
+         AND ROW(EXTRACT(MONTH FROM $2::date)::int, EXTRACT(DAY FROM $2::date)::int)
+             BETWEEN ROW(start_month, start_day) AND ROW(end_month, end_day)`,
+      [restaurant_id, reservation_date]
+    );
+    if (seasonRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Restaurant is closed on this day' });
+    }
+
     const serviceStart = restaurant.service_start.slice(0, 5);
     const serviceEnd = restaurant.service_end.slice(0, 5);
     const end_time = addMinutesToTime(start_time, restaurant.default_duration_minutes);
