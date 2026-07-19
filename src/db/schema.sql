@@ -190,9 +190,20 @@ CREATE TABLE IF NOT EXISTS restaurant_reservation (
   created_at       TIMESTAMPTZ  DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_restaurant_table_restaurant    ON restaurant_table(restaurant_id);
-CREATE INDEX IF NOT EXISTS idx_restaurant_res_table_date_time ON restaurant_reservation(table_id, reservation_date, start_time);
-CREATE INDEX IF NOT EXISTS idx_restaurant_res_clerk_user      ON restaurant_reservation(clerk_user_id);
+CREATE TABLE IF NOT EXISTS restaurant_seasonal_closure (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  restaurant_id UUID     NOT NULL REFERENCES restaurant(id),
+  start_month   SMALLINT NOT NULL CHECK (start_month BETWEEN 1 AND 12),
+  start_day     SMALLINT NOT NULL CHECK (start_day BETWEEN 1 AND 31),
+  end_month     SMALLINT NOT NULL CHECK (end_month BETWEEN 1 AND 12),
+  end_day       SMALLINT NOT NULL CHECK (end_day BETWEEN 1 AND 31),
+  CHECK (ROW(start_month, start_day) <= ROW(end_month, end_day))
+);
+
+CREATE INDEX IF NOT EXISTS idx_restaurant_table_restaurant        ON restaurant_table(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_res_table_date_time     ON restaurant_reservation(table_id, reservation_date, start_time);
+CREATE INDEX IF NOT EXISTS idx_restaurant_res_clerk_user          ON restaurant_reservation(clerk_user_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_seasonal_closure_rest   ON restaurant_seasonal_closure(restaurant_id);
 
 -- ── Spa ───────────────────────────────────────────────────────────────────────
 

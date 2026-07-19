@@ -34,18 +34,25 @@ WITH new_restaurant AS (
     'Betula',
     'A casual European bistro with a seasonal small-plates menu.',
     '+1-555-0202',
-    '18:00', '22:00', 15, 75
+    '17:30', '23:00', 15, 75
   )
   RETURNING id
+), new_tables AS (
+  INSERT INTO restaurant_table (restaurant_id, table_number, seats, location)
+  SELECT new_restaurant.id, t.table_number, t.seats, t.location
+  FROM new_restaurant, (VALUES
+    ('T1', 2, 'Indoor'),
+    ('T2', 2, 'Indoor'),
+    ('T3', 4, 'Indoor'),
+    ('T4', 4, 'Terrace')
+  ) AS t(table_number, seats, location)
 )
-INSERT INTO restaurant_table (restaurant_id, table_number, seats, location)
-SELECT new_restaurant.id, t.table_number, t.seats, t.location
+INSERT INTO restaurant_seasonal_closure (restaurant_id, start_month, start_day, end_month, end_day)
+SELECT new_restaurant.id, sc.start_month, sc.start_day, sc.end_month, sc.end_day
 FROM new_restaurant, (VALUES
-  ('T1', 2, 'Indoor'),
-  ('T2', 2, 'Indoor'),
-  ('T3', 4, 'Indoor'),
-  ('T4', 4, 'Terrace')
-) AS t(table_number, seats, location);
+  (4, 15, 5, 25),
+  (10, 1, 11, 25)
+) AS sc(start_month, start_day, end_month, end_day);
 
 WITH new_restaurant AS (
   INSERT INTO restaurant (name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes)
