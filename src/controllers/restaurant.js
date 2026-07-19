@@ -159,6 +159,12 @@ async function searchAvailability(req, res, next) {
          FROM generate_series($2::date, $3::date, '1 day') AS gs
          CROSS JOIN r
          WHERE NOT (EXTRACT(ISODOW FROM gs)::int = ANY(r.closed_days))
+           AND NOT EXISTS (
+             SELECT 1 FROM restaurant_seasonal_closure sc
+             WHERE sc.restaurant_id = $1
+               AND ROW(EXTRACT(MONTH FROM gs)::int, EXTRACT(DAY FROM gs)::int)
+                   BETWEEN ROW(sc.start_month, sc.start_day) AND ROW(sc.end_month, sc.end_day)
+           )
        )
        SELECT
          to_char(cd.reservation_date, 'YYYY-MM-DD') AS reservation_date,
