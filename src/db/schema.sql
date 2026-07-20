@@ -155,8 +155,6 @@ CREATE TABLE IF NOT EXISTS restaurant (
   name                      VARCHAR(100) NOT NULL,
   description               TEXT,
   phone                     VARCHAR(30),
-  service_start             TIME         NOT NULL,
-  service_end               TIME         NOT NULL,
   slot_interval_minutes     INT          NOT NULL DEFAULT 15,
   default_duration_minutes  INT          NOT NULL,
   closed_days               SMALLINT[]   NOT NULL DEFAULT '{}',
@@ -171,6 +169,15 @@ CREATE TABLE IF NOT EXISTS restaurant_table (
   location      VARCHAR(50),
   status        VARCHAR(20)  DEFAULT 'active',
   UNIQUE (restaurant_id, table_number)
+);
+
+CREATE TABLE IF NOT EXISTS service_period (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  restaurant_id UUID NOT NULL REFERENCES restaurant(id),
+  label         VARCHAR(50),
+  start_time    TIME NOT NULL,
+  end_time      TIME NOT NULL,
+  CHECK (start_time < end_time)
 );
 
 CREATE TABLE IF NOT EXISTS restaurant_reservation (
@@ -204,6 +211,7 @@ CREATE INDEX IF NOT EXISTS idx_restaurant_table_restaurant        ON restaurant_
 CREATE INDEX IF NOT EXISTS idx_restaurant_res_table_date_time     ON restaurant_reservation(table_id, reservation_date, start_time);
 CREATE INDEX IF NOT EXISTS idx_restaurant_res_clerk_user          ON restaurant_reservation(clerk_user_id);
 CREATE INDEX IF NOT EXISTS idx_restaurant_seasonal_closure_rest   ON restaurant_seasonal_closure(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_service_period_restaurant          ON service_period(restaurant_id);
 
 -- ── Spa ───────────────────────────────────────────────────────────────────────
 
