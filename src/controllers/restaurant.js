@@ -37,17 +37,17 @@ async function getRestaurant(req, res, next) {
 
 async function createRestaurant(req, res, next) {
   try {
-    const { name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes, closed_days } = req.body;
-    if (!name || !service_start || !service_end || !default_duration_minutes) {
-      return res.status(400).json({ error: 'name, service_start, service_end, and default_duration_minutes are required' });
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days } = req.body;
+    if (!name || !default_duration_minutes) {
+      return res.status(400).json({ error: 'name and default_duration_minutes are required' });
     }
     if (closed_days !== undefined && !isValidClosedDays(closed_days)) {
       return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO restaurant (name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes, closed_days)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [name, description ?? null, phone ?? null, service_start, service_end, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? []]
+      `INSERT INTO restaurant (name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? []]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -55,7 +55,7 @@ async function createRestaurant(req, res, next) {
 
 async function updateRestaurant(req, res, next) {
   try {
-    const { name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes, closed_days } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days } = req.body;
     if (closed_days !== undefined && !isValidClosedDays(closed_days)) {
       return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
     }
@@ -64,13 +64,11 @@ async function updateRestaurant(req, res, next) {
          name                     = COALESCE($1, name),
          description              = COALESCE($2, description),
          phone                    = COALESCE($3, phone),
-         service_start            = COALESCE($4, service_start),
-         service_end              = COALESCE($5, service_end),
-         slot_interval_minutes    = COALESCE($6, slot_interval_minutes),
-         default_duration_minutes = COALESCE($7, default_duration_minutes),
-         closed_days              = COALESCE($8, closed_days)
-       WHERE id = $9 RETURNING *`,
-      [name, description, phone, service_start, service_end, slot_interval_minutes, default_duration_minutes, closed_days, req.params.id]
+         slot_interval_minutes    = COALESCE($4, slot_interval_minutes),
+         default_duration_minutes = COALESCE($5, default_duration_minutes),
+         closed_days              = COALESCE($6, closed_days)
+       WHERE id = $7 RETURNING *`,
+      [name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
     res.json(rows[0]);
@@ -143,16 +141,18 @@ async function searchAvailability(req, res, next) {
 
     const { rows } = await pool.query(
       `WITH r AS (
-         SELECT service_start, service_end, slot_interval_minutes, default_duration_minutes, closed_days
+         SELECT slot_interval_minutes, default_duration_minutes, closed_days
          FROM restaurant WHERE id = $1
        ),
        candidate_times AS (
          SELECT generate_series(
-           DATE '2000-01-01' + r.service_start,
-           DATE '2000-01-01' + r.service_end - (r.default_duration_minutes || ' minutes')::interval,
+           DATE '2000-01-01' + sp.start_time,
+           DATE '2000-01-01' + sp.end_time - (r.default_duration_minutes || ' minutes')::interval,
            (r.slot_interval_minutes || ' minutes')::interval
          )::time AS start_time
-         FROM r
+         FROM service_period sp
+         CROSS JOIN r
+         WHERE sp.restaurant_id = $1
        ),
        candidate_dates AS (
          SELECT gs::date AS reservation_date
@@ -284,11 +284,17 @@ async function createReservation(req, res, next) {
       return res.status(400).json({ error: 'Restaurant is closed on this day' });
     }
 
-    const serviceStart = restaurant.service_start.slice(0, 5);
-    const serviceEnd = restaurant.service_end.slice(0, 5);
     const end_time = addMinutesToTime(start_time, restaurant.default_duration_minutes);
-
-    if (start_time < serviceStart || end_time > serviceEnd) {
+    const periodsRes = await client.query(
+      'SELECT start_time, end_time FROM service_period WHERE restaurant_id = $1',
+      [restaurant_id]
+    );
+    const fitsAPeriod = periodsRes.rows.some((p) => {
+      const periodStart = p.start_time.slice(0, 5);
+      const periodEnd = p.end_time.slice(0, 5);
+      return start_time >= periodStart && end_time <= periodEnd;
+    });
+    if (!fitsAPeriod) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'start_time is outside service hours' });
     }
