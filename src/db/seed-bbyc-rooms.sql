@@ -8,12 +8,13 @@
 INSERT INTO property (id, name, status) VALUES
   ('e1000000-0000-0000-0000-000000000004', 'BBYC', 'active');
 
--- Bootstrap admin (password: "changeme123", same hash as the other seeded admins)
+-- Bootstrap admin (password: "Bbyc-dE3OSnze!1" - unique to BBYC, unlike the
+-- other seeded admins which all share the "changeme123" hash)
 INSERT INTO api_user (id, property_id, name, email, password_hash, role) VALUES
   ('f4000000-0000-0000-0000-000000000001',
    'e1000000-0000-0000-0000-000000000004',
    'BBYC Admin', 'admin@bbyc.example.com',
-   '$2b$12$AeG.yVLwhNPTxp2WeowJ8OZ6J9m4Kyn/sasVTECO/nHbxaBXMzycu', 'admin');
+   '$2b$12$ZhUXCnALBqJQURY/AaRvSOdq9II08MrFN4hIlKrj5WxbqrjoU2uny', 'admin');
 
 -- Room type
 INSERT INTO room_type (id, property_id, name, description, max_occupancy, base_rate) VALUES
