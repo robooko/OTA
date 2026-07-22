@@ -35,6 +35,11 @@ const swaggerSpec = {
         scheme: 'bearer',
         bearerFormat: 'JWT',
       },
+      apiKeyAuth: {
+        type: 'apiKey',
+        in: 'header',
+        name: 'X-Api-Key',
+      },
     },
     schemas: {
       Error: {
@@ -175,6 +180,7 @@ const swaggerSpec = {
       post: {
         tags: ['Guests'],
         summary: 'Create a guest',
+        security: [{ bearerAuth: [] }, { apiKeyAuth: [] }],
         requestBody: {
           required: true,
           content: {
@@ -187,6 +193,7 @@ const swaggerSpec = {
                   last_name: { type: 'string' },
                   email: { type: 'string', format: 'email' },
                   phone: { type: 'string' },
+                  property_id: { type: 'string', format: 'uuid', description: 'Required only when authenticating with X-Api-Key; ignored (the JWT\'s property is used instead) when authenticating with a Bearer token.' },
                 },
               },
             },
@@ -245,7 +252,7 @@ const swaggerSpec = {
     // ── Bookings ─────────────────────────────────────────────────────────────
     '/api/bookings': {
       get: { tags: ['Bookings'], summary: 'List bookings', parameters: [{ name: 'status', in: 'query', schema: { type: 'string' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'to', in: 'query', schema: { type: 'string', format: 'date' } }], responses: { 200: { description: 'Array of bookings' } } },
-      post: { tags: ['Bookings'], summary: 'Create booking', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['guest_id', 'room_id', 'check_in', 'check_out'], properties: { guest_id: { type: 'string', format: 'uuid' }, room_id: { type: 'string', format: 'uuid' }, check_in: { type: 'string', format: 'date' }, check_out: { type: 'string', format: 'date' }, guests: { type: 'integer' }, metadata: { type: 'object', additionalProperties: true, example: { pickup_location: 'InterContinental Le Moana Bora Bora Resort' } } } } } } }, responses: { 201: { description: 'Booking created with total price' }, 409: { description: 'Room not available' } } },
+      post: { tags: ['Bookings'], summary: 'Create booking', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['guest_id', 'room_id', 'check_in', 'check_out'], properties: { guest_id: { type: 'string', format: 'uuid' }, room_id: { type: 'string', format: 'uuid' }, check_in: { type: 'string', format: 'date' }, check_out: { type: 'string', format: 'date' }, guests: { type: 'integer' }, metadata: { type: 'object', additionalProperties: true, example: { pickup_location: 'InterContinental Le Moana Bora Bora Resort' } }, property_id: { type: 'string', format: 'uuid', description: 'Required only when authenticating with X-Api-Key; ignored (the JWT\'s property is used instead) when authenticating with a Bearer token.' } } } } } }, responses: { 201: { description: 'Booking created with total price' }, 409: { description: 'Room not available' } } },
     },
     '/api/bookings/{id}': {
       get: { tags: ['Bookings'], summary: 'Get booking by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Booking with guest and room details' } } },
