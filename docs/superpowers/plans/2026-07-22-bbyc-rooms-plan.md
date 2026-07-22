@@ -78,7 +78,11 @@ FROM room r
 WHERE r.property_id = 'e1000000-0000-0000-0000-000000000004'
   AND r.status = 'active'
 ON CONFLICT (room_id, date) DO NOTHING;
+
+REFRESH MATERIALIZED VIEW room_type_availability;
 ```
+
+`/api/availability/search` reads from `room_type_availability`, a materialized view — it does not update automatically when `room_availability` rows are inserted directly via SQL (only `seed.sql` itself ends with a `REFRESH`, and that runs *before* this file). Without this file ending in its own `REFRESH`, Step 4 below returns an empty array even though the underlying rows exist.
 
 - [ ] **Step 2: Full reset and reseed — local**
 
@@ -113,9 +117,9 @@ Expected: first response is a JSON array containing one room type named `Bungalo
 - [ ] **Step 4: Verify availability search finds BBYC**
 
 ```bash
-curl -s "http://localhost:3000/api/availability/search?check_in=2026-08-01&check_out=2026-08-03&guests=2" -H "Authorization: Bearer $TOKEN"
+curl -s "http://localhost:3000/api/availability/search?check_in=2026-08-01&check_out=2026-08-03&guests=2&property_id=e1000000-0000-0000-0000-000000000004" -H "Authorization: Bearer $TOKEN"
 ```
-Expected: `200`, response includes an entry for the Bungalow `room_type_id` (`a4000000-0000-0000-0000-000000000001`) with `min_available: 6` and `from_rate: "450.00"` (or equivalent numeric/string form matching the endpoint's existing response shape).
+`property_id` is a required query param on this endpoint (it is not derived from the caller's JWT the way other endpoints are). Expected: `200`, response includes an entry for the Bungalow `room_type_id` (`a4000000-0000-0000-0000-000000000001`) with `min_available: "6"` and `from_rate: "450.00"`.
 
 - [ ] **Step 5: Verify a real booking can be created, with metadata**
 
@@ -182,9 +186,9 @@ Expected: prints 6 rows, `room_number` `B1`–`B6`, all `status: 'active'`, no e
 TOKEN=$(curl -s -X POST https://ota-u6ii.onrender.com/api/auth/login -H "Content-Type: application/json" -d '{"email":"admin@bbyc.example.com","password":"changeme123"}' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).token))")
 
 curl -s "https://ota-u6ii.onrender.com/api/rooms" -H "Authorization: Bearer $TOKEN"
-curl -s "https://ota-u6ii.onrender.com/api/availability/search?check_in=2026-08-01&check_out=2026-08-03&guests=2" -H "Authorization: Bearer $TOKEN"
+curl -s "https://ota-u6ii.onrender.com/api/availability/search?check_in=2026-08-01&check_out=2026-08-03&guests=2&property_id=e1000000-0000-0000-0000-000000000004" -H "Authorization: Bearer $TOKEN"
 ```
-Expected: rooms response includes the 6 `B1`–`B6` rooms; availability search includes the Bungalow room type with `min_available: 6`.
+Expected: rooms response includes the 6 `B1`–`B6` rooms; availability search includes the Bungalow room type with `min_available: "6"`.
 
 - [ ] **Step 4: Verify a live booking can be created, with metadata**
 
