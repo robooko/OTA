@@ -3,7 +3,7 @@ const ctrl = require('../controllers/guests');
 const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
 
 router.get('/', authenticate, ctrl.listGuests);
-router.get('/lookup', authenticate, ctrl.lookupGuest);
+router.get('/lookup', authenticateOrApiKey, ctrl.lookupGuest);
 router.get('/:id', authenticate, ctrl.getGuest);
 router.get('/:id/summary', authenticate, ctrl.getGuestSummary);
 router.post('/', authenticateOrApiKey, ctrl.createGuest);

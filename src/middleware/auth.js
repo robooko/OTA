@@ -30,7 +30,7 @@ async function authenticateOrApiKey(req, res, next) {
     return res.status(401).json({ error: 'Missing or invalid Authorization header or X-Api-Key' });
   }
 
-  const { property_id } = req.body;
+  const property_id = req.body.property_id || req.query.property_id;
   if (!property_id || !isValidUuid(property_id)) {
     return res.status(400).json({ error: 'property_id is required and must be a valid UUID when authenticating with X-Api-Key' });
   }

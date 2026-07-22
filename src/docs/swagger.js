@@ -203,7 +203,7 @@ const swaggerSpec = {
       },
     },
     '/api/guests/lookup': {
-      get: { tags: ['Guests'], summary: 'Look up guest by email', parameters: [{ name: 'email', in: 'query', required: true, schema: { type: 'string', format: 'email' } }], responses: { 200: { description: 'Guest found' }, 404: { description: 'Guest not found' } } },
+      get: { tags: ['Guests'], summary: 'Look up guest by email', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'email', in: 'query', required: true, schema: { type: 'string', format: 'email' } }, { name: 'property_id', in: 'query', schema: { type: 'string', format: 'uuid' }, description: 'Required only when authenticating with X-Api-Key; ignored (the JWT\'s property is used instead) when authenticating with a Bearer token.' }], responses: { 200: { description: 'Guest found' }, 404: { description: 'Guest not found' } } },
     },
     '/api/guests/{id}': {
       get: { tags: ['Guests'], summary: 'Get guest by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Guest' }, 404: { description: 'Not found' } } },
