@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS booking (
   guests      INT           NOT NULL DEFAULT 1,
   total_price NUMERIC(10,2) NOT NULL,
   status      VARCHAR(20)   DEFAULT 'confirmed',
+  metadata    JSONB         NOT NULL DEFAULT '{}',
   created_at  TIMESTAMPTZ   DEFAULT now()
 );
 

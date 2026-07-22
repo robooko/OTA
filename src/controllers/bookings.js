@@ -1,6 +1,10 @@
 const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
 
+function isValidMetadata(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 async function listBookings(req, res, next) {
   try {
     const { status, guest_id, from, to, skip, take } = req.query;
@@ -90,7 +94,7 @@ async function getBooking(req, res, next) {
 }
 
 async function createBooking(req, res, next) {
-  const { guest_id, room_id, check_in, check_out, guests } = req.body;
+  const { guest_id, room_id, check_in, check_out, guests, metadata } = req.body;
 
   if (!guest_id || !room_id || !check_in || !check_out) {
     return res.status(400).json({ error: 'guest_id, room_id, check_in, and check_out are required' });
@@ -100,6 +104,9 @@ async function createBooking(req, res, next) {
   }
   if (check_in >= check_out) {
     return res.status(400).json({ error: 'check_in must be before check_out' });
+  }
+  if (metadata !== undefined && !isValidMetadata(metadata)) {
+    return res.status(400).json({ error: 'metadata must be a JSON object' });
   }
 
   const client = await pool.connect();
@@ -186,9 +193,9 @@ async function createBooking(req, res, next) {
 
     // Insert booking
     const bookingRes = await client.query(
-      `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.property_id, guest_id, room_id, check_in, check_out, guests || 1, total.toFixed(2)]
+      `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.property_id, guest_id, room_id, check_in, check_out, guests || 1, total.toFixed(2), metadata ?? {}]
     );
 
     // Mark availability as unavailable
@@ -213,13 +220,17 @@ async function createBooking(req, res, next) {
 
 async function updateBooking(req, res, next) {
   try {
-    const { status, guests } = req.body;
+    const { status, guests, metadata } = req.body;
+    if (metadata !== undefined && !isValidMetadata(metadata)) {
+      return res.status(400).json({ error: 'metadata must be a JSON object' });
+    }
     const { rows } = await pool.query(
       `UPDATE booking SET
-         status = COALESCE($1, status),
-         guests = COALESCE($2, guests)
-       WHERE id = $3 AND property_id = $4 RETURNING *`,
-      [status, guests, req.params.id, req.property_id]
+         status   = COALESCE($1, status),
+         guests   = COALESCE($2, guests),
+         metadata = COALESCE($3::jsonb, metadata)
+       WHERE id = $4 AND property_id = $5 RETURNING *`,
+      [status, guests, metadata ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
     res.json(rows[0]);
