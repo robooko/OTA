@@ -346,16 +346,34 @@ curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST http://localhost:3000/api/book
 ```
 Expected: `201`, `"room_id":"b4000000-0000-0000-0000-000000000001"`, `"total_price":"900.00"`.
 
-- [ ] **Step 4: Verify double-booking the same room/dates now fails via the constraint (still `409`, same message)**
+- [ ] **Step 4: Verify double-booking the same room/dates still fails (via the pre-existing availability-flag check, not the constraint)**
 
 ```bash
 curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST http://localhost:3000/api/bookings \
   -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
   -d "{\"guest_id\":\"$GUEST_ID\",\"room_id\":\"b4000000-0000-0000-0000-000000000001\",\"check_in\":\"2026-09-01\",\"check_out\":\"2026-09-03\",\"guests\":2}"
 ```
-Expected: `409 {"error":"Room already booked for this period"}` — same response as before this change, but now produced by catching the database's own rejection rather than a separate manual check.
+Expected: `409 {"error":"Room not available on 2026-09-01"}`. **Note:** this is *not* proof the new constraint works — Step 3's booking already flipped `room_availability.is_available` to `false` for these dates, so this second sequential request is caught by that pre-existing check before it ever reaches the `INSERT`. Sequential requests can never actually reach the constraint-catch path this way, since the first booking's availability update always completes before a second sequential request starts. The constraint exists specifically for the case this can't reach: two requests racing concurrently, both passing the availability check before either commits.
 
-- [ ] **Step 5: Verify `room_type_id` books an available room and fills up candidates in order**
+- [ ] **Step 5: Verify the constraint itself, not just the availability flag, blocks the double-booking**
+
+Force `is_available` back to `true` on the already-booked dates — simulating the kind of data gap a real race (or a bug in some other admin flow) could produce, so the availability-flag check no longer catches it and only the constraint stands in the way:
+
+```bash
+curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X PUT http://localhost:3000/api/availability/rooms/b4000000-0000-0000-0000-000000000001 \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+  -d '{"dates":[{"date":"2026-09-01","is_available":true},{"date":"2026-09-02","is_available":true}]}'
+```
+Expected: `200`, both dates now show `"is_available":true`.
+
+```bash
+curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST http://localhost:3000/api/bookings \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+  -d "{\"guest_id\":\"$GUEST_ID\",\"room_id\":\"b4000000-0000-0000-0000-000000000001\",\"check_in\":\"2026-09-01\",\"check_out\":\"2026-09-03\",\"guests\":2}"
+```
+Expected: `409 {"error":"Room already booked for this period"}` — this time it's genuinely the exclusion constraint (caught via error code `23P01`) rejecting the `INSERT`, since the availability check alone would have let this one through.
+
+- [ ] **Step 6: Verify `room_type_id` books an available room and fills up candidates in order**
 
 ```bash
 for i in 1 2 3 4 5 6; do
@@ -367,7 +385,7 @@ done
 ```
 Expected: 6 successful `201` responses (one per BBYC bungalow, `B1` through `B6`), each with a *different* `room_id` — confirm by eye that all 6 `room_id` values in the output are distinct (they should be `b4000000-0000-0000-0000-000000000001` through `...0006`, in that order, since candidates are ordered by `room_number` and this date range starts empty).
 
-- [ ] **Step 6: Verify exhaustion — the 7th attempt for the same dates fails cleanly**
+- [ ] **Step 7: Verify exhaustion — the 7th attempt for the same dates fails cleanly**
 
 ```bash
 curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST http://localhost:3000/api/bookings \
@@ -376,7 +394,7 @@ curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST http://localhost:3000/api/book
 ```
 Expected: `409 {"error":"No rooms of this type available for the requested dates"}`.
 
-- [ ] **Step 7: Verify validation — both or neither of `room_id`/`room_type_id`**
+- [ ] **Step 8: Verify validation — both or neither of `room_id`/`room_type_id`**
 
 ```bash
 echo "--- both provided ---"
@@ -387,7 +405,7 @@ curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST http://localhost:3000/api/book
 ```
 Expected: both `400 {"error":"guest_id, check_in, check_out, and exactly one of room_id or room_type_id are required"}`.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add src/controllers/bookings.js
@@ -526,10 +544,10 @@ done
 ```
 Expected: eventually prints `READY`.
 
-- [ ] **Step 5: Repeat Task 2 Steps 3-6 against the live service**
+- [ ] **Step 5: Repeat Task 2 Steps 3-7 against the live service**
 
 Same requests as Task 2, but against `https://ota-u6ii.onrender.com`, and using a fresh date range (e.g. `2026-09-25`–`2026-09-27`) to avoid colliding with anything already booked on `otadb` from prior live-verification work this session.
 
-Expected: identical status codes and error messages to Task 2's local runs (happy path `201`, repeat-booking `409` via the constraint, 6 successful room-type bookings filling all bungalows, 7th attempt `409` exhaustion).
+Expected: identical status codes and error messages to Task 2's local runs (happy path `201`, sequential repeat `409` via the availability flag, forced-desync repeat `409` via the constraint itself, 6 successful room-type bookings filling all bungalows, 7th attempt `409` exhaustion).
 
 - [ ] **Step 6: No further action** — this task is migration + deploy + verification only. If any expected output didn't match, the code and constraint are already live; fix forward with a new commit/migration rather than reverting.

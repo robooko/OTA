@@ -94,10 +94,10 @@ async function getBooking(req, res, next) {
 }
 
 async function createBooking(req, res, next) {
-  const { guest_id, room_id, check_in, check_out, guests, metadata } = req.body;
+  const { guest_id, room_id, room_type_id, check_in, check_out, guests, metadata } = req.body;
 
-  if (!guest_id || !room_id || !check_in || !check_out) {
-    return res.status(400).json({ error: 'guest_id, room_id, check_in, and check_out are required' });
+  if (!guest_id || !check_in || !check_out || (!room_id && !room_type_id) || (room_id && room_type_id)) {
+    return res.status(400).json({ error: 'guest_id, check_in, check_out, and exactly one of room_id or room_type_id are required' });
   }
   if (!isValidDate(check_in) || !isValidDate(check_out)) {
     return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
@@ -109,25 +109,18 @@ async function createBooking(req, res, next) {
     return res.status(400).json({ error: 'metadata must be a JSON object' });
   }
 
+  // Build set of required dates (shared by every candidate room)
+  const required = new Set();
+  const d = new Date(check_in);
+  const end = new Date(check_out);
+  while (d < end) {
+    required.add(d.toISOString().slice(0, 10));
+    d.setDate(d.getDate() + 1);
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-
-    // Check room exists, is active, and belongs to the caller's property
-    const roomRes = await client.query(
-      `SELECT r.id, r.status, rt.base_rate
-       FROM room r JOIN room_type rt ON rt.id = r.room_type_id
-       WHERE r.id = $1 AND r.property_id = $2`,
-      [room_id, req.property_id]
-    );
-    if (!roomRes.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Room not found' });
-    }
-    if (roomRes.rows[0].status !== 'active') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Room is not active' });
-    }
 
     const guestRes = await client.query(
       'SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, req.property_id]
@@ -137,79 +130,119 @@ async function createBooking(req, res, next) {
       return res.status(404).json({ error: 'Guest not found' });
     }
 
-    // Check availability for every night
-    const availRes = await client.query(
-      `SELECT date, is_available, override_rate
-       FROM room_availability
-       WHERE room_id = $1 AND date >= $2 AND date < $3
-       ORDER BY date`,
-      [room_id, check_in, check_out]
-    );
-
-    // Build set of required dates
-    const required = new Set();
-    const d = new Date(check_in);
-    const end = new Date(check_out);
-    while (d < end) {
-      required.add(d.toISOString().slice(0, 10));
-      d.setDate(d.getDate() + 1);
-    }
-
-    const availMap = {};
-    for (const row of availRes.rows) {
-      availMap[row.date] = row;
-    }
-
-    for (const date of required) {
-      const entry = availMap[date];
-      if (!entry || !entry.is_available) {
+    let candidates;
+    if (room_id) {
+      const roomRes = await client.query(
+        `SELECT r.id, r.status, rt.base_rate
+         FROM room r JOIN room_type rt ON rt.id = r.room_type_id
+         WHERE r.id = $1 AND r.property_id = $2`,
+        [room_id, req.property_id]
+      );
+      if (!roomRes.rows.length) {
         await client.query('ROLLBACK');
-        return res.status(409).json({ error: `Room not available on ${date}` });
+        return res.status(404).json({ error: 'Room not found' });
+      }
+      if (roomRes.rows[0].status !== 'active') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Room is not active' });
+      }
+      candidates = [{ id: roomRes.rows[0].id, base_rate: roomRes.rows[0].base_rate }];
+    } else {
+      const typeRes = await client.query(
+        'SELECT id FROM room_type WHERE id = $1 AND property_id = $2', [room_type_id, req.property_id]
+      );
+      if (!typeRes.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Room type not found' });
+      }
+      const roomsRes = await client.query(
+        `SELECT r.id, rt.base_rate
+         FROM room r JOIN room_type rt ON rt.id = r.room_type_id
+         WHERE r.room_type_id = $1 AND r.property_id = $2 AND r.status = 'active'
+         ORDER BY r.room_number`,
+        [room_type_id, req.property_id]
+      );
+      candidates = roomsRes.rows;
+    }
+
+    let booked = null;
+    let lastUnavailableDate = null;
+
+    for (const candidate of candidates) {
+      await client.query('SAVEPOINT attempt');
+
+      const availRes = await client.query(
+        `SELECT date, is_available, override_rate
+         FROM room_availability
+         WHERE room_id = $1 AND date >= $2 AND date < $3
+         ORDER BY date`,
+        [candidate.id, check_in, check_out]
+      );
+      const availMap = {};
+      for (const row of availRes.rows) {
+        availMap[row.date] = row;
+      }
+
+      let allAvailable = true;
+      for (const date of required) {
+        const entry = availMap[date];
+        if (!entry || !entry.is_available) {
+          allAvailable = false;
+          lastUnavailableDate = date;
+          break;
+        }
+      }
+
+      if (!allAvailable) {
+        await client.query('ROLLBACK TO SAVEPOINT attempt');
+        continue;
+      }
+
+      let total = 0;
+      const baseRate = parseFloat(candidate.base_rate);
+      for (const date of required) {
+        const entry = availMap[date];
+        total += entry && entry.override_rate != null ? parseFloat(entry.override_rate) : baseRate;
+      }
+
+      try {
+        const bookingRes = await client.query(
+          `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+          [req.property_id, guest_id, candidate.id, check_in, check_out, guests || 1, total.toFixed(2), metadata ?? {}]
+        );
+        await client.query('RELEASE SAVEPOINT attempt');
+        booked = bookingRes.rows[0];
+        break;
+      } catch (err) {
+        if (err.code === '23P01') {
+          await client.query('ROLLBACK TO SAVEPOINT attempt');
+          continue;
+        }
+        throw err;
       }
     }
 
-    // Check no overlapping confirmed booking
-    const overlapRes = await client.query(
-      `SELECT id FROM booking
-       WHERE room_id = $1
-         AND property_id = $4
-         AND status = 'confirmed'
-         AND check_in  < $3
-         AND check_out > $2`,
-      [room_id, check_in, check_out, req.property_id]
-    );
-    if (overlapRes.rows.length) {
+    if (!booked) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Room already booked for this period' });
+      if (room_id) {
+        return res.status(409).json({ error: lastUnavailableDate ? `Room not available on ${lastUnavailableDate}` : 'Room already booked for this period' });
+      }
+      return res.status(409).json({ error: 'No rooms of this type available for the requested dates' });
     }
-
-    // Calculate total price
-    let total = 0;
-    const baseRate = parseFloat(roomRes.rows[0].base_rate);
-    for (const date of required) {
-      const entry = availMap[date];
-      total += entry && entry.override_rate != null ? parseFloat(entry.override_rate) : baseRate;
-    }
-
-    // Insert booking
-    const bookingRes = await client.query(
-      `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.property_id, guest_id, room_id, check_in, check_out, guests || 1, total.toFixed(2), metadata ?? {}]
-    );
 
     // Mark availability as unavailable
     await client.query(
       `UPDATE room_availability
        SET is_available = false
        WHERE room_id = $1 AND date >= $2 AND date < $3`,
-      [room_id, check_in, check_out]
+      [booked.room_id, check_in, check_out]
     );
 
     await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
     await client.query('COMMIT');
 
-    res.status(201).json(bookingRes.rows[0]);
+    res.status(201).json(booked);
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
