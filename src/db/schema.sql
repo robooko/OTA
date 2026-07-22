@@ -1,5 +1,9 @@
 -- Enable pgcrypto for gen_random_uuid()
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- Enable btree_gist so the booking_no_overlap exclusion constraint below can
+-- mix an equality column (room_id) with a range-overlap column (daterange)
+-- in one GiST index.
+CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 -- Properties (tenants)
 CREATE TABLE IF NOT EXISTS property (
@@ -74,7 +78,8 @@ CREATE TABLE IF NOT EXISTS booking (
   total_price NUMERIC(10,2) NOT NULL,
   status      VARCHAR(20)   DEFAULT 'confirmed',
   metadata    JSONB         NOT NULL DEFAULT '{}',
-  created_at  TIMESTAMPTZ   DEFAULT now()
+  created_at  TIMESTAMPTZ   DEFAULT now(),
+  CONSTRAINT booking_no_overlap EXCLUDE USING gist (room_id WITH =, daterange(check_in, check_out) WITH &&) WHERE (status <> 'cancelled')
 );
 
 -- Payments

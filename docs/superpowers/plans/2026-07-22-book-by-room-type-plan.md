@@ -79,9 +79,10 @@ CREATE TABLE IF NOT EXISTS booking (
   status      VARCHAR(20)   DEFAULT 'confirmed',
   metadata    JSONB         NOT NULL DEFAULT '{}',
   created_at  TIMESTAMPTZ   DEFAULT now(),
-  EXCLUDE USING gist (room_id WITH =, daterange(check_in, check_out) WITH &&) WHERE (status <> 'cancelled')
+  CONSTRAINT booking_no_overlap EXCLUDE USING gist (room_id WITH =, daterange(check_in, check_out) WITH &&) WHERE (status <> 'cancelled')
 );
 ```
+(The `CONSTRAINT booking_no_overlap` name prefix is required here — without it, Postgres auto-generates a name like `booking_room_id_daterange_excl` instead, which still works functionally but is inconsistent with the migration file below and with Step 5's verification query.)
 
 - [ ] **Step 3: Write the migration file for `otadb`**
 
