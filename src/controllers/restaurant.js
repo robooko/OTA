@@ -18,6 +18,10 @@ function isValidClosedDays(arr) {
   return Array.isArray(arr) && arr.every((d) => Number.isInteger(d) && d >= 1 && d <= 7);
 }
 
+function isValidMetadata(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 // ── Restaurants ───────────────────────────────────────────────────────────────
 
 async function listRestaurants(req, res, next) {
@@ -245,7 +249,7 @@ async function getReservation(req, res, next) {
 
 async function createReservation(req, res, next) {
   const { restaurant_id } = req.params;
-  const { reservation_date, start_time, location, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes } = req.body;
+  const { reservation_date, start_time, location, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata } = req.body;
 
   if (!reservation_date || !start_time || !contact_name || !party_size) {
     return res.status(400).json({ error: 'reservation_date, start_time, contact_name, and party_size are required' });
@@ -254,6 +258,9 @@ async function createReservation(req, res, next) {
   if (!isValidTime(start_time)) return res.status(400).json({ error: 'Invalid start_time format, use HH:MM' });
   if (!Number.isInteger(party_size) || party_size <= 0) {
     return res.status(400).json({ error: 'party_size must be a positive integer' });
+  }
+  if (metadata !== undefined && !isValidMetadata(metadata)) {
+    return res.status(400).json({ error: 'metadata must be a JSON object' });
   }
 
   const client = await pool.connect();
@@ -331,9 +338,9 @@ async function createReservation(req, res, next) {
 
     const { rows } = await client.query(
       `INSERT INTO restaurant_reservation
-         (table_id, reservation_date, start_time, end_time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-      [assignedTableId, reservation_date, start_time, end_time, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null]
+         (table_id, reservation_date, start_time, end_time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+      [assignedTableId, reservation_date, start_time, end_time, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null, metadata ?? {}]
     );
 
     await client.query('COMMIT');
@@ -348,16 +355,20 @@ async function createReservation(req, res, next) {
 
 async function updateReservation(req, res, next) {
   try {
-    const { status, notes, contact_name, contact_email, contact_phone } = req.body;
+    const { status, notes, contact_name, contact_email, contact_phone, metadata } = req.body;
+    if (metadata !== undefined && !isValidMetadata(metadata)) {
+      return res.status(400).json({ error: 'metadata must be a JSON object' });
+    }
     const { rows } = await pool.query(
       `UPDATE restaurant_reservation SET
          status        = COALESCE($1, status),
          notes         = COALESCE($2, notes),
          contact_name  = COALESCE($3, contact_name),
          contact_email = COALESCE($4, contact_email),
-         contact_phone = COALESCE($5, contact_phone)
-       WHERE id = $6 RETURNING *`,
-      [status, notes, contact_name, contact_email, contact_phone, req.params.id]
+         contact_phone = COALESCE($5, contact_phone),
+         metadata      = COALESCE($6::jsonb, metadata)
+       WHERE id = $7 RETURNING *`,
+      [status, notes, contact_name, contact_email, contact_phone, metadata ?? null, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Reservation not found' });
     res.json(rows[0]);

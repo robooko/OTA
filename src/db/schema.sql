@@ -200,6 +200,7 @@ CREATE TABLE IF NOT EXISTS restaurant_reservation (
   party_size       INT          NOT NULL,
   status           VARCHAR(20)  DEFAULT 'confirmed',
   notes            TEXT,
+  metadata         JSONB        NOT NULL DEFAULT '{}',
   created_at       TIMESTAMPTZ  DEFAULT now()
 );
 
