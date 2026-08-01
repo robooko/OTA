@@ -297,23 +297,37 @@ const swaggerSpec = {
     },
 
     // ── Spa ──────────────────────────────────────────────────────────────────
-    '/api/spa/treatments': {
-      get: { tags: ['Spa'], summary: 'List treatments', responses: { 200: { description: 'Array of treatments' } } },
-      post: { tags: ['Spa'], summary: 'Create treatment', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'duration_mins', 'price'], properties: { name: { type: 'string' }, description: { type: 'string' }, duration_mins: { type: 'integer' }, price: { type: 'number' } } } } } }, responses: { 201: { description: 'Created' } } },
+    '/api/spa': {
+      get: { tags: ['Spa'], summary: 'List all spas', responses: { 200: { description: 'Array of spas' } } },
+      post: { tags: ['Spa'], summary: 'Create spa', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' }, description: { type: 'string' }, phone: { type: 'string' } } } } } }, responses: { 201: { description: 'Created' } } },
     },
-    '/api/spa/therapists': {
-      get: { tags: ['Spa'], summary: 'List therapists', responses: { 200: { description: 'Array of therapists' } } },
-      post: { tags: ['Spa'], summary: 'Create therapist', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } } } }, responses: { 201: { description: 'Created' } } },
+    '/api/spa/{id}': {
+      get: { tags: ['Spa'], summary: 'Get spa by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Spa' } } },
+      put: { tags: ['Spa'], summary: 'Update spa', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, phone: { type: 'string' } } } } } }, responses: { 200: { description: 'Updated' } } },
     },
-    '/api/spa/slots/bulk': {
-      post: { tags: ['Spa'], summary: 'Bulk generate spa slots', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['therapist_id', 'treatment_id', 'from', 'to', 'times'], properties: { therapist_id: { type: 'string', format: 'uuid' }, treatment_id: { type: 'string', format: 'uuid' }, from: { type: 'string', format: 'date' }, to: { type: 'string', format: 'date' }, times: { type: 'array', items: { type: 'string' }, example: ['09:00', '10:30', '12:00', '14:00', '15:30', '17:00'] } } } } } }, responses: { 201: { description: 'Slots created' } } },
+    '/api/spa/{spa_id}/treatments': {
+      get: { tags: ['Spa'], summary: 'List treatments', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of treatments' } } },
+      post: { tags: ['Spa'], summary: 'Create treatment', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'duration_mins', 'price'], properties: { name: { type: 'string' }, description: { type: 'string' }, duration_mins: { type: 'integer' }, price: { type: 'number' } } } } } }, responses: { 201: { description: 'Created' } } },
     },
-    '/api/spa/slots/search': {
-      get: { tags: ['Spa'], summary: 'Search available spa slots', parameters: [{ name: 'date', in: 'query', required: true, schema: { type: 'string', format: 'date' } }, { name: 'treatment_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Available slots with therapist and treatment info' } } },
+    '/api/spa/{spa_id}/therapists': {
+      get: { tags: ['Spa'], summary: 'List therapists', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of therapists' } } },
+      post: { tags: ['Spa'], summary: 'Create therapist', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } } } }, responses: { 201: { description: 'Created' } } },
     },
-    '/api/spa/appointments': {
-      get: { tags: ['Spa'], summary: 'List appointments', parameters: [{ name: 'date', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'status', in: 'query', schema: { type: 'string' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of appointments' } } },
-      post: { tags: ['Spa'], summary: 'Book spa appointment', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['slot_id', 'contact_name'], properties: { slot_id: { type: 'string', format: 'uuid' }, guest_id: { type: 'string', format: 'uuid' }, contact_name: { type: 'string' }, contact_email: { type: 'string' }, contact_phone: { type: 'string' }, notes: { type: 'string' } } } } } }, responses: { 201: { description: 'Appointment booked' }, 409: { description: 'Slot already booked' } } },
+    '/api/spa/{spa_id}/slots': {
+      get: { tags: ['Spa'], summary: 'List slots', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'date', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'to', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'therapist_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'treatment_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of slots' } } },
+    },
+    '/api/spa/{spa_id}/slots/bulk': {
+      post: { tags: ['Spa'], summary: 'Bulk generate spa slots', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['therapist_id', 'treatment_id', 'from', 'to', 'times'], properties: { therapist_id: { type: 'string', format: 'uuid' }, treatment_id: { type: 'string', format: 'uuid' }, from: { type: 'string', format: 'date' }, to: { type: 'string', format: 'date' }, times: { type: 'array', items: { type: 'string' }, example: ['09:00', '10:30', '12:00', '14:00', '15:30', '17:00'] } } } } } }, responses: { 201: { description: 'Slots created' }, 400: { description: 'therapist_id or treatment_id does not belong to this spa' } } },
+    },
+    '/api/spa/{spa_id}/slots/search': {
+      get: { tags: ['Spa'], summary: 'Search available spa slots', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'date', in: 'query', required: true, schema: { type: 'string', format: 'date' } }, { name: 'treatment_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Available slots with therapist and treatment info' } } },
+    },
+    '/api/spa/{spa_id}/appointments': {
+      get: { tags: ['Spa'], summary: 'List appointments', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'date', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'status', in: 'query', schema: { type: 'string' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of appointments' } } },
+      post: { tags: ['Spa'], summary: 'Book spa appointment', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['slot_id', 'contact_name'], properties: { slot_id: { type: 'string', format: 'uuid' }, guest_id: { type: 'string', format: 'uuid' }, contact_name: { type: 'string' }, contact_email: { type: 'string' }, contact_phone: { type: 'string' }, notes: { type: 'string' } } } } } }, responses: { 201: { description: 'Appointment booked' }, 409: { description: 'Slot already booked' } } },
+    },
+    '/api/spa/{spa_id}/appointments/{id}': {
+      put: { tags: ['Spa'], summary: 'Update appointment', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string' }, notes: { type: 'string' } } } } } }, responses: { 200: { description: 'Updated' } } },
     },
 
     // ── Beach Club ───────────────────────────────────────────────────────────
