@@ -258,15 +258,16 @@ CREATE TABLE IF NOT EXISTS spa_slot (
 );
 
 CREATE TABLE IF NOT EXISTS spa_appointment (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  slot_id      UUID         NOT NULL REFERENCES spa_slot(id),
-  guest_id     UUID         REFERENCES guest(id),
-  contact_name VARCHAR(100) NOT NULL,
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slot_id       UUID         NOT NULL REFERENCES spa_slot(id),
+  guest_id      UUID         REFERENCES guest(id),
+  clerk_user_id VARCHAR(100),
+  contact_name  VARCHAR(100) NOT NULL,
   contact_email VARCHAR(255),
   contact_phone VARCHAR(30),
-  status       VARCHAR(20)  DEFAULT 'confirmed',
-  notes        TEXT,
-  created_at   TIMESTAMPTZ  DEFAULT now()
+  status        VARCHAR(20)  DEFAULT 'confirmed',
+  notes         TEXT,
+  created_at    TIMESTAMPTZ  DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_spa_treatment_spa       ON spa_treatment(spa_id);
@@ -274,6 +275,7 @@ CREATE INDEX IF NOT EXISTS idx_spa_therapist_spa       ON spa_therapist(spa_id);
 CREATE INDEX IF NOT EXISTS idx_spa_slot_therapist_date ON spa_slot(therapist_id, slot_date);
 CREATE INDEX IF NOT EXISTS idx_spa_slot_treatment      ON spa_slot(treatment_id);
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_slot    ON spa_appointment(slot_id);
+CREATE INDEX IF NOT EXISTS idx_spa_appointment_clerk_user ON spa_appointment(clerk_user_id);
 
 -- ── Beach Club ────────────────────────────────────────────────────────────────
 

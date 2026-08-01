@@ -229,7 +229,7 @@ async function searchSlots(req, res, next) {
 async function listAppointments(req, res, next) {
   try {
     const { spa_id } = req.params;
-    const { date, status, guest_id } = req.query;
+    const { date, status, guest_id, clerk_user_id } = req.query;
     let query = `
       SELECT sa.*, ss.slot_date, ss.slot_time,
              st.name AS therapist_name, tr.name AS treatment_name, tr.price
@@ -243,6 +243,7 @@ async function listAppointments(req, res, next) {
     if (date) { params.push(date); query += ` AND ss.slot_date = $${params.length}`; }
     if (status) { params.push(status); query += ` AND sa.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND sa.guest_id = $${params.length}`; }
+    if (clerk_user_id) { params.push(clerk_user_id); query += ` AND sa.clerk_user_id = $${params.length}`; }
     query += ' ORDER BY ss.slot_date, ss.slot_time';
     const { rows } = await pool.query(query, params);
     res.json(rows);
@@ -251,7 +252,7 @@ async function listAppointments(req, res, next) {
 
 async function createAppointment(req, res, next) {
   const { spa_id } = req.params;
-  const { slot_id, guest_id, contact_name, contact_email, contact_phone, notes } = req.body;
+  const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes } = req.body;
   if (!slot_id || !contact_name) return res.status(400).json({ error: 'slot_id and contact_name are required' });
 
   const client = await pool.connect();
@@ -273,9 +274,9 @@ async function createAppointment(req, res, next) {
     if (conflictRes.rows.length) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Slot already booked' }); }
 
     const { rows } = await client.query(
-      `INSERT INTO spa_appointment (slot_id, guest_id, contact_name, contact_email, contact_phone, notes)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [slot_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null]
+      `INSERT INTO spa_appointment (slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [slot_id, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null]
     );
 
     await client.query('COMMIT');
