@@ -2,23 +2,29 @@ const router = require('express').Router();
 const ctrl = require('../controllers/spa');
 const { requireApiKey } = require('../middleware/apiKey');
 
+// Spas
+router.get('/', ctrl.listSpas);
+router.get('/:id', ctrl.getSpa);
+router.post('/', requireApiKey, ctrl.createSpa);
+router.put('/:id', requireApiKey, ctrl.updateSpa);
+
 // Treatments
-router.get('/treatments', ctrl.listTreatments);
-router.post('/treatments', requireApiKey, ctrl.createTreatment);
-router.put('/treatments/:id', requireApiKey, ctrl.updateTreatment);
+router.get('/:spa_id/treatments', ctrl.listTreatments);
+router.post('/:spa_id/treatments', requireApiKey, ctrl.createTreatment);
+router.put('/:spa_id/treatments/:id', requireApiKey, ctrl.updateTreatment);
 
 // Therapists
-router.get('/therapists', ctrl.listTherapists);
-router.post('/therapists', requireApiKey, ctrl.createTherapist);
+router.get('/:spa_id/therapists', ctrl.listTherapists);
+router.post('/:spa_id/therapists', requireApiKey, ctrl.createTherapist);
 
 // Slots
-router.get('/slots', requireApiKey, ctrl.listSlots);
-router.post('/slots/bulk', requireApiKey, ctrl.bulkCreateSlots);
-router.get('/slots/search', ctrl.searchSlots);
+router.get('/:spa_id/slots', requireApiKey, ctrl.listSlots);
+router.post('/:spa_id/slots/bulk', requireApiKey, ctrl.bulkCreateSlots);
+router.get('/:spa_id/slots/search', ctrl.searchSlots);
 
 // Appointments
-router.get('/appointments', requireApiKey, ctrl.listAppointments);
-router.post('/appointments', requireApiKey, ctrl.createAppointment);
-router.put('/appointments/:id', requireApiKey, ctrl.updateAppointment);
+router.get('/:spa_id/appointments', requireApiKey, ctrl.listAppointments);
+router.post('/:spa_id/appointments', requireApiKey, ctrl.createAppointment);
+router.put('/:spa_id/appointments/:id', requireApiKey, ctrl.updateAppointment);
 
 module.exports = router;
