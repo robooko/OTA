@@ -25,6 +25,7 @@ router.get('/:spa_id/slots/search', ctrl.searchSlots);
 
 // Appointments
 router.get('/:spa_id/appointments', requireApiKey, ctrl.listAppointments);
+router.get('/:spa_id/appointments/:id', requireApiKey, ctrl.getAppointment);
 router.post('/:spa_id/appointments', requireApiKey, ctrl.createAppointment);
 router.put('/:spa_id/appointments/:id', requireApiKey, ctrl.updateAppointment);
 

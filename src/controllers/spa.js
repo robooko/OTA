@@ -250,6 +250,24 @@ async function listAppointments(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function getAppointment(req, res, next) {
+  try {
+    const { spa_id, id } = req.params;
+    const { rows } = await pool.query(
+      `SELECT sa.*, ss.slot_date, ss.slot_time,
+              st.name AS therapist_name, tr.name AS treatment_name, tr.price
+       FROM spa_appointment sa
+       JOIN spa_slot ss ON ss.id = sa.slot_id
+       JOIN spa_therapist st ON st.id = ss.therapist_id
+       JOIN spa_treatment tr ON tr.id = ss.treatment_id
+       WHERE sa.id = $1 AND st.spa_id = $2`,
+      [id, spa_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Appointment not found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
 async function createAppointment(req, res, next) {
   const { spa_id } = req.params;
   const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes } = req.body;
@@ -315,5 +333,5 @@ module.exports = {
   listTreatments, createTreatment, updateTreatment,
   listTherapists, createTherapist, updateTherapist,
   listSlots, bulkCreateSlots, searchSlots,
-  listAppointments, createAppointment, updateAppointment,
+  listAppointments, getAppointment, createAppointment, updateAppointment,
 };
