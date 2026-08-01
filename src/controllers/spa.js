@@ -114,6 +114,22 @@ async function createTherapist(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function updateTherapist(req, res, next) {
+  try {
+    const { spa_id, id } = req.params;
+    const { name, status } = req.body;
+    const { rows } = await pool.query(
+      `UPDATE spa_therapist SET
+         name   = COALESCE($1, name),
+         status = COALESCE($2, status)
+       WHERE id = $3 AND spa_id = $4 RETURNING *`,
+      [name, status, id, spa_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Therapist not found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
 // ── Slots ─────────────────────────────────────────────────────────────────────
 
 async function listSlots(req, res, next) {
@@ -296,7 +312,7 @@ async function updateAppointment(req, res, next) {
 module.exports = {
   listSpas, getSpa, createSpa, updateSpa,
   listTreatments, createTreatment, updateTreatment,
-  listTherapists, createTherapist,
+  listTherapists, createTherapist, updateTherapist,
   listSlots, bulkCreateSlots, searchSlots,
   listAppointments, createAppointment, updateAppointment,
 };

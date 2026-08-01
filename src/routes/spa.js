@@ -16,6 +16,7 @@ router.put('/:spa_id/treatments/:id', requireApiKey, ctrl.updateTreatment);
 // Therapists
 router.get('/:spa_id/therapists', ctrl.listTherapists);
 router.post('/:spa_id/therapists', requireApiKey, ctrl.createTherapist);
+router.put('/:spa_id/therapists/:id', requireApiKey, ctrl.updateTherapist);
 
 // Slots
 router.get('/:spa_id/slots', requireApiKey, ctrl.listSlots);

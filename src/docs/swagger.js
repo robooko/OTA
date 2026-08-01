@@ -313,6 +313,9 @@ const swaggerSpec = {
       get: { tags: ['Spa'], summary: 'List therapists', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of therapists' } } },
       post: { tags: ['Spa'], summary: 'Create therapist', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } } } }, responses: { 201: { description: 'Created' } } },
     },
+    '/api/spa/{spa_id}/therapists/{id}': {
+      put: { tags: ['Spa'], summary: 'Update therapist (e.g. activate/deactivate)', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Therapist not found' } } },
+    },
     '/api/spa/{spa_id}/slots': {
       get: { tags: ['Spa'], summary: 'List slots', parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'date', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'to', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'therapist_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'treatment_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of slots' } } },
     },
