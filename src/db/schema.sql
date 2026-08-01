@@ -222,8 +222,17 @@ CREATE INDEX IF NOT EXISTS idx_service_period_restaurant          ON service_per
 
 -- ── Spa ───────────────────────────────────────────────────────────────────────
 
+CREATE TABLE IF NOT EXISTS spa (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        VARCHAR(100) NOT NULL,
+  description TEXT,
+  phone       VARCHAR(30),
+  created_at  TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS spa_treatment (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  spa_id       UUID          NOT NULL REFERENCES spa(id),
   name         VARCHAR(100)  NOT NULL,
   description  TEXT,
   duration_mins INT          NOT NULL,
@@ -233,6 +242,7 @@ CREATE TABLE IF NOT EXISTS spa_treatment (
 
 CREATE TABLE IF NOT EXISTS spa_therapist (
   id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  spa_id UUID         NOT NULL REFERENCES spa(id),
   name   VARCHAR(100) NOT NULL,
   status VARCHAR(20)  DEFAULT 'active'
 );
@@ -259,6 +269,8 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
   created_at   TIMESTAMPTZ  DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS idx_spa_treatment_spa       ON spa_treatment(spa_id);
+CREATE INDEX IF NOT EXISTS idx_spa_therapist_spa       ON spa_therapist(spa_id);
 CREATE INDEX IF NOT EXISTS idx_spa_slot_therapist_date ON spa_slot(therapist_id, slot_date);
 CREATE INDEX IF NOT EXISTS idx_spa_slot_treatment      ON spa_slot(treatment_id);
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_slot    ON spa_appointment(slot_id);
