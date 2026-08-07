@@ -9,13 +9,3 @@ services:
         value: production
       - key: DATABASE_URL
         sync: false # set manually in the Render dashboard to the Neon connection string
-
-# hotel-booking-db (Render's own free Postgres) is no longer used - it auto-deletes
-# after 30 days, so the database moved to Neon. This block is left in place so
-# syncing this blueprint doesn't deprovision the existing resource; delete it
-# manually from the Render dashboard, then remove this block, once Neon is confirmed
-# working in production.
-databases:
-  - name: hotel-booking-db
-    databaseName: hotel_booking
-    plan: free
