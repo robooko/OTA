@@ -1,6 +1,5 @@
 const { createClerkClient, verifyToken } = require('@clerk/backend');
 const pool = require('../db');
-const { isValidUuid } = require('./validate');
 
 if (!process.env.CLERK_SECRET_KEY) {
   throw new Error('CLERK_SECRET_KEY is required');
@@ -64,19 +63,14 @@ async function authenticateOrApiKey(req, res, next) {
   }
 
   const key = req.headers['x-api-key'];
-  if (!key || key !== process.env.API_KEY) {
+  if (!key) {
     return res.status(401).json({ error: 'Missing or invalid Authorization header or X-Api-Key' });
   }
 
-  const property_id = req.body.property_id || req.query.property_id;
-  if (!property_id || !isValidUuid(property_id)) {
-    return res.status(400).json({ error: 'property_id is required and must be a valid UUID when authenticating with X-Api-Key' });
-  }
-
   try {
-    const { rows } = await pool.query('SELECT id FROM property WHERE id = $1', [property_id]);
-    if (!rows.length) return res.status(404).json({ error: 'Property not found' });
-    req.property_id = property_id;
+    const { rows } = await pool.query('SELECT id FROM property WHERE api_key = $1', [key]);
+    if (!rows.length) return res.status(401).json({ error: 'Missing or invalid Authorization header or X-Api-Key' });
+    req.property_id = rows[0].id;
     next();
   } catch (err) {
     next(err);
