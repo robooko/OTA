@@ -2,6 +2,10 @@ const { createClerkClient, verifyToken } = require('@clerk/backend');
 const pool = require('../db');
 const { isValidUuid } = require('./validate');
 
+if (!process.env.CLERK_SECRET_KEY) {
+  throw new Error('CLERK_SECRET_KEY is required');
+}
+
 const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
 function mapClerkRole(orgRole) {
@@ -19,6 +23,7 @@ async function authenticate(req, res, next) {
   try {
     claims = await verifyToken(token, { secretKey: process.env.CLERK_SECRET_KEY });
   } catch (err) {
+    console.error('Clerk token verification failed:', err.message);
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
 
@@ -39,7 +44,7 @@ async function authenticate(req, res, next) {
       const org = await clerkClient.organizations.getOrganization({ organizationId: orgId });
       const { rows } = await pool.query(
         'INSERT INTO property (name, clerk_org_id) VALUES ($1, $2) RETURNING id',
-        [org.name, orgId]
+        [org.name.slice(0, 100), orgId]
       );
       propertyId = rows[0].id;
     }

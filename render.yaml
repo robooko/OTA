@@ -9,3 +9,7 @@ services:
         value: production
       - key: DATABASE_URL
         sync: false # set manually in the Render dashboard to the Neon connection string
+      - key: CLERK_SECRET_KEY
+        sync: false # set manually in the Render dashboard
+      - key: API_KEY
+        sync: false # set manually in the Render dashboard
