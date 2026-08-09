@@ -19,8 +19,23 @@ ALTER TABLE restaurant_reservation      ADD COLUMN IF NOT EXISTS property_id UUI
 ALTER TABLE restaurant_seasonal_closure ADD COLUMN IF NOT EXISTS property_id UUID REFERENCES property(id);
 
 -- 2. Backfill restaurant.property_id by name (confirmed mapping)
+-- The 9 extra names below ("New restaurant" x2, "ZZZ Unused Test Entry..."
+-- x5, "Sally Smith", "sdfsd") are junk/test rows discovered only in
+-- production during this migration's pre-check (not present locally) --
+-- confirmed with the product owner to backfill to Bonito alongside the
+-- real Bonito-property restaurants, rather than delete them.
 UPDATE restaurant SET property_id = 'e1000000-0000-0000-0000-000000000003'
-  WHERE name IN ('Bonito', 'Bimini', 'Betula', 'Barry') AND property_id IS NULL;
+  WHERE name IN (
+    'Bonito', 'Bimini', 'Betula', 'Barry',
+    'New restaurant',
+    'ZZZ Unused Test Entry — Do Not Book',
+    'ZZZ Unused Test Entry 2 — Do Not Book',
+    'ZZZ Unused Test Entry 3 — Do Not Book',
+    'ZZZ Unused Test Entry 4 — Do Not Book',
+    'ZZZ Unused Test Entry 5 — Do Not Book',
+    'Sally Smith',
+    'sdfsd'
+  ) AND property_id IS NULL;
 UPDATE restaurant SET property_id = 'e1000000-0000-0000-0000-000000000004'
   WHERE name IN ('BBYC', 'Pirates Bight') AND property_id IS NULL;
 
