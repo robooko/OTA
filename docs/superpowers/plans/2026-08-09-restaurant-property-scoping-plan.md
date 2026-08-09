@@ -601,9 +601,9 @@ with:
     );
 ```
 
-- [ ] **Step 8: Swap auth in `src/routes/restaurant.js` for restaurant + table routes**
+- [ ] **Step 8: Swap auth in `src/routes/restaurant.js` for the whole file**
 
-Replace the top of `src/routes/restaurant.js`:
+Replace the entire contents of `src/routes/restaurant.js`:
 ```js
 const router = require('express').Router();
 const ctrl = require('../controllers/restaurant');
@@ -619,6 +619,17 @@ router.put('/:id', requireApiKey, ctrl.updateRestaurant);
 router.get('/:restaurant_id/tables', ctrl.listTables);
 router.post('/:restaurant_id/tables', requireApiKey, ctrl.createTable);
 router.put('/:restaurant_id/tables/:id', requireApiKey, ctrl.updateTable);
+
+// Availability
+router.get('/:restaurant_id/availability/search', ctrl.searchAvailability);
+
+// Reservations
+router.get('/:restaurant_id/reservations', requireApiKey, ctrl.listReservations);
+router.get('/:restaurant_id/reservations/:id', requireApiKey, ctrl.getReservation);
+router.post('/:restaurant_id/reservations', requireApiKey, ctrl.createReservation);
+router.put('/:restaurant_id/reservations/:id', requireApiKey, ctrl.updateReservation);
+
+module.exports = router;
 ```
 with:
 ```js
@@ -636,8 +647,22 @@ router.put('/:id', authenticate, ctrl.updateRestaurant);
 router.get('/:restaurant_id/tables', authenticate, ctrl.listTables);
 router.post('/:restaurant_id/tables', authenticate, ctrl.createTable);
 router.put('/:restaurant_id/tables/:id', authenticate, ctrl.updateTable);
+
+// Availability
+router.get('/:restaurant_id/availability/search', ctrl.searchAvailability);
+
+// Reservations
+router.get('/:restaurant_id/reservations', authenticate, ctrl.listReservations);
+router.get('/:restaurant_id/reservations/:id', authenticate, ctrl.getReservation);
+router.post('/:restaurant_id/reservations', authenticate, ctrl.createReservation);
+router.put('/:restaurant_id/reservations/:id', authenticate, ctrl.updateReservation);
+
+module.exports = router;
 ```
-(Leave the `// Availability` and `// Reservations` sections below this untouched for now — Task 3 handles those.)
+Note: the reservation lines are set to `authenticate` here as a safe intermediate
+state (so the server starts cleanly and this task's own verify step passes) —
+Task 3 Step 5 narrows the POST line specifically to `authenticateOrApiKey`,
+which is the endpoint's actual final auth per the design spec.
 
 - [ ] **Step 9: Verify — start the server and get a staff token**
 
@@ -864,7 +889,14 @@ with:
     );
 ```
 
-- [ ] **Step 5: Swap auth in `src/routes/restaurant.js` for reservation routes**
+- [ ] **Step 5: Swap auth in `src/routes/restaurant.js` for the reservation-create route**
+
+Task 2 already left every reservation route (including `POST`) on plain
+`authenticate` as a safe intermediate state. This step narrows just the
+`POST` line to `authenticateOrApiKey`, its actual final auth per the design
+spec, since reservation creation is guest-facing (accepts `X-Api-Key` +
+explicit `property_id`), unlike the other three staff-only reservation
+routes.
 
 Replace:
 ```js
@@ -877,21 +909,13 @@ const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
 
 Replace:
 ```js
-// Reservations
-router.get('/:restaurant_id/reservations', requireApiKey, ctrl.listReservations);
-router.get('/:restaurant_id/reservations/:id', requireApiKey, ctrl.getReservation);
-router.post('/:restaurant_id/reservations', requireApiKey, ctrl.createReservation);
-router.put('/:restaurant_id/reservations/:id', requireApiKey, ctrl.updateReservation);
+router.post('/:restaurant_id/reservations', authenticate, ctrl.createReservation);
 ```
 with:
 ```js
-// Reservations
-router.get('/:restaurant_id/reservations', authenticate, ctrl.listReservations);
-router.get('/:restaurant_id/reservations/:id', authenticate, ctrl.getReservation);
 router.post('/:restaurant_id/reservations', authenticateOrApiKey, ctrl.createReservation);
-router.put('/:restaurant_id/reservations/:id', authenticate, ctrl.updateReservation);
 ```
-(By this point `requireApiKey` is no longer referenced anywhere in this file — its import was already removed in Task 2 Step 8.)
+(`requireApiKey` is no longer referenced anywhere in this file — it was already replaced in Task 2 Step 8.)
 
 - [ ] **Step 6: Verify — staff-authenticated reservation management**
 
