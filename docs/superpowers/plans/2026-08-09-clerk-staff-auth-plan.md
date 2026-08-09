@@ -12,7 +12,8 @@
 
 - **No `psql` CLI in this environment.** DB steps use `node -e` one-liners with the `pg` package and `.env`'s `DATABASE_URL` (local) / `DATABASE_URL_LIVE` (production).
 - No automated test framework exists in this project — verification is manual `curl`/`node -e`.
-- **This feature needs a real Clerk Organization and a real Clerk session token to verify end-to-end** — something no subagent can fabricate. Before Task 2 (the only task that needs it) is dispatched, the human partner must supply: (a) a Clerk session token for a test user who is an active member of some Clerk Organization, and (b) that Organization's Clerk-assigned `org_id` (visible in Clerk's dashboard, or decodable from the token itself — a Clerk session JWT's payload can be inspected by base64-decoding its middle segment). If these aren't available when Task 2 is reached, STOP and ask for them — do not guess, fabricate a token, or skip verification. A second token — for a user with no active Organization — is also useful (Task 2 Step 7b) but optional: that step degrades gracefully to a code-read if it's not available.
+- **This feature needs a real Clerk Organization and a real Clerk session token to verify end-to-end.** This is solved, not a blocker: Organizations are enabled on this project's Clerk instance, a test user (`ota-dashboard-test@example.com`) and test Organization (`OTA Test Org`, with that user as an `org:admin` member) already exist, the Clerk CLI is installed globally and reads `CLERK_SECRET_KEY` from `.env` automatically, and Task 2 Step 7 gives the exact recipe (CLI sign-in token → Playwright browser → `Clerk.session.getToken()`) to mint a fresh real token on demand. Session tokens expire in ~60 seconds — mint a fresh one immediately before use, don't reuse one across steps separated by a long pause. On Windows/Git Bash, prefix `clerk api` calls with `MSYS_NO_PATHCONV=1` — otherwise Git Bash mangles the leading `/` in endpoint paths like `/users` into a Windows path.
+- Clerk claim shape, confirmed empirically against this instance's real tokens (not assumed): `@clerk/backend`'s `verifyToken` returns raw JWT claims with no renaming. Clerk's "v2" session tokens nest active-organization info under a short `o` claim: `claims.o.id` (org id), `claims.o.rol` (role, short form e.g. `"admin"` — NOT the Backend API's longer `"org:admin"` form), `claims.o.slg` (slug). Code must read `claims.o?.id`/`claims.o?.rol`, never `claims.org_id`/`claims.org_role`.
 - Confirmed rollout decision: **hard cutover**. `register`/`login` are deleted outright, no fallback period, no parallel old+new auth. This was explicitly confirmed with the user, who accepted that any existing client still calling the old endpoints breaks on deploy.
 - `req.property_id` and `req.user` (`{ id, role }`) must keep the exact same shape every other controller in this codebase already depends on — verified in Task 2 by confirming an untouched, already-scoped endpoint (`GET /api/restaurant`) still works end-to-end through the new `authenticate`.
 - Foreign/cross-property access rules elsewhere in the codebase are unaffected by this plan — this plan only changes how a caller's own `property_id`/`role` gets resolved, not any authorization logic downstream of that.
@@ -137,7 +138,7 @@ git commit -m "Add property.clerk_org_id and the @clerk/backend dependency"
 - Consumes: `property.clerk_org_id` (Task 1), `@clerk/backend`'s `createClerkClient`/`verifyToken` exports (Task 1).
 - Produces: `req.property_id` (UUID string) and `req.user = { id: <string>, role: 'admin' | 'staff' }` — the exact same shape every other controller in this codebase (guests, rooms, room types, availability, bookings, extras, restaurant) already reads. No other file changes as a result of this task.
 
-**Before starting this task:** confirm you have been given a real Clerk session token and its Organization's `org_id` (see Global Constraints). If not, STOP and report NEEDS_CONTEXT — every verify step below depends on it.
+**Before starting this task:** you do NOT need to wait for a token to be handed to you — Step 7 below is the self-service recipe for minting one (see Global Constraints for why this is already solved). Confirm you have a Playwright browser tool available and the Clerk CLI responds (`clerk --version`) before starting; if either is missing, STOP and report NEEDS_CONTEXT.
 
 - [ ] **Step 1: Rewrite `src/middleware/auth.js`**
 
@@ -210,7 +211,7 @@ const { isValidUuid } = require('./validate');
 const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
 function mapClerkRole(orgRole) {
-  return orgRole === 'org:admin' ? 'admin' : 'staff';
+  return orgRole === 'admin' ? 'admin' : 'staff';
 }
 
 async function authenticate(req, res, next) {
@@ -227,7 +228,10 @@ async function authenticate(req, res, next) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
 
-  const orgId = claims.org_id;
+  // Clerk's v2 session tokens nest active-organization info under a short
+  // `o` claim ({ id, rol, slg }), not flat org_id/org_role claims -- this
+  // is confirmed against this project's real Clerk instance, not assumed.
+  const orgId = claims.o?.id;
   if (!orgId) {
     return res.status(401).json({ error: 'An organization context is required' });
   }
@@ -247,7 +251,7 @@ async function authenticate(req, res, next) {
     }
 
     req.property_id = propertyId;
-    req.user = { id: claims.sub, role: mapClerkRole(claims.org_role) };
+    req.user = { id: claims.sub, role: mapClerkRole(claims.o.rol) };
     next();
   } catch (err) {
     next(err);
@@ -459,28 +463,54 @@ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://localhost:3000/api/auth/me 
 ```
 Expected: both `HTTP 401`.
 
-- [ ] **Step 7: Verify — real Clerk token resolves correctly (needs the token supplied per Global Constraints)**
+- [ ] **Step 7: Mint a real Clerk session token (self-service — no human hand-off needed)**
+
+This project's Clerk instance already has a test user (`ota-dashboard-test@example.com`) who is an `org:admin` member of a test Organization (`OTA Test Org`). Organizations are enabled on this instance. Mint a fresh token:
+
+1. Find the test user's id and create a one-time sign-in token via the Clerk CLI (already installed globally; it reads `CLERK_SECRET_KEY` from `.env` automatically when run from this project directory — no `--secret-key` flag needed, and no `clerk auth login` needed):
+```bash
+cd "c:\Users\robert\source\repos\OTA"
+USER_ID=$(MSYS_NO_PATHCONV=1 clerk api /users --yes 2>&1 | node -e "
+const d = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+console.log(d.find(u => u.email_addresses.some(e => e.email_address === 'ota-dashboard-test@example.com')).id);
+")
+echo "USER_ID=$USER_ID"
+MSYS_NO_PATHCONV=1 clerk api /sign_in_tokens -X POST -d "{\"user_id\":\"$USER_ID\",\"expires_in_seconds\":3600}" --yes 2>&1
+```
+Note the `url` field in the response (looks like `https://accounts.<your-domain>/sign-in?__clerk_ticket=...`).
+
+2. Use your Playwright browser tool to navigate to that exact URL.
+3. Take a page snapshot. If it shows a "Choose an organization" screen listing "OTA Test Org", click that org's button. (If it instead redirects straight through, the org was already selected automatically — proceed to the next step either way.)
+4. Evaluate this JavaScript on the current page to get a fresh token:
+```js
+async () => {
+  await window.Clerk.load();
+  const token = await window.Clerk.session.getToken({ skipCache: true });
+  return { token, userId: window.Clerk.user?.id, orgId: window.Clerk.organization?.id };
+}
+```
+This returns a real, valid, org-scoped session token. **It expires in ~60 seconds** — capture it into a shell variable and run the next several verify steps immediately, back-to-back, without a long pause. If a later step in this task unexpectedly gets a 401 where 200 was expected, mint a fresh token (repeat this Step 7) and retry — don't treat an expired-token 401 as a real failure without first ruling this out.
 
 ```bash
-CLERK_TOKEN="<the real Clerk session token supplied to you>"
+CLERK_TOKEN="<the token from the evaluate result>"
 curl -s -w "\nHTTP %{http_code}\n" http://localhost:3000/api/auth/me -H "Authorization: Bearer $CLERK_TOKEN"
 ```
-Expected: `HTTP 200` with a body like `{"property_id":"<some uuid>","role":"admin"}` or `{"...,"role":"staff"}` depending on the test user's org role. Note the returned `property_id`.
+Expected: `HTTP 200` with a body like `{"property_id":"<some uuid>","role":"admin"}` (this test user is an `org:admin` member, which the token renders as the short-form role `"admin"` under its `o.rol` claim — `authenticate` should map that to `role: "admin"`). Note the returned `property_id`.
 
 - [ ] **Step 7b: Verify — a token with no active Organization is rejected (best-effort)**
 
-This needs a second, different kind of Clerk token: one for a user with no active Organization selected (e.g. a personal Clerk account, or an org member who hasn't set that org as active). If you were given one, use it:
+Immediately after Step 3 above (navigating to the sign-in URL), before clicking any organization, try evaluating the same `window.Clerk.session.getToken({ skipCache: true })` snippet — if a session already exists at that point but with no active organization yet, this captures a genuine no-org token. If that's not obtainable (e.g. no session exists until an org is chosen), do not fabricate a token — skip this specific curl check, note in your report that it was skipped and why, and instead confirm by reading the `authenticate` function you just wrote in `src/middleware/auth.js` that the `if (!orgId)` branch does return `401 {"error":"An organization context is required"}`. This is a real gap in end-to-end coverage if skipped; say so plainly rather than treating the code-read as equivalent.
+
+If you did obtain one:
 ```bash
-CLERK_TOKEN_NO_ORG="<a Clerk token for a user with no active organization>"
+CLERK_TOKEN_NO_ORG="<the no-org token>"
 curl -s -w "\nHTTP %{http_code}\n" http://localhost:3000/api/auth/me -H "Authorization: Bearer $CLERK_TOKEN_NO_ORG"
 ```
 Expected: `HTTP 401 {"error":"An organization context is required"}`.
 
-If no such token was supplied, do not fabricate one — skip this specific check, note in your report that it was skipped and why, and instead confirm by reading `src/middleware/auth.js` that the `if (!orgId)` branch you just wrote does return that exact 401. This is a real gap in end-to-end coverage; say so plainly rather than treating the code-read as equivalent.
-
 - [ ] **Step 8: Verify — auto-provisioning is idempotent**
 
-Run the exact same command from Step 7 a second time:
+Run the exact same command from Step 7's last curl a second time (reuse `$CLERK_TOKEN` if it's been under ~60 seconds since it was minted; otherwise mint a fresh one per Step 7 first):
 ```bash
 curl -s http://localhost:3000/api/auth/me -H "Authorization: Bearer $CLERK_TOKEN"
 ```
@@ -494,14 +524,15 @@ pool.query(\"SELECT id, name, clerk_org_id FROM property WHERE clerk_org_id IS N
   .then(r => { console.log(r.rows); pool.end(); });
 "
 ```
-Expected: exactly one row per distinct Clerk org actually used during testing — no duplicates.
+Expected: exactly one row for `OTA Test Org` (and no others, unless earlier testing in this task created more) — no duplicates.
 
 - [ ] **Step 9: Verify — an already-scoped, untouched endpoint still works through the new `authenticate`**
 
 ```bash
 curl -s -w "\nHTTP %{http_code}\n" http://localhost:3000/api/restaurant -H "Authorization: Bearer $CLERK_TOKEN"
 ```
-Expected: `HTTP 200` with a JSON array (possibly empty, if this is a brand-new property with no restaurants yet) — confirms `req.property_id` set by the new `authenticate` flows correctly into `src/controllers/restaurant.js`'s `listRestaurants`, a file this task does not touch.
+(Mint a fresh token per Step 7 first if more than ~60 seconds have passed since it was minted.)
+Expected: `HTTP 200` with a JSON array (likely empty, since this is a brand-new property with no restaurants yet) — confirms `req.property_id` set by the new `authenticate` flows correctly into `src/controllers/restaurant.js`'s `listRestaurants`, a file this task does not touch.
 
 - [ ] **Step 10: Verify — guest-facing `authenticateOrApiKey` / `X-Api-Key` path is unaffected**
 
@@ -654,7 +685,7 @@ Render auto-deploys from `main` per `render.yaml`.
 
 - [ ] **Step 4: Post-deploy smoke check**
 
-Wait for the Render deploy to finish, then repeat Task 2's Steps 6-7 (401 without a token, 200 with a real Clerk token) against `https://ota-u6ii.onrender.com` instead of `localhost:3000`, using a real Clerk token for a production-relevant Organization. Confirm the old endpoints are actually gone:
+Wait for the Render deploy to finish, then repeat Task 2's Steps 6-7 (401 without a token, 200 with a real Clerk token) against `https://ota-u6ii.onrender.com` instead of `localhost:3000` — mint a fresh token using the same self-service recipe from Task 2 Step 7 (the Clerk instance and its `OTA Test Org`/test user are the same for local and production, since `CLERK_SECRET_KEY` isn't environment-split here). Confirm the old endpoints are actually gone:
 ```bash
 curl -s -o /dev/null -w "HTTP %{http_code}\n" -X POST https://ota-u6ii.onrender.com/api/auth/login -H "Content-Type: application/json" -d '{"email":"admin@bonito.example.com","password":"changeme123"}'
 ```
