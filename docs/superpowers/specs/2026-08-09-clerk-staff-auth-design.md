@@ -96,8 +96,18 @@ Replaces `jwt.verify(token, JWT_SECRET)` with Clerk verification:
 1. Verify the Bearer token via Clerk's SDK. Invalid/expired/missing →
    `401`, same contract as today (`{ error: 'Missing or invalid
    Authorization header' }` / `{ error: 'Invalid or expired token' }`).
-2. Read `org_id` and `org_role` off the verified claims. No `org_id`
-   (personal Clerk account, no active organization selected) → `401
+2. Read the active Organization off the verified claims: `claims.o?.id`
+   for the org id, `claims.o?.rol` for the role. **Confirmed empirically
+   against this project's actual Clerk instance** (not assumed): Clerk
+   issues "v2" compact session tokens, where org info is nested under a
+   short `o` claim (`{ id, rol, slg }`), not flat `org_id`/`org_role`
+   claims — and the role value is the short form `"admin"`, not
+   `"org:admin"` (that longer form is what the *Backend API*'s
+   organization-membership endpoints return; the session token's compact
+   claims use the short form). `@clerk/backend`'s `verifyToken` returns
+   the raw JWT payload with no renaming, so `authenticate` must read
+   `claims.o` directly, not `claims.org_id`/`claims.org_role`. No `o`
+   claim (personal Clerk account, no active organization selected) → `401
    {"error": "An organization context is required"}` — new failure mode,
    since this API's whole model requires one.
 3. `SELECT id FROM property WHERE clerk_org_id = $1`:
@@ -107,12 +117,10 @@ Replaces `jwt.verify(token, JWT_SECRET)` with Clerk verification:
      (name, clerk_org_id) VALUES (...) RETURNING id`, use the new id.
      This is the auto-provisioning step — the very first API call from a
      new Organization creates its property, invisibly.
-4. `req.user = { id: <clerk userId>, role: mapRole(org_role) }`.
-   `mapRole` is an assumption to verify against this Clerk instance's
-   actual configured role slugs during implementation, not guess
-   silently — Clerk's default org roles are `org:admin` and
-   `org:member`; proposed mapping is `'org:admin' → 'admin'`, everything
-   else → `'staff'`.
+4. `req.user = { id: <clerk userId>, role: mapRole(claims.o.rol) }`.
+   `mapRole` is confirmed (not assumed) against a real token from this
+   instance: `'admin' → 'admin'`, everything else (e.g. `'member'`) →
+   `'staff'`.
 5. `next()`.
 
 ### `requireRole` (unchanged)
@@ -161,12 +169,25 @@ Following this project's non-destructive migration convention:
 
 This is a different kind of verification than this project's prior
 DB-and-curl-only changes: exercising the real auth path requires an
-actual Clerk Organization and a way to mint a real Clerk session token
-for it (e.g. Clerk's dashboard test/sandbox tooling, or a short-lived
-token minted via the Clerk SDK for a test user). **This is a prerequisite
-to verify implementation, not something the implementer can fabricate** —
-flagging here so it's arranged before implementation starts, not
-discovered mid-task.
+actual Clerk Organization and a real Clerk session token for it. This is
+solved and repeatable — no manual step or waiting on a human required:
+
+1. `clerk api /sign_in_tokens -X POST -d '{"user_id":"<test user id>"}'`
+   (Clerk CLI, reads `CLERK_SECRET_KEY` from `.env` automatically) returns
+   a one-time sign-in `url`.
+2. A real browser (this project has Playwright browser tooling available)
+   navigates to that URL, which signs in as the test user and — since
+   they belong to an Organization — prompts to choose it; selecting it
+   completes the sign-in with an active org context.
+3. `window.Clerk.session.getToken({ skipCache: true })`, evaluated in that
+   browser page, returns a fresh, real, verifiable session token.
+
+A pre-provisioned test user (`ota-dashboard-test@example.com`) and test
+Organization (`OTA Test Org`) already exist in this project's Clerk
+instance for exactly this purpose. **Session tokens are short-lived
+(~60 seconds)** — mint a fresh one immediately before each check that
+needs one; don't reuse one token across multiple verification steps
+separated by more than a few seconds of wall-clock time.
 
 Manual checks once a real token is available:
 
