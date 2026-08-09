@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/restaurant');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
 
 // Restaurants
 router.get('/', authenticate, ctrl.listRestaurants);
@@ -19,7 +19,7 @@ router.get('/:restaurant_id/availability/search', ctrl.searchAvailability);
 // Reservations
 router.get('/:restaurant_id/reservations', authenticate, ctrl.listReservations);
 router.get('/:restaurant_id/reservations/:id', authenticate, ctrl.getReservation);
-router.post('/:restaurant_id/reservations', authenticate, ctrl.createReservation);
+router.post('/:restaurant_id/reservations', authenticateOrApiKey, ctrl.createReservation);
 router.put('/:restaurant_id/reservations/:id', authenticate, ctrl.updateReservation);
 
 module.exports = router;

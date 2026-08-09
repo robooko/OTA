@@ -240,9 +240,9 @@ async function listReservations(req, res, next) {
       SELECT rr.*, rt.table_number, rt.seats, rt.location
       FROM restaurant_reservation rr
       JOIN restaurant_table rt ON rt.id = rr.table_id
-      WHERE rt.restaurant_id = $1
+      WHERE rt.restaurant_id = $1 AND rr.property_id = $2
     `;
-    const params = [restaurant_id];
+    const params = [restaurant_id, req.property_id];
     if (date) { params.push(date); query += ` AND rr.reservation_date = $${params.length}`; }
     if (status) { params.push(status); query += ` AND rr.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND rr.guest_id = $${params.length}`; }
@@ -259,8 +259,8 @@ async function getReservation(req, res, next) {
       `SELECT rr.*, rt.table_number, rt.seats, rt.location
        FROM restaurant_reservation rr
        JOIN restaurant_table rt ON rt.id = rr.table_id
-       WHERE rr.id = $1`,
-      [req.params.id]
+       WHERE rr.id = $1 AND rr.property_id = $2`,
+      [req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Reservation not found' });
     res.json(rows[0]);
@@ -287,12 +287,25 @@ async function createReservation(req, res, next) {
   try {
     await client.query('BEGIN');
 
-    const restaurantRes = await client.query("SELECT * FROM restaurant WHERE id = $1 AND status = 'active'", [restaurant_id]);
+    const restaurantRes = await client.query(
+      "SELECT * FROM restaurant WHERE id = $1 AND property_id = $2 AND status = 'active'",
+      [restaurant_id, req.property_id]
+    );
     if (!restaurantRes.rows.length) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Restaurant not found' });
     }
     const restaurant = restaurantRes.rows[0];
+
+    if (guest_id) {
+      const guestRes = await client.query(
+        'SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, req.property_id]
+      );
+      if (!guestRes.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Guest not found' });
+      }
+    }
 
     if (restaurant.closed_days.includes(isoDayOfWeek(reservation_date))) {
       await client.query('ROLLBACK');
@@ -358,9 +371,9 @@ async function createReservation(req, res, next) {
 
     const { rows } = await client.query(
       `INSERT INTO restaurant_reservation
-         (table_id, reservation_date, start_time, end_time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
-      [assignedTableId, reservation_date, start_time, end_time, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null, metadata ?? {}]
+         (property_id, table_id, reservation_date, start_time, end_time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+      [req.property_id, assignedTableId, reservation_date, start_time, end_time, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null, metadata ?? {}]
     );
 
     await client.query('COMMIT');
@@ -387,8 +400,8 @@ async function updateReservation(req, res, next) {
          contact_email = COALESCE($4, contact_email),
          contact_phone = COALESCE($5, contact_phone),
          metadata      = COALESCE($6::jsonb, metadata)
-       WHERE id = $7 RETURNING *`,
-      [status, notes, contact_name, contact_email, contact_phone, metadata ?? null, req.params.id]
+       WHERE id = $7 AND property_id = $8 RETURNING *`,
+      [status, notes, contact_name, contact_email, contact_phone, metadata ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Reservation not found' });
     res.json(rows[0]);
