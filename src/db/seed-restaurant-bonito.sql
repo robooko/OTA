@@ -1,8 +1,5 @@
 -- Restaurant and tables for Bonito
 -- Run after schema.sql (and seed.sql, for consistent ordering with other seed files)
--- Note: the restaurant module has no property_id yet (out of scope for the
--- multi-property Phase 1 plan), so this data is unscoped like the rest of
--- the restaurant/spa/tours/etc. modules.
 --
 -- Availability is computed on demand (no time_slot grid to seed) from the
 -- restaurant's service_period row(s) plus its own slot_interval_minutes/
@@ -19,12 +16,12 @@ WITH new_restaurant AS (
   )
   RETURNING id
 ), new_period AS (
-  INSERT INTO service_period (restaurant_id, start_time, end_time)
-  SELECT new_restaurant.id, '19:00', '22:30'
+  INSERT INTO service_period (property_id, restaurant_id, start_time, end_time)
+  SELECT 'e1000000-0000-0000-0000-000000000003', new_restaurant.id, '19:00', '22:30'
   FROM new_restaurant
 )
-INSERT INTO restaurant_table (restaurant_id, table_number, seats, location)
-SELECT new_restaurant.id, t.table_number, t.seats, t.location
+INSERT INTO restaurant_table (property_id, restaurant_id, table_number, seats, location)
+SELECT 'e1000000-0000-0000-0000-000000000003', new_restaurant.id, t.table_number, t.seats, t.location
 FROM new_restaurant, (VALUES
   ('T1', 2, 'Indoor'),
   ('T2', 2, 'Indoor'),

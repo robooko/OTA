@@ -2,9 +2,6 @@
 -- Run after schema.sql and the other restaurant seed files during a fresh
 -- reset - or as a plain additive INSERT directly against an
 -- already-populated database.
--- Note: the restaurant module has no property_id yet (out of scope for the
--- multi-property Phase 1 plan), so this data is unscoped like the rest of
--- the restaurant/spa/tours/etc. modules.
 --
 -- Pirates Bight is a Caribbean dockside kitchen and rum bar, open daily
 -- 11am-9pm (single continuous service window, no lunch/dinner gap), with
@@ -22,8 +19,8 @@ WITH new_restaurant AS (
   )
   RETURNING id
 ), new_tables AS (
-  INSERT INTO restaurant_table (restaurant_id, table_number, seats, location)
-  SELECT new_restaurant.id, t.table_number, t.seats, t.location
+  INSERT INTO restaurant_table (property_id, restaurant_id, table_number, seats, location)
+  SELECT 'e1000000-0000-0000-0000-000000000004', new_restaurant.id, t.table_number, t.seats, t.location
   FROM new_restaurant, (VALUES
     ('T1', 2, 'Dock'),
     ('T2', 2, 'Dock'),
@@ -32,10 +29,10 @@ WITH new_restaurant AS (
     ('T5', 6, 'Indoor')
   ) AS t(table_number, seats, location)
 ), new_period AS (
-  INSERT INTO service_period (restaurant_id, start_time, end_time)
-  SELECT new_restaurant.id, '11:00', '21:00'
+  INSERT INTO service_period (property_id, restaurant_id, start_time, end_time)
+  SELECT 'e1000000-0000-0000-0000-000000000004', new_restaurant.id, '11:00', '21:00'
   FROM new_restaurant
 )
-INSERT INTO restaurant_seasonal_closure (restaurant_id, start_month, start_day, end_month, end_day)
-SELECT new_restaurant.id, 8, 1, 9, 30
+INSERT INTO restaurant_seasonal_closure (property_id, restaurant_id, start_month, start_day, end_month, end_day)
+SELECT 'e1000000-0000-0000-0000-000000000004', new_restaurant.id, 8, 1, 9, 30
 FROM new_restaurant;
