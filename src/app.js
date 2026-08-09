@@ -21,6 +21,7 @@ const golfRoutes = require('./routes/golf');
 const extrasRoutes = require('./routes/extras');
 const roomServiceRoutes = require('./routes/roomService');
 const proshopRoutes = require('./routes/proshop');
+const propertyRoutes = require('./routes/property');
 
 const app = express();
 
@@ -47,6 +48,7 @@ app.use('/api/golf', golfRoutes);
 app.use('/api/extras', extrasRoutes);
 app.use('/api/room-service', roomServiceRoutes);
 app.use('/api/proshop', proshopRoutes);
+app.use('/api/property', propertyRoutes);
 
 app.use(errorHandler);
 
