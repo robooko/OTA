@@ -1,21 +1,54 @@
-const jwt = require('jsonwebtoken');
+const { createClerkClient, verifyToken } = require('@clerk/backend');
 const pool = require('../db');
 const { isValidUuid } = require('./validate');
 
-const JWT_SECRET = process.env.JWT_SECRET;
+const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
-function authenticate(req, res, next) {
+function mapClerkRole(orgRole) {
+  return orgRole === 'admin' ? 'admin' : 'staff';
+}
+
+async function authenticate(req, res, next) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Missing or invalid Authorization header' });
   }
   const token = header.slice(7);
+
+  let claims;
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    req.property_id = req.user.property_id;
-    next();
+    claims = await verifyToken(token, { secretKey: process.env.CLERK_SECRET_KEY });
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+
+  // Clerk's v2 session tokens nest active-organization info under a short
+  // `o` claim ({ id, rol, slg }), not flat org_id/org_role claims -- this
+  // is confirmed against this project's real Clerk instance, not assumed.
+  const orgId = claims.o?.id;
+  if (!orgId) {
+    return res.status(401).json({ error: 'An organization context is required' });
+  }
+
+  try {
+    const propertyRes = await pool.query('SELECT id FROM property WHERE clerk_org_id = $1', [orgId]);
+    let propertyId;
+    if (propertyRes.rows.length) {
+      propertyId = propertyRes.rows[0].id;
+    } else {
+      const org = await clerkClient.organizations.getOrganization({ organizationId: orgId });
+      const { rows } = await pool.query(
+        'INSERT INTO property (name, clerk_org_id) VALUES ($1, $2) RETURNING id',
+        [org.name, orgId]
+      );
+      propertyId = rows[0].id;
+    }
+
+    req.property_id = propertyId;
+    req.user = { id: claims.sub, role: mapClerkRole(claims.o.rol) };
+    next();
+  } catch (err) {
+    next(err);
   }
 }
 
