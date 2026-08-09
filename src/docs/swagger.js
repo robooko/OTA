@@ -34,6 +34,7 @@ const swaggerSpec = {
         type: 'http',
         scheme: 'bearer',
         bearerFormat: 'JWT',
+        description: 'A Clerk session token for a user with an active Organization (maps to a property). Not this API\'s own token — Clerk issues and verifies it.',
       },
       apiKeyAuth: {
         type: 'apiKey',
@@ -157,17 +158,8 @@ const swaggerSpec = {
   },
   paths: {
     // ── Auth ────────────────────────────────────────────────────────────────
-    '/api/auth/register': {
-      post: { tags: ['Auth'], summary: 'Register a new staff/admin account for the caller\'s own property (admin only)', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'email', 'password'], properties: { name: { type: 'string' }, email: { type: 'string', format: 'email' }, password: { type: 'string', format: 'password' }, role: { type: 'string', enum: ['admin', 'staff', 'guest'], default: 'staff' } } } } } }, responses: { 201: { description: 'User created with JWT token' } } },
-    },
-    '/api/auth/login': {
-      post: { tags: ['Auth'], summary: 'Login and receive JWT token', security: [], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['email', 'password'], properties: { email: { type: 'string', format: 'email' }, password: { type: 'string', format: 'password' } } } } } }, responses: { 200: { description: 'JWT token' }, 401: { description: 'Invalid credentials' } } },
-    },
     '/api/auth/me': {
-      get: { tags: ['Auth'], summary: 'Get current user', responses: { 200: { description: 'Current user profile' } } },
-    },
-    '/api/auth/users': {
-      get: { tags: ['Auth'], summary: 'List all users (admin only)', responses: { 200: { description: 'Array of users' }, 403: { description: 'Forbidden' } } },
+      get: { tags: ['Auth'], summary: 'Get the current property and role, resolved from the Clerk session token', responses: { 200: { description: 'Object with property_id and role', content: { 'application/json': { schema: { type: 'object', properties: { property_id: { type: 'string', format: 'uuid' }, role: { type: 'string', enum: ['admin', 'staff'] } } } } } } } },
     },
 
     // ── Guests ──────────────────────────────────────────────────────────────
