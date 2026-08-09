@@ -26,14 +26,20 @@ function isValidMetadata(v) {
 
 async function listRestaurants(req, res, next) {
   try {
-    const { rows } = await pool.query("SELECT * FROM restaurant WHERE status = 'active' ORDER BY name");
+    const { rows } = await pool.query(
+      "SELECT * FROM restaurant WHERE status = 'active' AND property_id = $1 ORDER BY name",
+      [req.property_id]
+    );
     res.json(rows);
   } catch (err) { next(err); }
 }
 
 async function getRestaurant(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT * FROM restaurant WHERE id = $1', [req.params.id]);
+    const { rows } = await pool.query(
+      'SELECT * FROM restaurant WHERE id = $1 AND property_id = $2',
+      [req.params.id, req.property_id]
+    );
     if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
     res.json(rows[0]);
   } catch (err) { next(err); }
@@ -49,9 +55,9 @@ async function createRestaurant(req, res, next) {
       return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO restaurant (name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? []]
+      `INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? []]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -72,8 +78,8 @@ async function updateRestaurant(req, res, next) {
          default_duration_minutes = COALESCE($5, default_duration_minutes),
          closed_days              = COALESCE($6, closed_days),
          status                   = COALESCE($7, status)
-       WHERE id = $8 RETURNING *`,
-      [name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, req.params.id]
+       WHERE id = $8 AND property_id = $9 RETURNING *`,
+      [name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
     res.json(rows[0]);
@@ -85,6 +91,12 @@ async function updateRestaurant(req, res, next) {
 async function listTables(req, res, next) {
   try {
     const { restaurant_id } = req.params;
+    const restaurantRes = await pool.query(
+      'SELECT id FROM restaurant WHERE id = $1 AND property_id = $2',
+      [restaurant_id, req.property_id]
+    );
+    if (!restaurantRes.rows.length) return res.status(404).json({ error: 'Restaurant not found' });
+
     const { rows } = await pool.query(
       'SELECT * FROM restaurant_table WHERE restaurant_id = $1 ORDER BY table_number',
       [restaurant_id]
@@ -98,9 +110,16 @@ async function createTable(req, res, next) {
     const { restaurant_id } = req.params;
     const { table_number, seats, location } = req.body;
     if (!table_number || !seats) return res.status(400).json({ error: 'table_number and seats are required' });
+
+    const restaurantRes = await pool.query(
+      'SELECT id FROM restaurant WHERE id = $1 AND property_id = $2',
+      [restaurant_id, req.property_id]
+    );
+    if (!restaurantRes.rows.length) return res.status(404).json({ error: 'Restaurant not found' });
+
     const { rows } = await pool.query(
-      `INSERT INTO restaurant_table (restaurant_id, table_number, seats, location) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [restaurant_id, table_number, seats, location ?? null]
+      `INSERT INTO restaurant_table (property_id, restaurant_id, table_number, seats, location) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [req.property_id, restaurant_id, table_number, seats, location ?? null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -116,8 +135,8 @@ async function updateTable(req, res, next) {
          seats        = COALESCE($2, seats),
          location     = COALESCE($3, location),
          status       = COALESCE($4, status)
-       WHERE id = $5 AND restaurant_id = $6 RETURNING *`,
-      [table_number, seats, location, status, id, restaurant_id]
+       WHERE id = $5 AND restaurant_id = $6 AND property_id = $7 RETURNING *`,
+      [table_number, seats, location, status, id, restaurant_id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Table not found' });
     res.json(rows[0]);

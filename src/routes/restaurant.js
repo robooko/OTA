@@ -1,25 +1,25 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/restaurant');
-const { requireApiKey } = require('../middleware/apiKey');
+const { authenticate } = require('../middleware/auth');
 
 // Restaurants
-router.get('/', ctrl.listRestaurants);
-router.get('/:id', ctrl.getRestaurant);
-router.post('/', requireApiKey, ctrl.createRestaurant);
-router.put('/:id', requireApiKey, ctrl.updateRestaurant);
+router.get('/', authenticate, ctrl.listRestaurants);
+router.get('/:id', authenticate, ctrl.getRestaurant);
+router.post('/', authenticate, ctrl.createRestaurant);
+router.put('/:id', authenticate, ctrl.updateRestaurant);
 
 // Tables
-router.get('/:restaurant_id/tables', ctrl.listTables);
-router.post('/:restaurant_id/tables', requireApiKey, ctrl.createTable);
-router.put('/:restaurant_id/tables/:id', requireApiKey, ctrl.updateTable);
+router.get('/:restaurant_id/tables', authenticate, ctrl.listTables);
+router.post('/:restaurant_id/tables', authenticate, ctrl.createTable);
+router.put('/:restaurant_id/tables/:id', authenticate, ctrl.updateTable);
 
 // Availability
 router.get('/:restaurant_id/availability/search', ctrl.searchAvailability);
 
 // Reservations
-router.get('/:restaurant_id/reservations', requireApiKey, ctrl.listReservations);
-router.get('/:restaurant_id/reservations/:id', requireApiKey, ctrl.getReservation);
-router.post('/:restaurant_id/reservations', requireApiKey, ctrl.createReservation);
-router.put('/:restaurant_id/reservations/:id', requireApiKey, ctrl.updateReservation);
+router.get('/:restaurant_id/reservations', authenticate, ctrl.listReservations);
+router.get('/:restaurant_id/reservations/:id', authenticate, ctrl.getReservation);
+router.post('/:restaurant_id/reservations', authenticate, ctrl.createReservation);
+router.put('/:restaurant_id/reservations/:id', authenticate, ctrl.updateReservation);
 
 module.exports = router;
