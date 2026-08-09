@@ -9,8 +9,9 @@
 -- default_duration_minutes columns, set below.
 
 WITH new_restaurant AS (
-  INSERT INTO restaurant (name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days)
+  INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days)
   VALUES (
+    'e1000000-0000-0000-0000-000000000003',
     'Bonito',
     'Bonito''s signature restaurant, serving fresh local produce with seasonal tasting menus.',
     '+1-555-0199',

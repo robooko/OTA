@@ -10,8 +10,9 @@
 -- default_duration_minutes columns, set below.
 
 WITH new_restaurant AS (
-  INSERT INTO restaurant (name, description, phone, slot_interval_minutes, default_duration_minutes)
+  INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes)
   VALUES (
+    'e1000000-0000-0000-0000-000000000003',
     'Bimini',
     'A relaxed seafood shack serving the day''s catch with beachfront views.',
     '+1-555-0201',
@@ -33,8 +34,9 @@ FROM new_restaurant, (VALUES
 ) AS t(table_number, seats, location);
 
 WITH new_restaurant AS (
-  INSERT INTO restaurant (name, description, phone, slot_interval_minutes, default_duration_minutes)
+  INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes)
   VALUES (
+    'e1000000-0000-0000-0000-000000000003',
     'Betula',
     'A casual European bistro with a seasonal small-plates menu.',
     '+1-555-0202',
@@ -63,8 +65,9 @@ FROM new_restaurant, (VALUES
 ) AS sc(start_month, start_day, end_month, end_day);
 
 WITH new_restaurant AS (
-  INSERT INTO restaurant (name, description, phone, slot_interval_minutes, default_duration_minutes)
+  INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes)
   VALUES (
+    'e1000000-0000-0000-0000-000000000003',
     'Barry',
     'A steakhouse and grill specialising in charcoal-fired cuts and cocktails.',
     '+1-555-0203',

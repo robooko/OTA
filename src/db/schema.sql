@@ -158,6 +158,7 @@ CREATE INDEX IF NOT EXISTS idx_api_user_property ON api_user(property_id);
 
 CREATE TABLE IF NOT EXISTS restaurant (
   id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id               UUID         NOT NULL REFERENCES property(id),
   name                      VARCHAR(100) NOT NULL,
   description               TEXT,
   phone                     VARCHAR(30),
@@ -170,6 +171,7 @@ CREATE TABLE IF NOT EXISTS restaurant (
 
 CREATE TABLE IF NOT EXISTS restaurant_table (
   id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID         NOT NULL REFERENCES property(id),
   restaurant_id UUID         NOT NULL REFERENCES restaurant(id),
   table_number  VARCHAR(10)  NOT NULL,
   seats         INT          NOT NULL,
@@ -180,6 +182,7 @@ CREATE TABLE IF NOT EXISTS restaurant_table (
 
 CREATE TABLE IF NOT EXISTS service_period (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID NOT NULL REFERENCES property(id),
   restaurant_id UUID NOT NULL REFERENCES restaurant(id),
   label         VARCHAR(50),
   start_time    TIME NOT NULL,
@@ -189,6 +192,7 @@ CREATE TABLE IF NOT EXISTS service_period (
 
 CREATE TABLE IF NOT EXISTS restaurant_reservation (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id      UUID         NOT NULL REFERENCES property(id),
   table_id         UUID         NOT NULL REFERENCES restaurant_table(id),
   reservation_date DATE         NOT NULL,
   start_time       TIME         NOT NULL,
@@ -207,6 +211,7 @@ CREATE TABLE IF NOT EXISTS restaurant_reservation (
 
 CREATE TABLE IF NOT EXISTS restaurant_seasonal_closure (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID     NOT NULL REFERENCES property(id),
   restaurant_id UUID     NOT NULL REFERENCES restaurant(id),
   start_month   SMALLINT NOT NULL CHECK (start_month BETWEEN 1 AND 12),
   start_day     SMALLINT NOT NULL CHECK (start_day BETWEEN 1 AND 31),
@@ -215,11 +220,16 @@ CREATE TABLE IF NOT EXISTS restaurant_seasonal_closure (
   CHECK (ROW(start_month, start_day) <= ROW(end_month, end_day))
 );
 
-CREATE INDEX IF NOT EXISTS idx_restaurant_table_restaurant        ON restaurant_table(restaurant_id);
-CREATE INDEX IF NOT EXISTS idx_restaurant_res_table_date_time     ON restaurant_reservation(table_id, reservation_date, start_time);
-CREATE INDEX IF NOT EXISTS idx_restaurant_res_clerk_user          ON restaurant_reservation(clerk_user_id);
-CREATE INDEX IF NOT EXISTS idx_restaurant_seasonal_closure_rest   ON restaurant_seasonal_closure(restaurant_id);
-CREATE INDEX IF NOT EXISTS idx_service_period_restaurant          ON service_period(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_property             ON restaurant(property_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_table_property        ON restaurant_table(property_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_table_restaurant       ON restaurant_table(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_res_property           ON restaurant_reservation(property_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_res_table_date_time    ON restaurant_reservation(table_id, reservation_date, start_time);
+CREATE INDEX IF NOT EXISTS idx_restaurant_res_clerk_user         ON restaurant_reservation(clerk_user_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_seasonal_closure_prop  ON restaurant_seasonal_closure(property_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_seasonal_closure_rest  ON restaurant_seasonal_closure(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_service_period_property           ON service_period(property_id);
+CREATE INDEX IF NOT EXISTS idx_service_period_restaurant         ON service_period(restaurant_id);
 
 -- ── Spa ───────────────────────────────────────────────────────────────────────
 
