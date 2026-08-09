@@ -12,6 +12,7 @@ const swaggerSpec = {
   security: [{ bearerAuth: [] }],
   tags: [
     { name: 'Auth' },
+    { name: 'Property' },
     { name: 'Guests' },
     { name: 'Room Types' },
     { name: 'Rooms' },
@@ -162,6 +163,14 @@ const swaggerSpec = {
       get: { tags: ['Auth'], summary: 'Get the current property and role, resolved from the Clerk session token', responses: { 200: { description: 'Object with property_id and role', content: { 'application/json': { schema: { type: 'object', properties: { property_id: { type: 'string', format: 'uuid' }, role: { type: 'string', enum: ['admin', 'staff'] } } } } } } } },
     },
 
+    // ── Property ────────────────────────────────────────────────────────────
+    '/api/property/api-key': {
+      get: { tags: ['Property'], summary: "Get the current property's API key (admin only)", responses: { 200: { description: 'API key', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' } } } } } }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/property/api-key/rotate': {
+      post: { tags: ['Property'], summary: "Rotate the current property's API key (admin only) — the old key stops working immediately", responses: { 200: { description: 'New API key', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' } } } } } }, 403: { description: 'Insufficient permissions' } } },
+    },
+
     // ── Guests ──────────────────────────────────────────────────────────────
     '/api/guests': {
       get: {
@@ -185,7 +194,7 @@ const swaggerSpec = {
                   last_name: { type: 'string' },
                   email: { type: 'string', format: 'email' },
                   phone: { type: 'string' },
-                  property_id: { type: 'string', format: 'uuid', description: 'Required only when authenticating with X-Api-Key; ignored (the JWT\'s property is used instead) when authenticating with a Bearer token.' },
+                  property_id: { type: 'string', format: 'uuid', description: 'Ignored. The property is determined by which per-property X-Api-Key or Bearer token authenticated the request — this field has no effect even if sent.' },
                 },
               },
             },
@@ -195,7 +204,7 @@ const swaggerSpec = {
       },
     },
     '/api/guests/lookup': {
-      get: { tags: ['Guests'], summary: 'Look up guest by email', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'email', in: 'query', required: true, schema: { type: 'string', format: 'email' } }, { name: 'property_id', in: 'query', schema: { type: 'string', format: 'uuid' }, description: 'Required only when authenticating with X-Api-Key; ignored (the JWT\'s property is used instead) when authenticating with a Bearer token.' }], responses: { 200: { description: 'Guest found' }, 404: { description: 'Guest not found' } } },
+      get: { tags: ['Guests'], summary: 'Look up guest by email', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'email', in: 'query', required: true, schema: { type: 'string', format: 'email' } }, { name: 'property_id', in: 'query', schema: { type: 'string', format: 'uuid' }, description: 'Ignored. The property is determined by which per-property X-Api-Key or Bearer token authenticated the request — this field has no effect even if sent.' }], responses: { 200: { description: 'Guest found' }, 404: { description: 'Guest not found' } } },
     },
     '/api/guests/{id}': {
       get: { tags: ['Guests'], summary: 'Get guest by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Guest' }, 404: { description: 'Not found' } } },
@@ -244,7 +253,7 @@ const swaggerSpec = {
     // ── Bookings ─────────────────────────────────────────────────────────────
     '/api/bookings': {
       get: { tags: ['Bookings'], summary: 'List bookings', parameters: [{ name: 'status', in: 'query', schema: { type: 'string' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'to', in: 'query', schema: { type: 'string', format: 'date' } }], responses: { 200: { description: 'Array of bookings' } } },
-      post: { tags: ['Bookings'], summary: 'Create booking', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['guest_id', 'check_in', 'check_out'], properties: { guest_id: { type: 'string', format: 'uuid' }, room_id: { type: 'string', format: 'uuid', description: 'Exactly one of room_id or room_type_id is required.' }, room_type_id: { type: 'string', format: 'uuid', description: 'Alternative to room_id: books the first available room of this type. Exactly one of room_id or room_type_id is required.' }, check_in: { type: 'string', format: 'date' }, check_out: { type: 'string', format: 'date' }, guests: { type: 'integer' }, metadata: { type: 'object', additionalProperties: true, example: { pickup_location: 'InterContinental Le Moana Bora Bora Resort' } }, property_id: { type: 'string', format: 'uuid', description: 'Required only when authenticating with X-Api-Key; ignored (the JWT\'s property is used instead) when authenticating with a Bearer token.' } } } } } }, responses: { 201: { description: 'Booking created with total price' }, 409: { description: 'Room (or room type) not available' } } },
+      post: { tags: ['Bookings'], summary: 'Create booking', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['guest_id', 'check_in', 'check_out'], properties: { guest_id: { type: 'string', format: 'uuid' }, room_id: { type: 'string', format: 'uuid', description: 'Exactly one of room_id or room_type_id is required.' }, room_type_id: { type: 'string', format: 'uuid', description: 'Alternative to room_id: books the first available room of this type. Exactly one of room_id or room_type_id is required.' }, check_in: { type: 'string', format: 'date' }, check_out: { type: 'string', format: 'date' }, guests: { type: 'integer' }, metadata: { type: 'object', additionalProperties: true, example: { pickup_location: 'InterContinental Le Moana Bora Bora Resort' } }, property_id: { type: 'string', format: 'uuid', description: 'Ignored. The property is determined by which per-property X-Api-Key or Bearer token authenticated the request — this field has no effect even if sent.' } } } } } }, responses: { 201: { description: 'Booking created with total price' }, 409: { description: 'Room (or room type) not available' } } },
     },
     '/api/bookings/{id}': {
       get: { tags: ['Bookings'], summary: 'Get booking by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Booking with guest and room details' } } },
@@ -281,7 +290,7 @@ const swaggerSpec = {
     },
     '/api/restaurant/{restaurant_id}/reservations': {
       get: { tags: ['Restaurant'], summary: 'List reservations', parameters: [{ name: 'restaurant_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'date', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'status', in: 'query', schema: { type: 'string' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'clerk_user_id', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Array of reservations' } } },
-      post: { tags: ['Restaurant'], summary: 'Create reservation (table auto-assigned)', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'restaurant_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['reservation_date', 'start_time', 'contact_name', 'party_size'], properties: { reservation_date: { type: 'string', format: 'date' }, start_time: { type: 'string', example: '19:00' }, location: { type: 'string' }, guest_id: { type: 'string', format: 'uuid' }, clerk_user_id: { type: 'string' }, contact_name: { type: 'string' }, contact_email: { type: 'string' }, contact_phone: { type: 'string' }, party_size: { type: 'integer' }, notes: { type: 'string' }, metadata: { type: 'object', additionalProperties: true, example: { occasion: 'anniversary' } }, property_id: { type: 'string', format: 'uuid', description: 'Required only when authenticating with X-Api-Key; ignored (the JWT\'s property is used instead) when authenticating with a Bearer token.' } } } } } }, responses: { 201: { description: 'Reservation created' }, 409: { description: 'No tables available for this time' } } },
+      post: { tags: ['Restaurant'], summary: 'Create reservation (table auto-assigned)', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'restaurant_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['reservation_date', 'start_time', 'contact_name', 'party_size'], properties: { reservation_date: { type: 'string', format: 'date' }, start_time: { type: 'string', example: '19:00' }, location: { type: 'string' }, guest_id: { type: 'string', format: 'uuid' }, clerk_user_id: { type: 'string' }, contact_name: { type: 'string' }, contact_email: { type: 'string' }, contact_phone: { type: 'string' }, party_size: { type: 'integer' }, notes: { type: 'string' }, metadata: { type: 'object', additionalProperties: true, example: { occasion: 'anniversary' } }, property_id: { type: 'string', format: 'uuid', description: 'Ignored. The property is determined by which per-property X-Api-Key or Bearer token authenticated the request — this field has no effect even if sent.' } } } } } }, responses: { 201: { description: 'Reservation created' }, 409: { description: 'No tables available for this time' } } },
     },
     '/api/restaurant/{restaurant_id}/reservations/{id}': {
       get: { tags: ['Restaurant'], summary: 'Get reservation by ID', parameters: [{ name: 'restaurant_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Reservation' } } },
