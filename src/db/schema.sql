@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS restaurant (
   slot_interval_minutes     INT          NOT NULL DEFAULT 15,
   default_duration_minutes  INT          NOT NULL,
   closed_days               SMALLINT[]   NOT NULL DEFAULT '{}',
+  status                    VARCHAR(20)  DEFAULT 'active',
   created_at                TIMESTAMPTZ DEFAULT now()
 );
 

@@ -26,7 +26,7 @@ function isValidMetadata(v) {
 
 async function listRestaurants(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT * FROM restaurant ORDER BY name');
+    const { rows } = await pool.query("SELECT * FROM restaurant WHERE status = 'active' ORDER BY name");
     res.json(rows);
   } catch (err) { next(err); }
 }
@@ -59,7 +59,7 @@ async function createRestaurant(req, res, next) {
 
 async function updateRestaurant(req, res, next) {
   try {
-    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status } = req.body;
     if (closed_days !== undefined && !isValidClosedDays(closed_days)) {
       return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
     }
@@ -70,9 +70,10 @@ async function updateRestaurant(req, res, next) {
          phone                    = COALESCE($3, phone),
          slot_interval_minutes    = COALESCE($4, slot_interval_minutes),
          default_duration_minutes = COALESCE($5, default_duration_minutes),
-         closed_days              = COALESCE($6, closed_days)
-       WHERE id = $7 RETURNING *`,
-      [name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, req.params.id]
+         closed_days              = COALESCE($6, closed_days),
+         status                   = COALESCE($7, status)
+       WHERE id = $8 RETURNING *`,
+      [name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
     res.json(rows[0]);
@@ -140,7 +141,7 @@ async function searchAvailability(req, res, next) {
       return res.status(400).json({ error: 'party_size must be a positive integer' });
     }
 
-    const restaurantRes = await pool.query('SELECT id FROM restaurant WHERE id = $1', [restaurant_id]);
+    const restaurantRes = await pool.query("SELECT id FROM restaurant WHERE id = $1 AND status = 'active'", [restaurant_id]);
     if (!restaurantRes.rows.length) return res.status(404).json({ error: 'Restaurant not found' });
 
     const { rows } = await pool.query(
@@ -267,7 +268,7 @@ async function createReservation(req, res, next) {
   try {
     await client.query('BEGIN');
 
-    const restaurantRes = await client.query('SELECT * FROM restaurant WHERE id = $1', [restaurant_id]);
+    const restaurantRes = await client.query("SELECT * FROM restaurant WHERE id = $1 AND status = 'active'", [restaurant_id]);
     if (!restaurantRes.rows.length) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Restaurant not found' });
