@@ -62,10 +62,17 @@ async function getRoomTypeAvailability(req, res, next) {
 
 async function searchAvailability(req, res, next) {
   try {
-    const { check_in, check_out, guests, property_id } = req.query;
+    const { check_in, check_out, guests } = req.query;
+    let { property_id } = req.query;
+
+    const apiKey = req.headers['x-api-key'];
+    if (apiKey) {
+      const { rows } = await pool.query('SELECT id FROM property WHERE api_key = $1 AND api_key_enabled = true', [apiKey]);
+      if (rows.length) property_id = rows[0].id;
+    }
 
     if (!check_in || !check_out || !guests || !property_id) {
-      return res.status(400).json({ error: 'check_in, check_out, guests, and property_id are required' });
+      return res.status(400).json({ error: 'check_in, check_out, guests, and property_id are required (or supply a valid X-Api-Key)' });
     }
     if (!isValidUuid(property_id)) {
       return res.status(400).json({ error: 'Invalid property_id' });

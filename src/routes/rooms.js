@@ -1,10 +1,10 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/rooms');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
 
-router.get('/', authenticate, ctrl.listRooms);
+router.get('/', authenticateOrApiKey, ctrl.listRooms);
 router.get('/:id', authenticate, ctrl.getRoom);
-router.post('/', authenticate, ctrl.createRoom);
-router.put('/:id', authenticate, ctrl.updateRoom);
+router.post('/', authenticateOrApiKey, ctrl.createRoom);
+router.put('/:id', authenticateOrApiKey, ctrl.updateRoom);
 
 module.exports = router;
