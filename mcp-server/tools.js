@@ -155,6 +155,51 @@ function createTools(apiRequest) {
     },
     run: ({ restaurant_id, ...body }) => apiRequest('POST', `/api/restaurant/${restaurant_id}/reservations`, { body }),
   },
+  {
+    name: 'list_restaurants',
+    description: 'List all restaurants',
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/restaurant'),
+  },
+  {
+    name: 'get_restaurant',
+    description: 'Get a restaurant by id',
+    inputSchema: { id: z.string() },
+    run: ({ id }) => apiRequest('GET', `/api/restaurant/${id}`),
+  },
+  {
+    name: 'list_restaurant_reservations',
+    description: 'List reservations for a restaurant, optionally filtered by date, status, or guest',
+    inputSchema: {
+      restaurant_id: z.string(),
+      date: z.string().optional(),
+      status: z.string().optional(),
+      guest_id: z.string().optional(),
+      clerk_user_id: z.string().optional(),
+    },
+    run: ({ restaurant_id, ...query }) => apiRequest('GET', `/api/restaurant/${restaurant_id}/reservations`, { query }),
+  },
+  {
+    name: 'get_restaurant_reservation',
+    description: 'Get a restaurant reservation by id',
+    inputSchema: { restaurant_id: z.string(), id: z.string() },
+    run: ({ restaurant_id, id }) => apiRequest('GET', `/api/restaurant/${restaurant_id}/reservations/${id}`),
+  },
+  {
+    name: 'update_restaurant_reservation',
+    description: 'Update a restaurant reservation (e.g. set status to "cancelled" to cancel it)',
+    inputSchema: {
+      restaurant_id: z.string(),
+      id: z.string(),
+      status: z.string().optional(),
+      notes: z.string().optional(),
+      contact_name: z.string().optional(),
+      contact_email: z.string().optional(),
+      contact_phone: z.string().optional(),
+      metadata: z.record(z.any()).optional(),
+    },
+    run: ({ restaurant_id, id, ...body }) => apiRequest('PUT', `/api/restaurant/${restaurant_id}/reservations/${id}`, { body }),
+  },
   ];
 }
 
