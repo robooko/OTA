@@ -7,12 +7,13 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 -- Properties (tenants)
 CREATE TABLE IF NOT EXISTS property (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name          VARCHAR(100) NOT NULL,
-  status        VARCHAR(20)  DEFAULT 'active',
-  clerk_org_id  VARCHAR(255) UNIQUE,
-  api_key       TEXT UNIQUE,
-  created_at    TIMESTAMPTZ  DEFAULT now()
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name             VARCHAR(100) NOT NULL,
+  status           VARCHAR(20)  DEFAULT 'active',
+  clerk_org_id     VARCHAR(255) UNIQUE,
+  api_key          TEXT UNIQUE,
+  api_key_enabled  BOOLEAN NOT NULL DEFAULT true,
+  created_at       TIMESTAMPTZ  DEFAULT now()
 );
 
 -- Guests

@@ -68,7 +68,7 @@ async function authenticateOrApiKey(req, res, next) {
   }
 
   try {
-    const { rows } = await pool.query('SELECT id FROM property WHERE api_key = $1', [key]);
+    const { rows } = await pool.query('SELECT id FROM property WHERE api_key = $1 AND api_key_enabled = true', [key]);
     if (!rows.length) return res.status(401).json({ error: 'Missing or invalid Authorization header or X-Api-Key' });
     req.property_id = rows[0].id;
     next();

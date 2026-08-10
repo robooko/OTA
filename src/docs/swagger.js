@@ -165,10 +165,16 @@ const swaggerSpec = {
 
     // ── Property ────────────────────────────────────────────────────────────
     '/api/property/api-key': {
-      get: { tags: ['Property'], summary: "Get the current property's API key (admin only)", responses: { 200: { description: 'API key', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' } } } } } }, 403: { description: 'Insufficient permissions' } } },
+      get: { tags: ['Property'], summary: "Get the current property's API key (admin only)", responses: { 200: { description: 'API key and enabled state', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' }, api_key_enabled: { type: 'boolean' } } } } } }, 403: { description: 'Insufficient permissions' } } },
     },
     '/api/property/api-key/rotate': {
       post: { tags: ['Property'], summary: "Rotate the current property's API key (admin only) — the old key stops working immediately", responses: { 200: { description: 'New API key', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' } } } } } }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/property/api-key/disable': {
+      post: { tags: ['Property'], summary: "Disable the current property's API key without rotating it (admin only)", responses: { 200: { description: 'Current key and enabled state (false)', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' }, api_key_enabled: { type: 'boolean' } } } } } }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/property/api-key/enable': {
+      post: { tags: ['Property'], summary: "Re-enable the current property's API key (admin only) — restores access using the same key value", responses: { 200: { description: 'Current key and enabled state (true)', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' }, api_key_enabled: { type: 'boolean' } } } } } }, 403: { description: 'Insufficient permissions' } } },
     },
 
     // ── Guests ──────────────────────────────────────────────────────────────

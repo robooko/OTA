@@ -7,8 +7,8 @@ function generateApiKey() {
 
 async function getApiKey(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT api_key FROM property WHERE id = $1', [req.property_id]);
-    res.json({ api_key: rows[0].api_key });
+    const { rows } = await pool.query('SELECT api_key, api_key_enabled FROM property WHERE id = $1', [req.property_id]);
+    res.json(rows[0]);
   } catch (err) {
     next(err);
   }
@@ -27,4 +27,28 @@ async function rotateApiKey(req, res, next) {
   }
 }
 
-module.exports = { getApiKey, rotateApiKey };
+async function disableApiKey(req, res, next) {
+  try {
+    const { rows } = await pool.query(
+      'UPDATE property SET api_key_enabled = false WHERE id = $1 RETURNING api_key, api_key_enabled',
+      [req.property_id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function enableApiKey(req, res, next) {
+  try {
+    const { rows } = await pool.query(
+      'UPDATE property SET api_key_enabled = true WHERE id = $1 RETURNING api_key, api_key_enabled',
+      [req.property_id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { getApiKey, rotateApiKey, disableApiKey, enableApiKey };
