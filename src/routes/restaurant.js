@@ -13,6 +13,10 @@ router.get('/:restaurant_id/tables', authenticate, ctrl.listTables);
 router.post('/:restaurant_id/tables', authenticate, ctrl.createTable);
 router.put('/:restaurant_id/tables/:id', authenticate, ctrl.updateTable);
 
+// Service Periods
+router.get('/:restaurant_id/service-periods', authenticate, ctrl.listServicePeriods);
+router.put('/:restaurant_id/service-periods', authenticate, ctrl.setServicePeriods);
+
 // Availability
 router.get('/:restaurant_id/availability/search', ctrl.searchAvailability);
 

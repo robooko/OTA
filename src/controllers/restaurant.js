@@ -143,6 +143,79 @@ async function updateTable(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// ── Service Periods ──────────────────────────────────────────────────────────
+
+async function listServicePeriods(req, res, next) {
+  try {
+    const { restaurant_id } = req.params;
+    const restaurantRes = await pool.query(
+      'SELECT id FROM restaurant WHERE id = $1 AND property_id = $2',
+      [restaurant_id, req.property_id]
+    );
+    if (!restaurantRes.rows.length) return res.status(404).json({ error: 'Restaurant not found' });
+
+    const { rows } = await pool.query(
+      'SELECT id, label, start_time, end_time FROM service_period WHERE restaurant_id = $1 ORDER BY start_time',
+      [restaurant_id]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+}
+
+async function setServicePeriods(req, res, next) {
+  const { restaurant_id } = req.params;
+  const { periods } = req.body;
+
+  if (!Array.isArray(periods)) {
+    return res.status(400).json({ error: 'periods must be an array' });
+  }
+  for (const p of periods) {
+    if (!p.start_time || !p.end_time) {
+      return res.status(400).json({ error: 'Each period requires start_time and end_time' });
+    }
+    if (!isValidTime(p.start_time) || !isValidTime(p.end_time)) {
+      return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
+    }
+    if (p.start_time >= p.end_time) {
+      return res.status(400).json({ error: 'Each period\'s start_time must be before its end_time' });
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const restaurantRes = await client.query(
+      'SELECT id FROM restaurant WHERE id = $1 AND property_id = $2',
+      [restaurant_id, req.property_id]
+    );
+    if (!restaurantRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Restaurant not found' });
+    }
+
+    await client.query('DELETE FROM service_period WHERE restaurant_id = $1', [restaurant_id]);
+
+    const inserted = [];
+    for (const p of periods) {
+      const { rows } = await client.query(
+        `INSERT INTO service_period (property_id, restaurant_id, label, start_time, end_time)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id, label, start_time, end_time`,
+        [req.property_id, restaurant_id, p.label ?? null, p.start_time, p.end_time]
+      );
+      inserted.push(rows[0]);
+    }
+
+    await client.query('COMMIT');
+    res.json(inserted);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
 // ── Availability search ─────────────────────────────────────────────────────
 
 async function searchAvailability(req, res, next) {
@@ -411,6 +484,7 @@ async function updateReservation(req, res, next) {
 module.exports = {
   listRestaurants, getRestaurant, createRestaurant, updateRestaurant,
   listTables, createTable, updateTable,
+  listServicePeriods, setServicePeriods,
   searchAvailability,
   listReservations, getReservation, createReservation, updateReservation,
 };
