@@ -1,7 +1,7 @@
 const { z } = require('zod');
-const { apiRequest } = require('./apiClient');
 
-module.exports = [
+function createTools(apiRequest) {
+  return [
   {
     name: 'search_availability',
     description: 'Search available room types for a date range and party size',
@@ -155,4 +155,7 @@ module.exports = [
     },
     run: ({ restaurant_id, ...body }) => apiRequest('POST', `/api/restaurant/${restaurant_id}/reservations`, { body }),
   },
-];
+  ];
+}
+
+module.exports = { createTools };

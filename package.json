@@ -5,8 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js",
-    "mcp": "node mcp-server/index.js"
+    "dev": "nodemon src/server.js"
   },
   "dependencies": {
     "@clerk/backend": "^3.16.1",
