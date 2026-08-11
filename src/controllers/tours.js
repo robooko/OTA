@@ -197,8 +197,23 @@ async function updateBooking(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function updateSlot(req, res, next) {
+  try {
+    const { status } = req.body;
+    if (status === undefined) {
+      return res.status(400).json({ error: 'status is required' });
+    }
+    const { rows } = await pool.query(
+      'UPDATE tour_slot SET status = $1 WHERE id = $2 AND property_id = $3 RETURNING *',
+      [status, req.params.id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Slot not found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   listTours, createTour, updateTour,
-  bulkCreateSlots, searchSlots,
+  bulkCreateSlots, searchSlots, updateSlot,
   listBookings, createBooking, updateBooking,
 };

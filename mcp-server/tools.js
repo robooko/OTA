@@ -200,6 +200,12 @@ function createTools(apiRequest) {
     },
     run: ({ restaurant_id, id, ...body }) => apiRequest('PUT', `/api/restaurant/${restaurant_id}/reservations/${id}`, { body }),
   },
+  {
+    name: 'update_tour_slot',
+    description: 'Update a tour slot\'s status (e.g. set to "inactive" to hide it from search without deleting it)',
+    inputSchema: { id: z.string(), status: z.string() },
+    run: ({ id, status }) => apiRequest('PUT', `/api/tours/slots/${id}`, { body: { status } }),
+  },
   ];
 }
 

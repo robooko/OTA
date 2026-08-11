@@ -10,6 +10,7 @@ router.put('/:id', authenticate, ctrl.updateTour);
 // Slots
 router.post('/slots/bulk', authenticate, ctrl.bulkCreateSlots);
 router.get('/slots/search', authenticate, ctrl.searchSlots);
+router.put('/slots/:id', authenticateOrApiKey, ctrl.updateSlot);
 
 // Bookings
 router.get('/bookings', authenticate, ctrl.listBookings);
