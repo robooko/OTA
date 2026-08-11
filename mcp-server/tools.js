@@ -206,6 +206,43 @@ function createTools(apiRequest) {
     inputSchema: { id: z.string(), status: z.string() },
     run: ({ id, status }) => apiRequest('PUT', `/api/tours/slots/${id}`, { body: { status } }),
   },
+  {
+    name: 'list_restaurant_tables',
+    description: 'List tables for a restaurant',
+    inputSchema: { restaurant_id: z.string() },
+    run: ({ restaurant_id }) => apiRequest('GET', `/api/restaurant/${restaurant_id}/tables`),
+  },
+  {
+    name: 'create_restaurant_table',
+    description: 'Create a table for a restaurant',
+    inputSchema: { restaurant_id: z.string(), table_number: z.string(), seats: z.number().int(), location: z.string().optional() },
+    run: ({ restaurant_id, ...body }) => apiRequest('POST', `/api/restaurant/${restaurant_id}/tables`, { body }),
+  },
+  {
+    name: 'update_restaurant_table',
+    description: 'Update a restaurant table',
+    inputSchema: { restaurant_id: z.string(), id: z.string(), table_number: z.string().optional(), seats: z.number().int().optional(), location: z.string().optional(), status: z.enum(['active', 'inactive']).optional() },
+    run: ({ restaurant_id, id, ...body }) => apiRequest('PUT', `/api/restaurant/${restaurant_id}/tables/${id}`, { body }),
+  },
+  {
+    name: 'get_restaurant_service_periods',
+    description: "List a restaurant's service periods (bookable windows)",
+    inputSchema: { restaurant_id: z.string() },
+    run: ({ restaurant_id }) => apiRequest('GET', `/api/restaurant/${restaurant_id}/service-periods`),
+  },
+  {
+    name: 'set_restaurant_service_periods',
+    description: "Replace all of a restaurant's service periods",
+    inputSchema: {
+      restaurant_id: z.string(),
+      periods: z.array(z.object({
+        label: z.string().optional(),
+        start_time: z.string(),
+        end_time: z.string(),
+      })),
+    },
+    run: ({ restaurant_id, periods }) => apiRequest('PUT', `/api/restaurant/${restaurant_id}/service-periods`, { body: { periods } }),
+  },
   ];
 }
 
