@@ -321,6 +321,7 @@ CREATE INDEX IF NOT EXISTS idx_beach_booking_bed     ON beach_booking(bed_id);
 
 CREATE TABLE IF NOT EXISTS tour (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id    UUID          NOT NULL REFERENCES property(id),
   name           VARCHAR(100)  NOT NULL,
   description    TEXT,
   duration_mins  INT           NOT NULL,
@@ -330,16 +331,18 @@ CREATE TABLE IF NOT EXISTS tour (
 );
 
 CREATE TABLE IF NOT EXISTS tour_slot (
-  id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tour_id   UUID         NOT NULL REFERENCES tour(id),
-  slot_date DATE         NOT NULL,
-  slot_time TIME         NOT NULL,
-  status    VARCHAR(20)  DEFAULT 'active',
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID         NOT NULL REFERENCES property(id),
+  tour_id     UUID         NOT NULL REFERENCES tour(id),
+  slot_date   DATE         NOT NULL,
+  slot_time   TIME         NOT NULL,
+  status      VARCHAR(20)  DEFAULT 'active',
   UNIQUE (tour_id, slot_date, slot_time)
 );
 
 CREATE TABLE IF NOT EXISTS tour_booking (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID          NOT NULL REFERENCES property(id),
   slot_id       UUID          NOT NULL REFERENCES tour_slot(id),
   guest_id      UUID          REFERENCES guest(id),
   contact_name  VARCHAR(100)  NOT NULL,
@@ -354,6 +357,9 @@ CREATE TABLE IF NOT EXISTS tour_booking (
 
 CREATE INDEX IF NOT EXISTS idx_tour_slot_tour_date  ON tour_slot(tour_id, slot_date);
 CREATE INDEX IF NOT EXISTS idx_tour_booking_slot    ON tour_booking(slot_id);
+CREATE INDEX IF NOT EXISTS idx_tour_property         ON tour(property_id);
+CREATE INDEX IF NOT EXISTS idx_tour_slot_property     ON tour_slot(property_id);
+CREATE INDEX IF NOT EXISTS idx_tour_booking_property  ON tour_booking(property_id);
 
 -- ── Golf ──────────────────────────────────────────────────────────────────────
 
