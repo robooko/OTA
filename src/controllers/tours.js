@@ -5,7 +5,10 @@ const { isValidDate } = require('../middleware/validate');
 
 async function listTours(req, res, next) {
   try {
-    const { rows } = await pool.query("SELECT * FROM tour WHERE status = 'active' ORDER BY name");
+    const { rows } = await pool.query(
+      "SELECT * FROM tour WHERE status = 'active' AND property_id = $1 ORDER BY name",
+      [req.property_id]
+    );
     res.json(rows);
   } catch (err) { next(err); }
 }
@@ -17,9 +20,9 @@ async function createTour(req, res, next) {
       return res.status(400).json({ error: 'name, duration_mins, max_group_size, and price are required' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO tour (name, description, duration_mins, max_group_size, price)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [name, description ?? null, duration_mins, max_group_size, price]
+      `INSERT INTO tour (property_id, name, description, duration_mins, max_group_size, price)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [req.property_id, name, description ?? null, duration_mins, max_group_size, price]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -36,8 +39,8 @@ async function updateTour(req, res, next) {
          max_group_size = COALESCE($4, max_group_size),
          price          = COALESCE($5, price),
          status         = COALESCE($6, status)
-       WHERE id = $7 RETURNING *`,
-      [name, description, duration_mins, max_group_size, price, status, req.params.id]
+       WHERE id = $7 AND property_id = $8 RETURNING *`,
+      [name, description, duration_mins, max_group_size, price, status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Tour not found' });
     res.json(rows[0]);
@@ -54,6 +57,9 @@ async function bulkCreateSlots(req, res, next) {
     }
     if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'Invalid date format' });
 
+    const tourRes = await pool.query('SELECT id FROM tour WHERE id = $1 AND property_id = $2', [tour_id, req.property_id]);
+    if (!tourRes.rows.length) return res.status(404).json({ error: 'Tour not found' });
+
     const created = [];
     const d = new Date(from);
     const end = new Date(to);
@@ -61,11 +67,11 @@ async function bulkCreateSlots(req, res, next) {
       const date = d.toISOString().slice(0, 10);
       for (const time of times) {
         const { rows } = await pool.query(
-          `INSERT INTO tour_slot (tour_id, slot_date, slot_time)
-           VALUES ($1, $2, $3)
+          `INSERT INTO tour_slot (property_id, tour_id, slot_date, slot_time)
+           VALUES ($1, $2, $3, $4)
            ON CONFLICT (tour_id, slot_date, slot_time) DO NOTHING
            RETURNING *`,
-          [tour_id, date, time]
+          [req.property_id, tour_id, date, time]
         );
         if (rows.length) created.push(rows[0]);
       }
@@ -92,8 +98,9 @@ async function searchSlots(req, res, next) {
       WHERE ts.slot_date = $1
         AND ts.status = 'active'
         AND t.status = 'active'
+        AND ts.property_id = $2
     `;
-    const params = [date];
+    const params = [date, req.property_id];
     if (tour_id) { params.push(tour_id); query += ` AND ts.tour_id = $${params.length}`; }
     query += ` GROUP BY ts.id, t.id`;
     if (group_size) { query += ` HAVING t.max_group_size - COALESCE(SUM(tb.group_size) FILTER (WHERE tb.status != 'cancelled'), 0) >= ${parseInt(group_size, 10)}`; }
@@ -113,9 +120,9 @@ async function listBookings(req, res, next) {
       FROM tour_booking tb
       JOIN tour_slot ts ON ts.id = tb.slot_id
       JOIN tour t ON t.id = ts.tour_id
-      WHERE 1=1
+      WHERE tb.property_id = $1
     `;
-    const params = [];
+    const params = [req.property_id];
     if (date) { params.push(date); query += ` AND ts.slot_date = $${params.length}`; }
     if (status) { params.push(status); query += ` AND tb.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND tb.guest_id = $${params.length}`; }
@@ -138,9 +145,14 @@ async function createBooking(req, res, next) {
     const slotRes = await client.query(
       `SELECT ts.*, t.max_group_size, t.price
        FROM tour_slot ts JOIN tour t ON t.id = ts.tour_id
-       WHERE ts.id = $1`, [slot_id]
+       WHERE ts.id = $1 AND ts.property_id = $2`, [slot_id, req.property_id]
     );
     if (!slotRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Slot not found' }); }
+
+    if (guest_id) {
+      const guestRes = await client.query('SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, req.property_id]);
+      if (!guestRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Guest not found' }); }
+    }
 
     const slot = slotRes.rows[0];
     const bookedRes = await client.query(
@@ -155,9 +167,9 @@ async function createBooking(req, res, next) {
 
     const total_price = parseFloat(slot.price) * group_size;
     const { rows } = await client.query(
-      `INSERT INTO tour_booking (slot_id, guest_id, contact_name, contact_email, contact_phone, group_size, total_price, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [slot_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, group_size, total_price.toFixed(2), notes ?? null]
+      `INSERT INTO tour_booking (property_id, slot_id, guest_id, contact_name, contact_email, contact_phone, group_size, total_price, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.property_id, slot_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, group_size, total_price.toFixed(2), notes ?? null]
     );
 
     await client.query('COMMIT');
@@ -177,8 +189,8 @@ async function updateBooking(req, res, next) {
       `UPDATE tour_booking SET
          status = COALESCE($1, status),
          notes  = COALESCE($2, notes)
-       WHERE id = $3 RETURNING *`,
-      [status, notes, req.params.id]
+       WHERE id = $3 AND property_id = $4 RETURNING *`,
+      [status, notes, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
     res.json(rows[0]);
