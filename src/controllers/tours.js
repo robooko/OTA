@@ -16,7 +16,7 @@ async function listTours(req, res, next) {
 async function createTour(req, res, next) {
   try {
     const { name, description, duration_mins, max_group_size, price } = req.body;
-    if (!name || !duration_mins || !max_group_size || !price) {
+    if (!name || duration_mins == null || max_group_size == null || price == null) {
       return res.status(400).json({ error: 'name, duration_mins, max_group_size, and price are required' });
     }
     const { rows } = await pool.query(
