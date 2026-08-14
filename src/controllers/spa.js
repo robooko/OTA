@@ -242,6 +242,28 @@ async function searchSlots(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function updateSlot(req, res, next) {
+  try {
+    const { spa_id, id } = req.params;
+    const { status } = req.body;
+    if (status === undefined) {
+      return res.status(400).json({ error: 'status is required' });
+    }
+    const { rows } = await pool.query(
+      `UPDATE spa_slot ss SET status = $1
+       FROM spa_therapist st
+       WHERE ss.therapist_id = st.id
+         AND ss.id = $2
+         AND st.spa_id = $3
+         AND ss.property_id = $4
+       RETURNING ss.*`,
+      [status, id, spa_id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Slot not found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
 // ── Appointments ──────────────────────────────────────────────────────────────
 
 async function listAppointments(req, res, next) {
@@ -356,6 +378,6 @@ module.exports = {
   listSpas, getSpa, createSpa, updateSpa,
   listTreatments, createTreatment, updateTreatment,
   listTherapists, createTherapist, updateTherapist,
-  listSlots, bulkCreateSlots, searchSlots,
+  listSlots, bulkCreateSlots, searchSlots, updateSlot,
   listAppointments, getAppointment, createAppointment, updateAppointment,
 };

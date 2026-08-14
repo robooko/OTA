@@ -22,6 +22,7 @@ router.put('/:spa_id/therapists/:id', authenticate, ctrl.updateTherapist);
 router.get('/:spa_id/slots', authenticate, ctrl.listSlots);
 router.post('/:spa_id/slots/bulk', authenticate, ctrl.bulkCreateSlots);
 router.get('/:spa_id/slots/search', authenticate, ctrl.searchSlots);
+router.put('/:spa_id/slots/:id', authenticate, ctrl.updateSlot);
 
 // Appointments
 router.get('/:spa_id/appointments', authenticate, ctrl.listAppointments);
