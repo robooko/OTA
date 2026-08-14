@@ -62,7 +62,9 @@ async function createTreatment(req, res, next) {
   try {
     const { spa_id } = req.params;
     const { name, description, duration_mins, price } = req.body;
-    if (!name || !duration_mins || !price) return res.status(400).json({ error: 'name, duration_mins, and price are required' });
+    if (!name || duration_mins == null || price == null) {
+      return res.status(400).json({ error: 'name, duration_mins, and price are required' });
+    }
 
     const spaRes = await pool.query('SELECT id FROM spa WHERE id = $1 AND property_id = $2', [spa_id, req.property_id]);
     if (!spaRes.rows.length) return res.status(404).json({ error: 'Spa not found' });
