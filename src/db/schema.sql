@@ -446,9 +446,9 @@ CREATE TABLE IF NOT EXISTS equipment_hire (
 CREATE INDEX IF NOT EXISTS idx_equipment_hire_date ON equipment_hire(hire_date);
 CREATE INDEX IF NOT EXISTS idx_equipment_hire_eq   ON equipment_hire(equipment_id);
 
--- ── Room Service ──────────────────────────────────────────────────────────────
+-- ── Restaurant Orders ─────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS room_service_item (
+CREATE TABLE IF NOT EXISTS restaurant_menu_item (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id   UUID          NOT NULL REFERENCES property(id),
   restaurant_id UUID          REFERENCES restaurant(id),
@@ -459,29 +459,31 @@ CREATE TABLE IF NOT EXISTS room_service_item (
   status        VARCHAR(20)   DEFAULT 'active'
 );
 
-CREATE TABLE IF NOT EXISTS room_service_order (
+CREATE TABLE IF NOT EXISTS restaurant_order (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id UUID         NOT NULL REFERENCES property(id),
-  booking_id  UUID         NOT NULL REFERENCES booking(id),
+  booking_id  UUID         REFERENCES booking(id),
+  table_id    UUID         REFERENCES restaurant_table(id),
   guest_id    UUID         REFERENCES guest(id),
   status         VARCHAR(20)  DEFAULT 'pending',
   notes          TEXT,
   scheduled_for  TIMESTAMPTZ,
   total_price    NUMERIC(10,2) NOT NULL DEFAULT 0,
-  created_at     TIMESTAMPTZ  DEFAULT now()
+  created_at     TIMESTAMPTZ  DEFAULT now(),
+  CONSTRAINT restaurant_order_booking_or_table CHECK (booking_id IS NOT NULL OR table_id IS NOT NULL)
 );
 
-CREATE TABLE IF NOT EXISTS room_service_order_item (
+CREATE TABLE IF NOT EXISTS restaurant_order_item (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  order_id    UUID          NOT NULL REFERENCES room_service_order(id) ON DELETE CASCADE,
-  item_id     UUID          REFERENCES room_service_item(id),
+  order_id    UUID          NOT NULL REFERENCES restaurant_order(id) ON DELETE CASCADE,
+  item_id     UUID          REFERENCES restaurant_menu_item(id),
   item_name   VARCHAR(100)  NOT NULL,
   quantity    INT           NOT NULL DEFAULT 1,
   unit_price  NUMERIC(10,2) NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_rs_order_booking ON room_service_order(booking_id);
-CREATE INDEX IF NOT EXISTS idx_rs_order_guest   ON room_service_order(guest_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_order_booking ON restaurant_order(booking_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_order_guest   ON restaurant_order(guest_id);
 
 -- ── Pro Shop ──────────────────────────────────────────────────────────────────
 

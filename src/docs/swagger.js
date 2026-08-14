@@ -108,7 +108,7 @@ const swaggerSpec = {
           status: { type: 'string', enum: ['active', 'inactive'] },
         },
       },
-      RoomServiceItem: {
+      RestaurantMenuItem: {
         type: 'object',
         properties: {
           id: { type: 'string', format: 'uuid' },
@@ -120,7 +120,7 @@ const swaggerSpec = {
           status: { type: 'string', enum: ['active', 'inactive'] },
         },
       },
-      RoomServiceOrderItem: {
+      RestaurantOrderItem: {
         type: 'object',
         properties: {
           id: { type: 'string', format: 'uuid' },
@@ -131,18 +131,19 @@ const swaggerSpec = {
           total: { type: 'number' },
         },
       },
-      RoomServiceOrder: {
+      RestaurantOrder: {
         type: 'object',
         properties: {
           id: { type: 'string', format: 'uuid' },
-          booking_id: { type: 'string', format: 'uuid' },
+          booking_id: { type: 'string', format: 'uuid', nullable: true, description: 'Set when the order is delivered to a hotel room' },
+          table_id: { type: 'string', format: 'uuid', nullable: true, description: 'Set when the order is served at a restaurant table' },
           guest_id: { type: 'string', format: 'uuid' },
           status: { type: 'string', enum: ['pending', 'confirmed', 'preparing', 'delivered', 'cancelled'] },
           notes: { type: 'string' },
           total_price: { type: 'number' },
           scheduled_for: { type: 'string', format: 'date-time', description: 'Optional delivery time e.g. 07:30 next morning' },
           created_at: { type: 'string', format: 'date-time' },
-          items: { type: 'array', items: { $ref: '#/components/schemas/RoomServiceOrderItem' } },
+          items: { type: 'array', items: { $ref: '#/components/schemas/RestaurantOrderItem' } },
         },
       },
       BookingExtra: {
@@ -424,23 +425,23 @@ const swaggerSpec = {
       delete: { tags: ['Extras'], summary: 'Remove extra from booking (admin/staff)', parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 204: { description: 'Removed' }, 404: { description: 'Not found' } } },
     },
 
-    // ── Room Service ──────────────────────────────────────────────────────────
-    '/api/room-service/menu': {
-      get: { tags: ['Room Service'], summary: 'List menu items', parameters: [{ name: 'category', in: 'query', schema: { type: 'string' } }, { name: 'restaurant_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of menu items' } } },
-      post: { tags: ['Room Service'], summary: 'Create menu item', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'price'], properties: { name: { type: 'string' }, description: { type: 'string' }, category: { type: 'string' }, price: { type: 'number' }, restaurant_id: { type: 'string', format: 'uuid', description: 'Optional — which restaurant this item belongs to' } } } } } }, responses: { 201: { description: 'Created' } } },
+    // ── Restaurant Orders ─────────────────────────────────────────────────────
+    '/api/restaurant-orders/menu': {
+      get: { tags: ['Restaurant Orders'], summary: 'List menu items', parameters: [{ name: 'category', in: 'query', schema: { type: 'string' } }, { name: 'restaurant_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of menu items' } } },
+      post: { tags: ['Restaurant Orders'], summary: 'Create menu item', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'price'], properties: { name: { type: 'string' }, description: { type: 'string' }, category: { type: 'string' }, price: { type: 'number' }, restaurant_id: { type: 'string', format: 'uuid', description: 'Optional — which restaurant this item belongs to' } } } } } }, responses: { 201: { description: 'Created' } } },
     },
-    '/api/room-service/menu/{id}': {
-      put: { tags: ['Room Service'], summary: 'Update menu item', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, category: { type: 'string' }, price: { type: 'number' }, status: { type: 'string', enum: ['active', 'inactive'] }, restaurant_id: { type: 'string', format: 'uuid' } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Not found' } } },
+    '/api/restaurant-orders/menu/{id}': {
+      put: { tags: ['Restaurant Orders'], summary: 'Update menu item', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, category: { type: 'string' }, price: { type: 'number' }, status: { type: 'string', enum: ['active', 'inactive'] }, restaurant_id: { type: 'string', format: 'uuid' } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Not found' } } },
     },
-    '/api/room-service/orders': {
-      get: { tags: ['Room Service'], summary: 'List orders', parameters: [{ name: 'booking_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'status', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Array of orders with line items' } } },
-      post: { tags: ['Room Service'], summary: 'Place an order', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['booking_id', 'items'], properties: { booking_id: { type: 'string', format: 'uuid' }, guest_id: { type: 'string', format: 'uuid' }, notes: { type: 'string' }, scheduled_for: { type: 'string', format: 'date-time', description: 'Optional scheduled delivery time' }, items: { type: 'array', items: { type: 'object', required: ['item_id'], properties: { item_id: { type: 'string', format: 'uuid' }, quantity: { type: 'integer', default: 1 } } } } } } } } }, responses: { 201: { description: 'Order created with locked prices' }, 404: { description: 'Booking or item not found' } } },
+    '/api/restaurant-orders': {
+      get: { tags: ['Restaurant Orders'], summary: 'List orders', parameters: [{ name: 'booking_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'table_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'status', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Array of orders with line items' } } },
+      post: { tags: ['Restaurant Orders'], summary: 'Place an order', description: 'Requires either booking_id (delivered to a hotel room) or table_id (served at a restaurant table).', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['items'], properties: { booking_id: { type: 'string', format: 'uuid', description: 'Required if table_id is not given' }, table_id: { type: 'string', format: 'uuid', description: 'Required if booking_id is not given' }, guest_id: { type: 'string', format: 'uuid' }, notes: { type: 'string' }, scheduled_for: { type: 'string', format: 'date-time', description: 'Optional scheduled delivery time' }, items: { type: 'array', items: { type: 'object', required: ['item_id'], properties: { item_id: { type: 'string', format: 'uuid' }, quantity: { type: 'integer', default: 1 } } } } } } } } }, responses: { 201: { description: 'Order created with locked prices' }, 404: { description: 'Booking, table, or item not found' } } },
     },
-    '/api/room-service/orders/{id}': {
-      get: { tags: ['Room Service'], summary: 'Get order by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Order with line items' }, 404: { description: 'Not found' } } },
+    '/api/restaurant-orders/{id}': {
+      get: { tags: ['Restaurant Orders'], summary: 'Get order by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Order with line items' }, 404: { description: 'Not found' } } },
     },
-    '/api/room-service/orders/{id}/status': {
-      put: { tags: ['Room Service'], summary: 'Update order status', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['pending', 'confirmed', 'preparing', 'delivered', 'cancelled'] } } } } } }, responses: { 200: { description: 'Updated order' }, 404: { description: 'Not found' } } },
+    '/api/restaurant-orders/{id}/status': {
+      put: { tags: ['Restaurant Orders'], summary: 'Update order status', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['pending', 'confirmed', 'preparing', 'delivered', 'cancelled'] } } } } } }, responses: { 200: { description: 'Updated order' }, 404: { description: 'Not found' } } },
     },
     // ── Pro Shop ──────────────────────────────────────────────────────────────
     '/api/proshop/items': {
