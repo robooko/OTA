@@ -3,7 +3,7 @@ const pool = require('../db');
 async function listRoomTypes(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT * FROM room_type WHERE property_id = $1 ORDER BY name',
+      "SELECT * FROM room_type WHERE status = 'active' AND property_id = $1 ORDER BY name",
       [req.property_id]
     );
     res.json(rows);
@@ -44,15 +44,16 @@ async function createRoomType(req, res, next) {
 
 async function updateRoomType(req, res, next) {
   try {
-    const { name, description, max_occupancy, base_rate } = req.body;
+    const { name, description, max_occupancy, base_rate, status } = req.body;
     const { rows } = await pool.query(
       `UPDATE room_type SET
          name          = COALESCE($1, name),
          description   = COALESCE($2, description),
          max_occupancy = COALESCE($3, max_occupancy),
-         base_rate     = COALESCE($4, base_rate)
-       WHERE id = $5 AND property_id = $6 RETURNING *`,
-      [name, description, max_occupancy, base_rate, req.params.id, req.property_id]
+         base_rate     = COALESCE($4, base_rate),
+         status        = COALESCE($5, status)
+       WHERE id = $6 AND property_id = $7 RETURNING *`,
+      [name, description, max_occupancy, base_rate, status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Room type not found' });
     res.json(rows[0]);

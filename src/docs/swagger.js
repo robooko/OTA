@@ -70,6 +70,7 @@ const swaggerSpec = {
           description: { type: 'string' },
           max_occupancy: { type: 'integer' },
           base_rate: { type: 'number' },
+          status: { type: 'string', enum: ['active', 'inactive'] },
         },
       },
       Room: {
@@ -225,7 +226,7 @@ const swaggerSpec = {
     },
     '/api/room-types/{id}': {
       get: { tags: ['Room Types'], summary: 'Get room type by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Room type' } } },
-      put: { tags: ['Room Types'], summary: 'Update room type', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, max_occupancy: { type: 'integer' }, base_rate: { type: 'number' } } } } } }, responses: { 200: { description: 'Updated' } } },
+      put: { tags: ['Room Types'], summary: 'Update room type', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, max_occupancy: { type: 'integer' }, base_rate: { type: 'number' }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated' } } },
     },
 
     // ── Rooms ────────────────────────────────────────────────────────────────

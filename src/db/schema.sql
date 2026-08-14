@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS room_type (
   name           VARCHAR(100)    NOT NULL,
   description    TEXT,
   max_occupancy  INT             NOT NULL,
-  base_rate      NUMERIC(10,2)   NOT NULL
+  base_rate      NUMERIC(10,2)   NOT NULL,
+  status         VARCHAR(20)     DEFAULT 'active'
 );
 
 CREATE INDEX IF NOT EXISTS idx_room_type_property ON room_type(property_id);
