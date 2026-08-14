@@ -315,7 +315,7 @@ const swaggerSpec = {
     },
     '/api/spa/{id}': {
       get: { tags: ['Spa'], summary: 'Get spa by ID', security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Spa' } } },
-      put: { tags: ['Spa'], summary: 'Update spa', security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, phone: { type: 'string' } } } } } }, responses: { 200: { description: 'Updated' } } },
+      put: { tags: ['Spa'], summary: 'Update spa. Set status to "inactive" to delete it — there is no hard-delete endpoint.', security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, phone: { type: 'string' }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated' } } },
     },
     '/api/spa/{spa_id}/treatments': {
       get: { tags: ['Spa'], summary: 'List treatments', security: [{ bearerAuth: [] }], parameters: [{ name: 'spa_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of treatments' } } },

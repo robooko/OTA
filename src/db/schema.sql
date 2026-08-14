@@ -243,6 +243,7 @@ CREATE TABLE IF NOT EXISTS spa (
   name        VARCHAR(100) NOT NULL,
   description TEXT,
   phone       VARCHAR(30),
+  status      VARCHAR(20)  DEFAULT 'active',
   created_at  TIMESTAMPTZ DEFAULT now()
 );
 

@@ -5,7 +5,10 @@ const { isValidDate } = require('../middleware/validate');
 
 async function listSpas(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT * FROM spa WHERE property_id = $1 ORDER BY name', [req.property_id]);
+    const { rows } = await pool.query(
+      "SELECT * FROM spa WHERE status = 'active' AND property_id = $1 ORDER BY name",
+      [req.property_id]
+    );
     res.json(rows);
   } catch (err) { next(err); }
 }
@@ -32,14 +35,15 @@ async function createSpa(req, res, next) {
 
 async function updateSpa(req, res, next) {
   try {
-    const { name, description, phone } = req.body;
+    const { name, description, phone, status } = req.body;
     const { rows } = await pool.query(
       `UPDATE spa SET
          name        = COALESCE($1, name),
          description = COALESCE($2, description),
-         phone       = COALESCE($3, phone)
-       WHERE id = $4 AND property_id = $5 RETURNING *`,
-      [name, description, phone, req.params.id, req.property_id]
+         phone       = COALESCE($3, phone),
+         status      = COALESCE($4, status)
+       WHERE id = $5 AND property_id = $6 RETURNING *`,
+      [name, description, phone, status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Spa not found' });
     res.json(rows[0]);
