@@ -112,13 +112,14 @@ function createTools(apiRequest) {
   },
   {
     name: 'update_room_type',
-    description: 'Update a room type',
+    description: 'Update a room type. Set status to "inactive" to delete it — there is no hard-delete endpoint.',
     inputSchema: {
       id: z.string(),
       name: z.string().optional(),
       description: z.string().optional(),
       max_occupancy: z.number().int().optional(),
       base_rate: z.number().optional(),
+      status: z.enum(['active', 'inactive']).optional(),
     },
     run: ({ id, ...body }) => apiRequest('PUT', `/api/room-types/${id}`, { body }),
   },
