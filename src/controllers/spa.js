@@ -5,14 +5,14 @@ const { isValidDate } = require('../middleware/validate');
 
 async function listSpas(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT * FROM spa ORDER BY name');
+    const { rows } = await pool.query('SELECT * FROM spa WHERE property_id = $1 ORDER BY name', [req.property_id]);
     res.json(rows);
   } catch (err) { next(err); }
 }
 
 async function getSpa(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT * FROM spa WHERE id = $1', [req.params.id]);
+    const { rows } = await pool.query('SELECT * FROM spa WHERE id = $1 AND property_id = $2', [req.params.id, req.property_id]);
     if (!rows.length) return res.status(404).json({ error: 'Spa not found' });
     res.json(rows[0]);
   } catch (err) { next(err); }
@@ -23,8 +23,8 @@ async function createSpa(req, res, next) {
     const { name, description, phone } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
     const { rows } = await pool.query(
-      `INSERT INTO spa (name, description, phone) VALUES ($1, $2, $3) RETURNING *`,
-      [name, description ?? null, phone ?? null]
+      `INSERT INTO spa (property_id, name, description, phone) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [req.property_id, name, description ?? null, phone ?? null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -38,8 +38,8 @@ async function updateSpa(req, res, next) {
          name        = COALESCE($1, name),
          description = COALESCE($2, description),
          phone       = COALESCE($3, phone)
-       WHERE id = $4 RETURNING *`,
-      [name, description, phone, req.params.id]
+       WHERE id = $4 AND property_id = $5 RETURNING *`,
+      [name, description, phone, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Spa not found' });
     res.json(rows[0]);
@@ -51,8 +51,8 @@ async function updateSpa(req, res, next) {
 async function listTreatments(req, res, next) {
   try {
     const { rows } = await pool.query(
-      "SELECT * FROM spa_treatment WHERE spa_id = $1 AND status = 'active' ORDER BY name",
-      [req.params.spa_id]
+      "SELECT * FROM spa_treatment WHERE spa_id = $1 AND property_id = $2 AND status = 'active' ORDER BY name",
+      [req.params.spa_id, req.property_id]
     );
     res.json(rows);
   } catch (err) { next(err); }
@@ -63,9 +63,13 @@ async function createTreatment(req, res, next) {
     const { spa_id } = req.params;
     const { name, description, duration_mins, price } = req.body;
     if (!name || !duration_mins || !price) return res.status(400).json({ error: 'name, duration_mins, and price are required' });
+
+    const spaRes = await pool.query('SELECT id FROM spa WHERE id = $1 AND property_id = $2', [spa_id, req.property_id]);
+    if (!spaRes.rows.length) return res.status(404).json({ error: 'Spa not found' });
+
     const { rows } = await pool.query(
-      `INSERT INTO spa_treatment (spa_id, name, description, duration_mins, price) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [spa_id, name, description ?? null, duration_mins, price]
+      `INSERT INTO spa_treatment (property_id, spa_id, name, description, duration_mins, price) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [req.property_id, spa_id, name, description ?? null, duration_mins, price]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -82,8 +86,8 @@ async function updateTreatment(req, res, next) {
          duration_mins = COALESCE($3, duration_mins),
          price         = COALESCE($4, price),
          status        = COALESCE($5, status)
-       WHERE id = $6 AND spa_id = $7 RETURNING *`,
-      [name, description, duration_mins, price, status, id, spa_id]
+       WHERE id = $6 AND spa_id = $7 AND property_id = $8 RETURNING *`,
+      [name, description, duration_mins, price, status, id, spa_id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Treatment not found' });
     res.json(rows[0]);
@@ -95,8 +99,8 @@ async function updateTreatment(req, res, next) {
 async function listTherapists(req, res, next) {
   try {
     const { rows } = await pool.query(
-      "SELECT * FROM spa_therapist WHERE spa_id = $1 AND status = 'active' ORDER BY name",
-      [req.params.spa_id]
+      "SELECT * FROM spa_therapist WHERE spa_id = $1 AND property_id = $2 AND status = 'active' ORDER BY name",
+      [req.params.spa_id, req.property_id]
     );
     res.json(rows);
   } catch (err) { next(err); }
@@ -107,8 +111,12 @@ async function createTherapist(req, res, next) {
     const { spa_id } = req.params;
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
+
+    const spaRes = await pool.query('SELECT id FROM spa WHERE id = $1 AND property_id = $2', [spa_id, req.property_id]);
+    if (!spaRes.rows.length) return res.status(404).json({ error: 'Spa not found' });
+
     const { rows } = await pool.query(
-      `INSERT INTO spa_therapist (spa_id, name) VALUES ($1, $2) RETURNING *`, [spa_id, name]
+      `INSERT INTO spa_therapist (property_id, spa_id, name) VALUES ($1, $2, $3) RETURNING *`, [req.property_id, spa_id, name]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -122,8 +130,8 @@ async function updateTherapist(req, res, next) {
       `UPDATE spa_therapist SET
          name   = COALESCE($1, name),
          status = COALESCE($2, status)
-       WHERE id = $3 AND spa_id = $4 RETURNING *`,
-      [name, status, id, spa_id]
+       WHERE id = $3 AND spa_id = $4 AND property_id = $5 RETURNING *`,
+      [name, status, id, spa_id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Therapist not found' });
     res.json(rows[0]);
@@ -142,9 +150,9 @@ async function listSlots(req, res, next) {
       FROM spa_slot ss
       JOIN spa_therapist st ON st.id = ss.therapist_id
       JOIN spa_treatment tr ON tr.id = ss.treatment_id
-      WHERE st.spa_id = $1
+      WHERE st.spa_id = $1 AND ss.property_id = $2
     `;
-    const params = [spa_id];
+    const params = [spa_id, req.property_id];
     if (date) { params.push(date); query += ` AND ss.slot_date = $${params.length}`; }
     if (from) { params.push(from); query += ` AND ss.slot_date >= $${params.length}`; }
     if (to) { params.push(to); query += ` AND ss.slot_date <= $${params.length}`; }
@@ -165,6 +173,9 @@ async function bulkCreateSlots(req, res, next) {
     }
     if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'Invalid date format' });
 
+    const spaRes = await pool.query('SELECT id FROM spa WHERE id = $1 AND property_id = $2', [spa_id, req.property_id]);
+    if (!spaRes.rows.length) return res.status(404).json({ error: 'Spa not found' });
+
     const therapistRes = await pool.query('SELECT spa_id FROM spa_therapist WHERE id = $1', [therapist_id]);
     if (!therapistRes.rows.length || therapistRes.rows[0].spa_id !== spa_id) {
       return res.status(400).json({ error: 'therapist_id does not belong to this spa' });
@@ -181,11 +192,11 @@ async function bulkCreateSlots(req, res, next) {
       const date = d.toISOString().slice(0, 10);
       for (const time of times) {
         const { rows } = await pool.query(
-          `INSERT INTO spa_slot (therapist_id, treatment_id, slot_date, slot_time)
-           VALUES ($1, $2, $3, $4)
+          `INSERT INTO spa_slot (property_id, therapist_id, treatment_id, slot_date, slot_time)
+           VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (therapist_id, slot_date, slot_time) DO NOTHING
            RETURNING *`,
-          [therapist_id, treatment_id, date, time]
+          [req.property_id, therapist_id, treatment_id, date, time]
         );
         if (rows.length) created.push(rows[0]);
       }
@@ -209,14 +220,15 @@ async function searchSlots(req, res, next) {
       JOIN spa_therapist st ON st.id = ss.therapist_id
       JOIN spa_treatment tr ON tr.id = ss.treatment_id
       WHERE st.spa_id = $1
-        AND ss.slot_date = $2
+        AND ss.property_id = $2
+        AND ss.slot_date = $3
         AND ss.status = 'available'
         AND NOT EXISTS (
           SELECT 1 FROM spa_appointment sa
           WHERE sa.slot_id = ss.id AND sa.status != 'cancelled'
         )
     `;
-    const params = [spa_id, date];
+    const params = [spa_id, req.property_id, date];
     if (treatment_id) { params.push(treatment_id); query += ` AND ss.treatment_id = $${params.length}`; }
     query += ' ORDER BY ss.slot_time, st.name';
     const { rows } = await pool.query(query, params);
@@ -237,9 +249,9 @@ async function listAppointments(req, res, next) {
       JOIN spa_slot ss ON ss.id = sa.slot_id
       JOIN spa_therapist st ON st.id = ss.therapist_id
       JOIN spa_treatment tr ON tr.id = ss.treatment_id
-      WHERE st.spa_id = $1
+      WHERE st.spa_id = $1 AND sa.property_id = $2
     `;
-    const params = [spa_id];
+    const params = [spa_id, req.property_id];
     if (date) { params.push(date); query += ` AND ss.slot_date = $${params.length}`; }
     if (status) { params.push(status); query += ` AND sa.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND sa.guest_id = $${params.length}`; }
@@ -260,8 +272,8 @@ async function getAppointment(req, res, next) {
        JOIN spa_slot ss ON ss.id = sa.slot_id
        JOIN spa_therapist st ON st.id = ss.therapist_id
        JOIN spa_treatment tr ON tr.id = ss.treatment_id
-       WHERE sa.id = $1 AND st.spa_id = $2`,
-      [id, spa_id]
+       WHERE sa.id = $1 AND st.spa_id = $2 AND sa.property_id = $3`,
+      [id, spa_id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Appointment not found' });
     res.json(rows[0]);
@@ -280,11 +292,16 @@ async function createAppointment(req, res, next) {
     const slotRes = await client.query(
       `SELECT ss.* FROM spa_slot ss
        JOIN spa_therapist st ON st.id = ss.therapist_id
-       WHERE ss.id = $1 AND st.spa_id = $2`,
-      [slot_id, spa_id]
+       WHERE ss.id = $1 AND st.spa_id = $2 AND ss.property_id = $3`,
+      [slot_id, spa_id, req.property_id]
     );
     if (!slotRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Slot not found' }); }
     if (slotRes.rows[0].status !== 'available') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Slot is not available' }); }
+
+    if (guest_id) {
+      const guestRes = await client.query('SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, req.property_id]);
+      if (!guestRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Guest not found' }); }
+    }
 
     const conflictRes = await client.query(
       `SELECT id FROM spa_appointment WHERE slot_id = $1 AND status != 'cancelled'`, [slot_id]
@@ -292,9 +309,9 @@ async function createAppointment(req, res, next) {
     if (conflictRes.rows.length) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Slot already booked' }); }
 
     const { rows } = await client.query(
-      `INSERT INTO spa_appointment (slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [slot_id, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null]
+      `INSERT INTO spa_appointment (property_id, slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.property_id, slot_id, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null]
     );
 
     await client.query('COMMIT');
@@ -320,8 +337,9 @@ async function updateAppointment(req, res, next) {
        WHERE sa.slot_id = ss.id
          AND sa.id = $3
          AND st.spa_id = $4
+         AND sa.property_id = $5
        RETURNING sa.*`,
-      [status, notes, id, spa_id]
+      [status, notes, id, spa_id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Appointment not found' });
     res.json(rows[0]);
