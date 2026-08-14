@@ -4,10 +4,11 @@ const pool = require('../db');
 
 async function listItems(req, res, next) {
   try {
-    const { category } = req.query;
-    let query = `SELECT * FROM room_service_item WHERE status = 'active'`;
-    const params = [];
+    const { category, restaurant_id } = req.query;
+    let query = `SELECT * FROM room_service_item WHERE status = 'active' AND property_id = $1`;
+    const params = [req.property_id];
     if (category) { params.push(category); query += ` AND category = $${params.length}`; }
+    if (restaurant_id) { params.push(restaurant_id); query += ` AND restaurant_id = $${params.length}`; }
     query += ' ORDER BY category, name';
     const { rows } = await pool.query(query, params);
     res.json(rows);
@@ -16,12 +17,21 @@ async function listItems(req, res, next) {
 
 async function createItem(req, res, next) {
   try {
-    const { name, description, category, price } = req.body;
-    if (!name || !price) return res.status(400).json({ error: 'name and price are required' });
+    const { name, description, category, price, restaurant_id } = req.body;
+    if (!name || price == null) return res.status(400).json({ error: 'name and price are required' });
+
+    if (restaurant_id) {
+      const restaurantRes = await pool.query('SELECT id FROM restaurant WHERE id = $1 AND property_id = $2', [
+        restaurant_id,
+        req.property_id,
+      ]);
+      if (!restaurantRes.rows.length) return res.status(404).json({ error: 'Restaurant not found' });
+    }
+
     const { rows } = await pool.query(
-      `INSERT INTO room_service_item (name, description, category, price)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [name, description || null, category || null, price]
+      `INSERT INTO room_service_item (property_id, restaurant_id, name, description, category, price)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [req.property_id, restaurant_id || null, name, description || null, category || null, price]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -29,16 +39,26 @@ async function createItem(req, res, next) {
 
 async function updateItem(req, res, next) {
   try {
-    const { name, description, category, price, status } = req.body;
+    const { name, description, category, price, status, restaurant_id } = req.body;
+
+    if (restaurant_id) {
+      const restaurantRes = await pool.query('SELECT id FROM restaurant WHERE id = $1 AND property_id = $2', [
+        restaurant_id,
+        req.property_id,
+      ]);
+      if (!restaurantRes.rows.length) return res.status(404).json({ error: 'Restaurant not found' });
+    }
+
     const { rows } = await pool.query(
       `UPDATE room_service_item SET
-         name        = COALESCE($1, name),
-         description = COALESCE($2, description),
-         category    = COALESCE($3, category),
-         price       = COALESCE($4, price),
-         status      = COALESCE($5, status)
-       WHERE id = $6 RETURNING *`,
-      [name, description, category, price, status, req.params.id]
+         name          = COALESCE($1, name),
+         description   = COALESCE($2, description),
+         category      = COALESCE($3, category),
+         price         = COALESCE($4, price),
+         status        = COALESCE($5, status),
+         restaurant_id = COALESCE($6, restaurant_id)
+       WHERE id = $7 AND property_id = $8 RETURNING *`,
+      [name, description, category, price, status, restaurant_id, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Item not found' });
     res.json(rows[0]);
@@ -62,20 +82,21 @@ async function listOrders(req, res, next) {
              )) AS items
       FROM room_service_order o
       LEFT JOIN room_service_order_item oi ON oi.order_id = o.id
-      WHERE 1=1
+      WHERE o.property_id = $1
     `;
-    const params = [];
+    const params = [req.property_id];
     if (booking_id) { params.push(booking_id); query += ` AND o.booking_id = $${params.length}`; }
     if (guest_id)   { params.push(guest_id);   query += ` AND o.guest_id = $${params.length}`; }
     if (status)     { params.push(status);     query += ` AND o.status = $${params.length}`; }
     query += ' GROUP BY o.id ORDER BY o.created_at DESC';
 
+    const countParams = [req.property_id, booking_id, guest_id, status].filter(Boolean);
     const [{ rows: countRows }] = await Promise.all([
-      pool.query(`SELECT COUNT(DISTINCT o.id) AS total FROM room_service_order o WHERE 1=1
-        ${booking_id ? ` AND o.booking_id = $1` : ''}
-        ${guest_id   ? ` AND o.guest_id = $${booking_id ? 2 : 1}` : ''}
-        ${status     ? ` AND o.status = $${[booking_id, guest_id].filter(Boolean).length + 1}` : ''}
-      `, [booking_id, guest_id, status].filter(Boolean))
+      pool.query(`SELECT COUNT(DISTINCT o.id) AS total FROM room_service_order o WHERE o.property_id = $1
+        ${booking_id ? ` AND o.booking_id = $${[booking_id].length + 1}` : ''}
+        ${guest_id   ? ` AND o.guest_id = $${[booking_id, guest_id].filter(Boolean).length + 1}` : ''}
+        ${status     ? ` AND o.status = $${[booking_id, guest_id, status].filter(Boolean).length + 1}` : ''}
+      `, countParams)
     ]);
 
     if (take) { params.push(parseInt(take, 10)); query += ` LIMIT $${params.length}`; }
@@ -99,9 +120,9 @@ async function getOrder(req, res, next) {
               )) AS items
        FROM room_service_order o
        LEFT JOIN room_service_order_item oi ON oi.order_id = o.id
-       WHERE o.id = $1
+       WHERE o.id = $1 AND o.property_id = $2
        GROUP BY o.id`,
-      [req.params.id]
+      [req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
     res.json(rows[0]);
@@ -119,12 +140,12 @@ async function createOrder(req, res, next) {
     try {
       await client.query('BEGIN');
 
-      // Validate booking exists
+      // Validate booking exists and belongs to this property
       const { rows: bookings } = await client.query(
-        `SELECT id FROM booking WHERE id = $1 AND status NOT IN ('cancelled')`,
-        [booking_id]
+        `SELECT id FROM booking WHERE id = $1 AND property_id = $2 AND status NOT IN ('cancelled')`,
+        [booking_id, req.property_id]
       );
-      if (!bookings.length) return res.status(404).json({ error: 'Booking not found or cancelled' });
+      if (!bookings.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Booking not found or cancelled' }); }
 
       // Lock in item prices from DB
       let total = 0;
@@ -132,8 +153,8 @@ async function createOrder(req, res, next) {
       for (const item of items) {
         const { item_id, quantity = 1 } = item;
         const { rows: found } = await client.query(
-          `SELECT id, name, price FROM room_service_item WHERE id = $1 AND status = 'active'`,
-          [item_id]
+          `SELECT id, name, price FROM room_service_item WHERE id = $1 AND property_id = $2 AND status = 'active'`,
+          [item_id, req.property_id]
         );
         if (!found.length) {
           await client.query('ROLLBACK');
@@ -146,9 +167,9 @@ async function createOrder(req, res, next) {
 
       // Create order
       const { rows: order } = await client.query(
-        `INSERT INTO room_service_order (booking_id, guest_id, notes, scheduled_for, total_price)
-         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-        [booking_id, guest_id || null, notes || null, scheduled_for || null, total]
+        `INSERT INTO room_service_order (property_id, booking_id, guest_id, notes, scheduled_for, total_price)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [req.property_id, booking_id, guest_id || null, notes || null, scheduled_for || null, total]
       );
 
       // Insert line items
@@ -179,8 +200,8 @@ async function updateOrderStatus(req, res, next) {
       return res.status(400).json({ error: `status must be one of: ${valid.join(', ')}` });
     }
     const { rows } = await pool.query(
-      `UPDATE room_service_order SET status = $1 WHERE id = $2 RETURNING *`,
-      [status, req.params.id]
+      `UPDATE room_service_order SET status = $1 WHERE id = $2 AND property_id = $3 RETURNING *`,
+      [status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
     res.json(rows[0]);

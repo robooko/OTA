@@ -449,16 +449,19 @@ CREATE INDEX IF NOT EXISTS idx_equipment_hire_eq   ON equipment_hire(equipment_i
 -- ── Room Service ──────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS room_service_item (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name        VARCHAR(100)  NOT NULL,
-  description TEXT,
-  category    VARCHAR(50),
-  price       NUMERIC(10,2) NOT NULL,
-  status      VARCHAR(20)   DEFAULT 'active'
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID          NOT NULL REFERENCES property(id),
+  restaurant_id UUID          REFERENCES restaurant(id),
+  name          VARCHAR(100)  NOT NULL,
+  description   TEXT,
+  category      VARCHAR(50),
+  price         NUMERIC(10,2) NOT NULL,
+  status        VARCHAR(20)   DEFAULT 'active'
 );
 
 CREATE TABLE IF NOT EXISTS room_service_order (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID         NOT NULL REFERENCES property(id),
   booking_id  UUID         NOT NULL REFERENCES booking(id),
   guest_id    UUID         REFERENCES guest(id),
   status         VARCHAR(20)  DEFAULT 'pending',
