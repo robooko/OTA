@@ -239,6 +239,7 @@ CREATE INDEX IF NOT EXISTS idx_service_period_restaurant         ON service_peri
 
 CREATE TABLE IF NOT EXISTS spa (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID         NOT NULL REFERENCES property(id),
   name        VARCHAR(100) NOT NULL,
   description TEXT,
   phone       VARCHAR(30),
@@ -246,34 +247,38 @@ CREATE TABLE IF NOT EXISTS spa (
 );
 
 CREATE TABLE IF NOT EXISTS spa_treatment (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  spa_id       UUID          NOT NULL REFERENCES spa(id),
-  name         VARCHAR(100)  NOT NULL,
-  description  TEXT,
-  duration_mins INT          NOT NULL,
-  price        NUMERIC(10,2) NOT NULL,
-  status       VARCHAR(20)   DEFAULT 'active'
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID          NOT NULL REFERENCES property(id),
+  spa_id        UUID          NOT NULL REFERENCES spa(id),
+  name          VARCHAR(100)  NOT NULL,
+  description   TEXT,
+  duration_mins INT           NOT NULL,
+  price         NUMERIC(10,2) NOT NULL,
+  status        VARCHAR(20)   DEFAULT 'active'
 );
 
 CREATE TABLE IF NOT EXISTS spa_therapist (
-  id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  spa_id UUID         NOT NULL REFERENCES spa(id),
-  name   VARCHAR(100) NOT NULL,
-  status VARCHAR(20)  DEFAULT 'active'
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID         NOT NULL REFERENCES property(id),
+  spa_id      UUID         NOT NULL REFERENCES spa(id),
+  name        VARCHAR(100) NOT NULL,
+  status      VARCHAR(20)  DEFAULT 'active'
 );
 
 CREATE TABLE IF NOT EXISTS spa_slot (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  therapist_id  UUID         NOT NULL REFERENCES spa_therapist(id),
-  treatment_id  UUID         NOT NULL REFERENCES spa_treatment(id),
-  slot_date     DATE         NOT NULL,
-  slot_time     TIME         NOT NULL,
-  status        VARCHAR(20)  DEFAULT 'available',
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id  UUID         NOT NULL REFERENCES property(id),
+  therapist_id UUID         NOT NULL REFERENCES spa_therapist(id),
+  treatment_id UUID         NOT NULL REFERENCES spa_treatment(id),
+  slot_date    DATE         NOT NULL,
+  slot_time    TIME         NOT NULL,
+  status       VARCHAR(20)  DEFAULT 'available',
   UNIQUE (therapist_id, slot_date, slot_time)
 );
 
 CREATE TABLE IF NOT EXISTS spa_appointment (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID         NOT NULL REFERENCES property(id),
   slot_id       UUID         NOT NULL REFERENCES spa_slot(id),
   guest_id      UUID         REFERENCES guest(id),
   clerk_user_id VARCHAR(100),
@@ -291,6 +296,11 @@ CREATE INDEX IF NOT EXISTS idx_spa_slot_therapist_date ON spa_slot(therapist_id,
 CREATE INDEX IF NOT EXISTS idx_spa_slot_treatment      ON spa_slot(treatment_id);
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_slot    ON spa_appointment(slot_id);
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_clerk_user ON spa_appointment(clerk_user_id);
+CREATE INDEX IF NOT EXISTS idx_spa_property             ON spa(property_id);
+CREATE INDEX IF NOT EXISTS idx_spa_treatment_property    ON spa_treatment(property_id);
+CREATE INDEX IF NOT EXISTS idx_spa_therapist_property    ON spa_therapist(property_id);
+CREATE INDEX IF NOT EXISTS idx_spa_slot_property         ON spa_slot(property_id);
+CREATE INDEX IF NOT EXISTS idx_spa_appointment_property  ON spa_appointment(property_id);
 
 -- ── Beach Club ────────────────────────────────────────────────────────────────
 
