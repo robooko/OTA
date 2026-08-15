@@ -377,6 +377,7 @@ CREATE INDEX IF NOT EXISTS idx_tour_booking_property  ON tour_booking(property_i
 
 CREATE TABLE IF NOT EXISTS golf_course (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id      UUID          NOT NULL REFERENCES property(id),
   name             VARCHAR(100)  NOT NULL,
   description      TEXT,
   holes            INT           NOT NULL,
@@ -385,17 +386,19 @@ CREATE TABLE IF NOT EXISTS golf_course (
 );
 
 CREATE TABLE IF NOT EXISTS tee_time (
-  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  course_id  UUID         NOT NULL REFERENCES golf_course(id),
-  tee_date   DATE         NOT NULL,
-  tee_time   TIME         NOT NULL,
-  max_players INT         NOT NULL DEFAULT 4,
-  status     VARCHAR(20)  DEFAULT 'active',
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID         NOT NULL REFERENCES property(id),
+  course_id   UUID         NOT NULL REFERENCES golf_course(id),
+  tee_date    DATE         NOT NULL,
+  tee_time    TIME         NOT NULL,
+  max_players INT          NOT NULL DEFAULT 4,
+  status      VARCHAR(20)  DEFAULT 'active',
   UNIQUE (course_id, tee_date, tee_time)
 );
 
 CREATE TABLE IF NOT EXISTS golf_booking (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID          NOT NULL REFERENCES property(id),
   tee_time_id   UUID          NOT NULL REFERENCES tee_time(id),
   guest_id      UUID          REFERENCES guest(id),
   contact_name  VARCHAR(100)  NOT NULL,
@@ -410,6 +413,9 @@ CREATE TABLE IF NOT EXISTS golf_booking (
 
 CREATE INDEX IF NOT EXISTS idx_tee_time_course_date ON tee_time(course_id, tee_date);
 CREATE INDEX IF NOT EXISTS idx_golf_booking_tee     ON golf_booking(tee_time_id);
+CREATE INDEX IF NOT EXISTS idx_golf_course_property  ON golf_course(property_id);
+CREATE INDEX IF NOT EXISTS idx_tee_time_property     ON tee_time(property_id);
+CREATE INDEX IF NOT EXISTS idx_golf_booking_property ON golf_booking(property_id);
 
 -- ── Equipment hire ────────────────────────────────────────────────────────────
 
@@ -501,6 +507,7 @@ CREATE TABLE IF NOT EXISTS proshop_item (
 
 CREATE TABLE IF NOT EXISTS golf_booking_item (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID          NOT NULL REFERENCES property(id),
   booking_id  UUID          NOT NULL REFERENCES golf_booking(id) ON DELETE CASCADE,
   item_id     UUID          REFERENCES proshop_item(id),
   item_name   VARCHAR(100)  NOT NULL,
@@ -508,4 +515,5 @@ CREATE TABLE IF NOT EXISTS golf_booking_item (
   unit_price  NUMERIC(10,2) NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_golf_booking_item ON golf_booking_item(booking_id);
+CREATE INDEX IF NOT EXISTS idx_golf_booking_item          ON golf_booking_item(booking_id);
+CREATE INDEX IF NOT EXISTS idx_golf_booking_item_property ON golf_booking_item(property_id);
