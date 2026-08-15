@@ -15,7 +15,7 @@ async function listExtras(req, res, next) {
 async function createExtra(req, res, next) {
   try {
     const { name, description, price } = req.body;
-    if (!name || !price) return res.status(400).json({ error: 'name and price are required' });
+    if (!name || price == null) return res.status(400).json({ error: 'name and price are required' });
     const { rows } = await pool.query(
       `INSERT INTO extra (property_id, name, description, price) VALUES ($1, $2, $3, $4) RETURNING *`,
       [req.property_id, name, description ?? null, price]

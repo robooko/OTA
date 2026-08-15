@@ -13,7 +13,7 @@ async function listCourses(req, res, next) {
 async function createCourse(req, res, next) {
   try {
     const { name, description, holes, price_per_player } = req.body;
-    if (!name || !holes || !price_per_player) {
+    if (!name || !holes || price_per_player == null) {
       return res.status(400).json({ error: 'name, holes, and price_per_player are required' });
     }
     const { rows } = await pool.query(

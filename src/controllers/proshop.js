@@ -17,7 +17,7 @@ async function listItems(req, res, next) {
 async function createItem(req, res, next) {
   try {
     const { name, description, category, price } = req.body;
-    if (!name || !price) return res.status(400).json({ error: 'name and price are required' });
+    if (!name || price == null) return res.status(400).json({ error: 'name and price are required' });
     const { rows } = await pool.query(
       `INSERT INTO proshop_item (name, description, category, price) VALUES ($1, $2, $3, $4) RETURNING *`,
       [name, description || null, category || null, price]
