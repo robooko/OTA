@@ -4,8 +4,8 @@ const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
 
 // Menu items
 router.get('/menu', authenticateOrApiKey, ctrl.listMenuItems);
-router.post('/menu', authenticate, ctrl.createMenuItem);
-router.put('/menu/:id', authenticate, ctrl.updateMenuItem);
+router.post('/menu', authenticateOrApiKey, ctrl.createMenuItem);
+router.put('/menu/:id', authenticateOrApiKey, ctrl.updateMenuItem);
 
 // Orders
 router.get('/', authenticate, ctrl.listOrders);
