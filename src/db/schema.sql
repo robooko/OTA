@@ -460,8 +460,9 @@ CREATE TABLE IF NOT EXISTS restaurant_menu_item (
 );
 
 CREATE TABLE IF NOT EXISTS restaurant_order (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  property_id UUID         NOT NULL REFERENCES property(id),
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID         NOT NULL REFERENCES property(id),
+  restaurant_id UUID         NOT NULL REFERENCES restaurant(id),
   booking_id  UUID         REFERENCES booking(id),
   table_id    UUID         REFERENCES restaurant_table(id),
   guest_id    UUID         REFERENCES guest(id),
@@ -482,8 +483,9 @@ CREATE TABLE IF NOT EXISTS restaurant_order_item (
   unit_price  NUMERIC(10,2) NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_restaurant_order_booking ON restaurant_order(booking_id);
-CREATE INDEX IF NOT EXISTS idx_restaurant_order_guest   ON restaurant_order(guest_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_order_booking    ON restaurant_order(booking_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_order_guest      ON restaurant_order(guest_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_order_restaurant ON restaurant_order(restaurant_id);
 
 -- ── Pro Shop ──────────────────────────────────────────────────────────────────
 
