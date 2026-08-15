@@ -456,6 +456,7 @@ CREATE TABLE IF NOT EXISTS restaurant_menu_item (
   description   TEXT,
   category      VARCHAR(50),
   price         NUMERIC(10,2) NOT NULL,
+  allergens     TEXT[]        NOT NULL DEFAULT '{}',
   status        VARCHAR(20)   DEFAULT 'active'
 );
 

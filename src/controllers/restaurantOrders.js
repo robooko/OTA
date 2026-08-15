@@ -17,8 +17,11 @@ async function listMenuItems(req, res, next) {
 
 async function createMenuItem(req, res, next) {
   try {
-    const { name, description, category, price, restaurant_id } = req.body;
+    const { name, description, category, price, restaurant_id, allergens } = req.body;
     if (!name || price == null) return res.status(400).json({ error: 'name and price are required' });
+    if (allergens !== undefined && !Array.isArray(allergens)) {
+      return res.status(400).json({ error: 'allergens must be an array of strings' });
+    }
 
     if (restaurant_id) {
       const restaurantRes = await pool.query('SELECT id FROM restaurant WHERE id = $1 AND property_id = $2', [
@@ -29,9 +32,9 @@ async function createMenuItem(req, res, next) {
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO restaurant_menu_item (property_id, restaurant_id, name, description, category, price)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.property_id, restaurant_id || null, name, description || null, category || null, price]
+      `INSERT INTO restaurant_menu_item (property_id, restaurant_id, name, description, category, price, allergens)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.property_id, restaurant_id || null, name, description || null, category || null, price, allergens ?? []]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -39,7 +42,10 @@ async function createMenuItem(req, res, next) {
 
 async function updateMenuItem(req, res, next) {
   try {
-    const { name, description, category, price, status, restaurant_id } = req.body;
+    const { name, description, category, price, status, restaurant_id, allergens } = req.body;
+    if (allergens !== undefined && !Array.isArray(allergens)) {
+      return res.status(400).json({ error: 'allergens must be an array of strings' });
+    }
 
     if (restaurant_id) {
       const restaurantRes = await pool.query('SELECT id FROM restaurant WHERE id = $1 AND property_id = $2', [
@@ -56,9 +62,10 @@ async function updateMenuItem(req, res, next) {
          category      = COALESCE($3, category),
          price         = COALESCE($4, price),
          status        = COALESCE($5, status),
-         restaurant_id = COALESCE($6, restaurant_id)
-       WHERE id = $7 AND property_id = $8 RETURNING *`,
-      [name, description, category, price, status, restaurant_id, req.params.id, req.property_id]
+         restaurant_id = COALESCE($6, restaurant_id),
+         allergens     = COALESCE($7, allergens)
+       WHERE id = $8 AND property_id = $9 RETURNING *`,
+      [name, description, category, price, status, restaurant_id, allergens ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Item not found' });
     res.json(rows[0]);
