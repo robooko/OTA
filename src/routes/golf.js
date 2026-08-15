@@ -1,19 +1,19 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/golf');
-const { requireApiKey } = require('../middleware/apiKey');
+const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
 
 // Courses
-router.get('/courses', ctrl.listCourses);
-router.post('/courses', requireApiKey, ctrl.createCourse);
-router.put('/courses/:id', requireApiKey, ctrl.updateCourse);
+router.get('/courses', authenticate, ctrl.listCourses);
+router.post('/courses', authenticate, ctrl.createCourse);
+router.put('/courses/:id', authenticate, ctrl.updateCourse);
 
 // Tee times
-router.post('/tee-times/bulk', requireApiKey, ctrl.bulkCreateTeeTimes);
-router.get('/tee-times/search', ctrl.searchTeeTimes);
+router.post('/tee-times/bulk', authenticate, ctrl.bulkCreateTeeTimes);
+router.get('/tee-times/search', authenticate, ctrl.searchTeeTimes);
 
 // Bookings
-router.get('/bookings', requireApiKey, ctrl.listBookings);
-router.post('/bookings', requireApiKey, ctrl.createBooking);
-router.put('/bookings/:id', requireApiKey, ctrl.updateBooking);
+router.get('/bookings', authenticate, ctrl.listBookings);
+router.post('/bookings', authenticateOrApiKey, ctrl.createBooking);
+router.put('/bookings/:id', authenticate, ctrl.updateBooking);
 
 module.exports = router;

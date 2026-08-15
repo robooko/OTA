@@ -5,7 +5,10 @@ const { isValidDate } = require('../middleware/validate');
 
 async function listCourses(req, res, next) {
   try {
-    const { rows } = await pool.query("SELECT * FROM golf_course WHERE status = 'active' ORDER BY name");
+    const { rows } = await pool.query(
+      "SELECT * FROM golf_course WHERE status = 'active' AND property_id = $1",
+      [req.property_id]
+    );
     res.json(rows);
   } catch (err) { next(err); }
 }
@@ -17,8 +20,8 @@ async function createCourse(req, res, next) {
       return res.status(400).json({ error: 'name, holes, and price_per_player are required' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO golf_course (name, description, holes, price_per_player) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [name, description ?? null, holes, price_per_player]
+      `INSERT INTO golf_course (property_id, name, description, holes, price_per_player) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [req.property_id, name, description ?? null, holes, price_per_player]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -34,8 +37,8 @@ async function updateCourse(req, res, next) {
          holes            = COALESCE($3, holes),
          price_per_player = COALESCE($4, price_per_player),
          status           = COALESCE($5, status)
-       WHERE id = $6 RETURNING *`,
-      [name, description, holes, price_per_player, status, req.params.id]
+       WHERE id = $6 AND property_id = $7 RETURNING *`,
+      [name, description, holes, price_per_player, status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Course not found' });
     res.json(rows[0]);
@@ -52,6 +55,9 @@ async function bulkCreateTeeTimes(req, res, next) {
     }
     if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'Invalid date format' });
 
+    const courseRes = await pool.query('SELECT id FROM golf_course WHERE id = $1 AND property_id = $2', [course_id, req.property_id]);
+    if (!courseRes.rows.length) return res.status(404).json({ error: 'Course not found' });
+
     const created = [];
     const d = new Date(from);
     const end = new Date(to);
@@ -59,11 +65,11 @@ async function bulkCreateTeeTimes(req, res, next) {
       const date = d.toISOString().slice(0, 10);
       for (const time of times) {
         const { rows } = await pool.query(
-          `INSERT INTO tee_time (course_id, tee_date, tee_time, max_players)
-           VALUES ($1, $2, $3, $4)
+          `INSERT INTO tee_time (property_id, course_id, tee_date, tee_time, max_players)
+           VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (course_id, tee_date, tee_time) DO NOTHING
            RETURNING *`,
-          [course_id, date, time, max_players]
+          [req.property_id, course_id, date, time, max_players]
         );
         if (rows.length) created.push(rows[0]);
       }
@@ -94,8 +100,9 @@ async function searchTeeTimes(req, res, next) {
         AND tt.tee_date <= $2
         AND tt.status = 'active'
         AND gc.status = 'active'
+        AND tt.property_id = $3
     `;
-    const params = [start, end];
+    const params = [start, end, req.property_id];
     if (course_id) { params.push(course_id); query += ` AND tt.course_id = $${params.length}`; }
     query += ' GROUP BY tt.id, gc.id';
     if (players) { query += ` HAVING tt.max_players - COALESCE(SUM(gb.players) FILTER (WHERE gb.status != 'cancelled'), 0) >= ${parseInt(players, 10)}`; }
@@ -121,24 +128,23 @@ async function listBookings(req, res, next) {
       JOIN tee_time tt ON tt.id = gb.tee_time_id
       JOIN golf_course gc ON gc.id = tt.course_id
       LEFT JOIN golf_booking_item gbi ON gbi.booking_id = gb.id
-      WHERE 1=1
+      WHERE gb.property_id = $1
     `;
-    const params = [];
+    const params = [req.property_id];
     if (date) { params.push(date); query += ` AND tt.tee_date = $${params.length}`; }
     if (status) { params.push(status); query += ` AND gb.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND gb.guest_id = $${params.length}`; }
     query += ' GROUP BY gb.id, tt.tee_date, tt.tee_time, gc.name, gc.holes, gc.price_per_player';
     query += ' ORDER BY tt.tee_date, tt.tee_time';
 
-    const [{ rows: countRows }] = await Promise.all([
-      pool.query(`SELECT COUNT(DISTINCT gb.id) AS total FROM golf_booking gb
-        JOIN tee_time tt ON tt.id = gb.tee_time_id
-        WHERE 1=1
-        ${date     ? ` AND tt.tee_date = $1` : ''}
-        ${status   ? ` AND gb.status = $${date ? 2 : 1}` : ''}
-        ${guest_id ? ` AND gb.guest_id = $${[date, status].filter(Boolean).length + 1}` : ''}
-      `, [date, status, guest_id].filter(Boolean))
-    ]);
+    const countParams = [req.property_id, date, status, guest_id].filter(Boolean);
+    const { rows: countRows } = await pool.query(`SELECT COUNT(DISTINCT gb.id) AS total FROM golf_booking gb
+      JOIN tee_time tt ON tt.id = gb.tee_time_id
+      WHERE gb.property_id = $1
+      ${date     ? ` AND tt.tee_date = $${[req.property_id, date].filter(Boolean).length}` : ''}
+      ${status   ? ` AND gb.status = $${[req.property_id, date, status].filter(Boolean).length}` : ''}
+      ${guest_id ? ` AND gb.guest_id = $${countParams.length}` : ''}
+    `, countParams);
 
     if (take) { params.push(parseInt(take, 10)); query += ` LIMIT $${params.length}`; }
     if (skip) { params.push(parseInt(skip, 10)); query += ` OFFSET $${params.length}`; }
@@ -159,9 +165,15 @@ async function createBooking(req, res, next) {
 
     const ttRes = await client.query(
       `SELECT tt.*, gc.price_per_player FROM tee_time tt
-       JOIN golf_course gc ON gc.id = tt.course_id WHERE tt.id = $1`, [tee_time_id]
+       JOIN golf_course gc ON gc.id = tt.course_id WHERE tt.id = $1 AND tt.property_id = $2`,
+      [tee_time_id, req.property_id]
     );
     if (!ttRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tee time not found' }); }
+
+    if (guest_id) {
+      const guestRes = await client.query('SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, req.property_id]);
+      if (!guestRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Guest not found' }); }
+    }
 
     const tt = ttRes.rows[0];
     const bookedRes = await client.query(
@@ -177,9 +189,9 @@ async function createBooking(req, res, next) {
 
     const total_price = parseFloat(tt.price_per_player) * players;
     const { rows } = await client.query(
-      `INSERT INTO golf_booking (tee_time_id, guest_id, contact_name, contact_email, contact_phone, players, total_price, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [tee_time_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, players, total_price.toFixed(2), notes ?? null]
+      `INSERT INTO golf_booking (property_id, tee_time_id, guest_id, contact_name, contact_email, contact_phone, players, total_price, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.property_id, tee_time_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, players, total_price.toFixed(2), notes ?? null]
     );
 
     await client.query('COMMIT');
@@ -194,13 +206,16 @@ async function createBooking(req, res, next) {
 
 async function updateBooking(req, res, next) {
   try {
-    const { status, notes } = req.body;
+    const { status, notes, contact_name, contact_email, contact_phone } = req.body;
     const { rows } = await pool.query(
       `UPDATE golf_booking SET
-         status = COALESCE($1, status),
-         notes  = COALESCE($2, notes)
-       WHERE id = $3 RETURNING *`,
-      [status, notes, req.params.id]
+         status        = COALESCE($1, status),
+         notes         = COALESCE($2, notes),
+         contact_name  = COALESCE($3, contact_name),
+         contact_email = COALESCE($4, contact_email),
+         contact_phone = COALESCE($5, contact_phone)
+       WHERE id = $6 AND property_id = $7 RETURNING *`,
+      [status, notes, contact_name, contact_email, contact_phone, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
     res.json(rows[0]);
