@@ -226,6 +226,15 @@ function createTools(apiRequest) {
     run: ({ restaurant_id, id, ...body }) => apiRequest('PUT', `/api/restaurant/${restaurant_id}/tables/${id}`, { body }),
   },
   {
+    name: 'list_restaurant_menu',
+    description: 'List menu items for room/table service, optionally filtered by restaurant or category',
+    inputSchema: {
+      restaurant_id: z.string().optional(),
+      category: z.string().optional(),
+    },
+    run: (query) => apiRequest('GET', '/api/restaurant-orders/menu', { query }),
+  },
+  {
     name: 'get_restaurant_service_periods',
     description: "List a restaurant's service periods (bookable windows)",
     inputSchema: { restaurant_id: z.string() },

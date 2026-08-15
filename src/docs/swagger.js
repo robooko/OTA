@@ -428,7 +428,7 @@ const swaggerSpec = {
 
     // ── Restaurant Orders ─────────────────────────────────────────────────────
     '/api/restaurant-orders/menu': {
-      get: { tags: ['Restaurant Orders'], summary: 'List menu items', parameters: [{ name: 'category', in: 'query', schema: { type: 'string' } }, { name: 'restaurant_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of menu items' } } },
+      get: { tags: ['Restaurant Orders'], summary: 'List menu items', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'category', in: 'query', schema: { type: 'string' } }, { name: 'restaurant_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of menu items' } } },
       post: { tags: ['Restaurant Orders'], summary: 'Create menu item', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'price'], properties: { name: { type: 'string' }, description: { type: 'string' }, category: { type: 'string' }, price: { type: 'number' }, restaurant_id: { type: 'string', format: 'uuid', description: 'Optional — which restaurant this item belongs to' } } } } } }, responses: { 201: { description: 'Created' } } },
     },
     '/api/restaurant-orders/menu/{id}': {
