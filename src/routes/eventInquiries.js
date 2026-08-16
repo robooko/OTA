@@ -6,4 +6,7 @@ router.get('/', authenticateOrApiKey, ctrl.listInquiries);
 router.post('/', authenticateOrApiKey, ctrl.createInquiry);
 router.put('/:id', authenticate, ctrl.updateInquiry);
 
+router.get('/:id/replies', authenticate, ctrl.listReplies);
+router.post('/:id/replies', authenticate, ctrl.createReply);
+
 module.exports = router;

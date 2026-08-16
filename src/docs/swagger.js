@@ -407,6 +407,10 @@ const swaggerSpec = {
     '/api/event-inquiries/{id}': {
       put: { tags: ['Event Inquiries'], summary: 'Update an inquiry\'s status', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string' } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Not found' } } },
     },
+    '/api/event-inquiries/{id}/replies': {
+      get: { tags: ['Event Inquiries'], summary: 'List an inquiry\'s reply thread', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of messages, oldest first' }, 404: { description: 'Not found' } } },
+      post: { tags: ['Event Inquiries'], summary: 'Send a reply email to the guest', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['body'], properties: { body: { type: 'string' } } } } } }, responses: { 201: { description: 'Sent' }, 400: { description: 'Missing body' }, 404: { description: 'Not found' } } },
+    },
 
     // ── Golf ─────────────────────────────────────────────────────────────────
     '/api/golf/courses': {
