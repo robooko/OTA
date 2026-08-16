@@ -184,9 +184,9 @@ if (process.env.RESEND_API_KEY) {
 async function sendReply(inquiry, propertyName, body) {
   if (!client) throw new Error('Resend not configured');
   const { data, error } = await client.emails.send({
-    from: `${propertyName} via Forge <inquiries@forge-build.co.uk>`,
+    from: `${propertyName} via Forge <inquiries@hotal.forge-build.co.uk>`,
     to: inquiry.email,
-    reply_to: `inquiry+${inquiry.id}@replies.forge-build.co.uk`,
+    reply_to: `inquiry+${inquiry.id}@replies.hotal.forge-build.co.uk`,
     subject: 'Re: Your event inquiry',
     text: body,
   });
@@ -633,7 +633,7 @@ curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST http://localhost:3000/api/even
   -H "svix-id: msg_fake" \
   -H "svix-timestamp: 1614265330" \
   -H "svix-signature: v1,not-a-real-signature=" \
-  -d '{"type":"email.received","data":{"email_id":"fake","to":["inquiry+00000000-0000-0000-0000-000000000000@replies.forge-build.co.uk"]}}'
+  -d '{"type":"email.received","data":{"email_id":"fake","to":["inquiry+00000000-0000-0000-0000-000000000000@replies.hotal.forge-build.co.uk"]}}'
 ```
 Expected: `400 {"error":"Invalid signature"}` — confirms verification is actually enforced, not silently bypassed.
 
@@ -659,22 +659,24 @@ git commit -m "Add inbound reply webhook (Resend -> event_inquiry_message)"
 
 - [ ] **Step 1: Confirm with the user before making any Resend account changes**
 
-Per Global Constraints — creating the receiving domain, adding its DNS record, and creating the webhook all modify the live Resend account.
+Per Global Constraints — creating the receiving domain, adding its DNS record, and creating the webhook all modify the live Resend account. This also needs the account (whichever holds `hotal.forge-build.co.uk`, the `RESEND_HOTAL_API_KEY` account per the mid-implementation domain switch — see the spec's Context) upgraded to a paid plan first: the free tier caps at 1 domain, already used by `hotal.forge-build.co.uk` itself (sending-only) — confirmed live via `resend domains create` returning a 403 `domain limit` error for a second domain on this account. Resend's Pro plan ($20/mo) raises the cap to 10 domains and is the cheapest tier that allows a second domain at all. Confirm the account has been upgraded before Step 2.
 
 - [ ] **Step 2: Create the receiving domain**
 
 ```bash
 RESEND_API_KEY=$(grep '^RESEND_API_KEY=' "c:\Users\robert\source\repos\ota-table-bookings\.env" | cut -d= -f2)
-RESEND_API_KEY=$RESEND_API_KEY resend domains create --domain replies.forge-build.co.uk --json
+RESEND_API_KEY=$RESEND_API_KEY resend domains create --name replies.hotal.forge-build.co.uk --receiving --json
 ```
-Expected: a domain object with `id` and the MX record details to add. Report the exact MX record (host/value/priority) to the user so they can add it wherever `forge-build.co.uk`'s DNS is managed (this tool has no DNS provider access).
+(`--domain` is not a valid flag for this CLI — it's `--name`, and receiving must be explicitly requested with `--receiving` or it defaults to sending-only, per `resend domains create --help`.)
+
+Expected: a domain object with `id` and the MX record details to add. Report the exact MX record (host/value/priority) to the user so they can add it wherever `hotal.forge-build.co.uk`'s DNS is managed (this tool has no DNS provider access).
 
 - [ ] **Step 3: Wait for the user to confirm the DNS record is added, then verify**
 
 ```bash
 RESEND_API_KEY=$RESEND_API_KEY resend domains list --json
 ```
-Expected: `replies.forge-build.co.uk` present with `capabilities.receiving: "enabled"` (may take time to propagate — re-check rather than assuming failure on the first try; DNS propagation can take up to a few hours).
+Expected: `replies.hotal.forge-build.co.uk` present with `capabilities.receiving: "enabled"` (may take time to propagate — re-check rather than assuming failure on the first try; DNS propagation can take up to a few hours).
 
 - [ ] **Step 4: Create the webhook**
 
