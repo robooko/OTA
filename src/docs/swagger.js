@@ -464,6 +464,9 @@ const swaggerSpec = {
     '/api/restaurant-orders/{id}/status': {
       put: { tags: ['Restaurant Orders'], summary: 'Update order status', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['pending', 'confirmed', 'preparing', 'delivered', 'cancelled'] } } } } } }, responses: { 200: { description: 'Updated order' }, 404: { description: 'Not found' } } },
     },
+    '/api/restaurant-orders/ably-token': {
+      get: { tags: ['Restaurant Orders'], summary: 'Mint a realtime subscribe token for one restaurant\'s order events', parameters: [{ name: 'restaurant_id', in: 'query', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Ably token request + channel name' }, 400: { description: 'restaurant_id missing' }, 404: { description: 'Restaurant not found' } } },
+    },
     // ── Pro Shop ──────────────────────────────────────────────────────────────
     '/api/proshop/shops': {
       get: { tags: ['Pro Shop'], summary: 'List shops', security: [{ bearerAuth: [] }], responses: { 200: { description: 'Array of shops' } } },

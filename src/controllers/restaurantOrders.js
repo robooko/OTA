@@ -237,4 +237,23 @@ async function updateOrderStatus(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listMenuItems, createMenuItem, updateMenuItem, listOrders, getOrder, createOrder, updateOrderStatus };
+async function getAblyToken(req, res, next) {
+  try {
+    const { restaurant_id } = req.query;
+    if (!restaurant_id) return res.status(400).json({ error: 'restaurant_id is required' });
+
+    const { rows } = await pool.query(
+      'SELECT id FROM restaurant WHERE id = $1 AND property_id = $2',
+      [restaurant_id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
+
+    const channel = `restaurant:${restaurant_id}:orders`;
+    const tokenRequest = await ablyClient.auth.createTokenRequest({
+      capability: { [channel]: ['subscribe'] },
+    });
+    res.json({ tokenRequest, channel });
+  } catch (err) { next(err); }
+}
+
+module.exports = { listMenuItems, createMenuItem, updateMenuItem, listOrders, getOrder, createOrder, updateOrderStatus, getAblyToken };
