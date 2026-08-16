@@ -8,9 +8,9 @@ if (process.env.RESEND_API_KEY) {
 async function sendReply(inquiry, propertyName, body) {
   if (!client) throw new Error('Resend not configured');
   const { data, error } = await client.emails.send({
-    from: `${propertyName} via Forge <inquiries@forge-build.co.uk>`,
+    from: `${propertyName} via Forge <inquiries@hotal.forge-build.co.uk>`,
     to: inquiry.email,
-    reply_to: `inquiry+${inquiry.id}@replies.forge-build.co.uk`,
+    reply_to: `inquiry+${inquiry.id}@replies.hotal.forge-build.co.uk`,
     subject: 'Re: Your event inquiry',
     text: body,
   });
