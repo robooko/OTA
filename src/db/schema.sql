@@ -421,6 +421,7 @@ CREATE INDEX IF NOT EXISTS idx_golf_booking_property ON golf_booking(property_id
 
 CREATE TABLE IF NOT EXISTS equipment (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id    UUID          NOT NULL REFERENCES property(id),
   name           VARCHAR(100)  NOT NULL,
   type           VARCHAR(50)   NOT NULL,
   description    TEXT,
@@ -432,6 +433,7 @@ CREATE TABLE IF NOT EXISTS equipment (
 
 CREATE TABLE IF NOT EXISTS equipment_hire (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID          NOT NULL REFERENCES property(id),
   equipment_id  UUID          NOT NULL REFERENCES equipment(id),
   guest_id      UUID          REFERENCES guest(id),
   contact_name  VARCHAR(100)  NOT NULL,
@@ -449,8 +451,10 @@ CREATE TABLE IF NOT EXISTS equipment_hire (
   created_at       TIMESTAMPTZ   DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_equipment_hire_date ON equipment_hire(hire_date);
-CREATE INDEX IF NOT EXISTS idx_equipment_hire_eq   ON equipment_hire(equipment_id);
+CREATE INDEX IF NOT EXISTS idx_equipment_hire_date     ON equipment_hire(hire_date);
+CREATE INDEX IF NOT EXISTS idx_equipment_hire_eq       ON equipment_hire(equipment_id);
+CREATE INDEX IF NOT EXISTS idx_equipment_property      ON equipment(property_id);
+CREATE INDEX IF NOT EXISTS idx_equipment_hire_property ON equipment_hire(property_id);
 
 -- ── Restaurant Orders ─────────────────────────────────────────────────────────
 
