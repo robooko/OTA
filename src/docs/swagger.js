@@ -28,6 +28,7 @@ const swaggerSpec = {
     { name: 'Extras' },
     { name: 'Room Service' },
     { name: 'Pro Shop' },
+    { name: 'Event Inquiries' },
   ],
   components: {
     securitySchemes: {
@@ -396,6 +397,15 @@ const swaggerSpec = {
     '/api/equipment/hires': {
       get: { tags: ['Equipment'], summary: 'List hire bookings', security: [{ bearerAuth: [] }], parameters: [{ name: 'date', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'status', in: 'query', schema: { type: 'string' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'golf_booking_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'equipment_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of hires' } } },
       post: { tags: ['Equipment'], summary: 'Hire equipment', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['equipment_id', 'contact_name', 'hire_date', 'quantity'], properties: { equipment_id: { type: 'string', format: 'uuid' }, guest_id: { type: 'string', format: 'uuid' }, contact_name: { type: 'string' }, contact_email: { type: 'string' }, contact_phone: { type: 'string' }, hire_date: { type: 'string', format: 'date' }, quantity: { type: 'integer' }, notes: { type: 'string' }, rate_type: { type: 'string', enum: ['per_day', 'per_hour'], default: 'per_day' }, duration: { type: 'number', default: 1, description: 'Days or hours depending on rate_type' }, golf_booking_id: { type: 'string', format: 'uuid', description: 'Link to a golf booking' }, total_price: { type: 'number', readOnly: true, description: 'rate × quantity × duration' } } } } } }, responses: { 201: { description: 'Hire created with total_price' }, 409: { description: 'Not enough available' } } },
+    },
+
+    // ── Event Inquiries ─────────────────────────────────────────────────────
+    '/api/event-inquiries': {
+      get: { tags: ['Event Inquiries'], summary: 'List event inquiries', responses: { 200: { description: 'Array of inquiries, newest first' } } },
+      post: { tags: ['Event Inquiries'], summary: 'Submit an event inquiry', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'email', 'event_date'], properties: { name: { type: 'string' }, email: { type: 'string' }, phone: { type: 'string' }, event_date: { type: 'string', format: 'date' }, guests: { type: 'integer' }, event_type: { type: 'string' }, format: { type: 'string' }, message: { type: 'string' } } } } } }, responses: { 201: { description: 'Created' }, 400: { description: 'Missing or invalid fields' } } },
+    },
+    '/api/event-inquiries/{id}': {
+      put: { tags: ['Event Inquiries'], summary: 'Update an inquiry\'s status', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string' } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Not found' } } },
     },
 
     // ── Golf ─────────────────────────────────────────────────────────────────

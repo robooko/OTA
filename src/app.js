@@ -22,6 +22,7 @@ const extrasRoutes = require('./routes/extras');
 const restaurantOrderRoutes = require('./routes/restaurantOrders');
 const proshopRoutes = require('./routes/proshop');
 const propertyRoutes = require('./routes/property');
+const eventInquiryRoutes = require('./routes/eventInquiries');
 const mcpRoutes = require('./routes/mcp');
 
 const app = express();
@@ -50,6 +51,7 @@ app.use('/api/extras', extrasRoutes);
 app.use('/api/restaurant-orders', restaurantOrderRoutes);
 app.use('/api/proshop', proshopRoutes);
 app.use('/api/property', propertyRoutes);
+app.use('/api/event-inquiries', eventInquiryRoutes);
 app.use('/api/mcp', mcpRoutes);
 
 app.use(errorHandler);
