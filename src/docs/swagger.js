@@ -169,6 +169,9 @@ const swaggerSpec = {
     },
 
     // ── Property ────────────────────────────────────────────────────────────
+    '/api/property/me': {
+      get: { tags: ['Property'], summary: 'Get the current property (id, name)', responses: { 200: { description: 'Property identity', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, name: { type: 'string' } } } } } } } },
+    },
     '/api/property/api-key': {
       get: { tags: ['Property'], summary: "Get the current property's API key (admin only)", responses: { 200: { description: 'API key and enabled state', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' }, api_key_enabled: { type: 'boolean' } } } } } }, 403: { description: 'Insufficient permissions' } } },
     },

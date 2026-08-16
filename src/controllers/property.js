@@ -5,6 +5,15 @@ function generateApiKey() {
   return 'prop_' + crypto.randomBytes(32).toString('hex');
 }
 
+async function getCurrentProperty(req, res, next) {
+  try {
+    const { rows } = await pool.query('SELECT id, name FROM property WHERE id = $1', [req.property_id]);
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function getApiKey(req, res, next) {
   try {
     const { rows } = await pool.query('SELECT api_key, api_key_enabled FROM property WHERE id = $1', [req.property_id]);
@@ -51,4 +60,4 @@ async function enableApiKey(req, res, next) {
   }
 }
 
-module.exports = { getApiKey, rotateApiKey, disableApiKey, enableApiKey };
+module.exports = { getCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey };
