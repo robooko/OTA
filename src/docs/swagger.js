@@ -452,9 +452,16 @@ const swaggerSpec = {
       put: { tags: ['Restaurant Orders'], summary: 'Update order status', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: ['pending', 'confirmed', 'preparing', 'delivered', 'cancelled'] } } } } } }, responses: { 200: { description: 'Updated order' }, 404: { description: 'Not found' } } },
     },
     // ── Pro Shop ──────────────────────────────────────────────────────────────
+    '/api/proshop/shops': {
+      get: { tags: ['Pro Shop'], summary: 'List shops', security: [{ bearerAuth: [] }], responses: { 200: { description: 'Array of shops' } } },
+      post: { tags: ['Pro Shop'], summary: 'Create shop', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' }, description: { type: 'string' } } } } } }, responses: { 201: { description: 'Created' } } },
+    },
+    '/api/proshop/shops/{id}': {
+      put: { tags: ['Pro Shop'], summary: 'Update shop', security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Not found' } } },
+    },
     '/api/proshop/items': {
-      get: { tags: ['Pro Shop'], summary: 'List catalogue items', security: [{ bearerAuth: [] }], parameters: [{ name: 'category', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Array of items' } } },
-      post: { tags: ['Pro Shop'], summary: 'Create catalogue item', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'price'], properties: { name: { type: 'string' }, description: { type: 'string' }, category: { type: 'string' }, price: { type: 'number' } } } } } }, responses: { 201: { description: 'Created' } } },
+      get: { tags: ['Pro Shop'], summary: 'List catalogue items', security: [{ bearerAuth: [] }], parameters: [{ name: 'category', in: 'query', schema: { type: 'string' } }, { name: 'shop_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of items' } } },
+      post: { tags: ['Pro Shop'], summary: 'Create catalogue item', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'price', 'shop_id'], properties: { name: { type: 'string' }, description: { type: 'string' }, category: { type: 'string' }, price: { type: 'number' }, shop_id: { type: 'string', format: 'uuid' } } } } } }, responses: { 201: { description: 'Created' } } },
     },
     '/api/proshop/items/{id}': {
       put: { tags: ['Pro Shop'], summary: 'Update catalogue item', security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, category: { type: 'string' }, price: { type: 'number' }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Not found' } } },
