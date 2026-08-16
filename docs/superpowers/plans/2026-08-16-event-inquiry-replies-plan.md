@@ -737,7 +737,7 @@ Expected: eventually `READY`.
 
 - [ ] **Step 9: Full round-trip live verification**
 
-Needs a live Clerk admin token for FORGE (browser-based sign-in-ticket flow, same recipe as every prior live-verification task this session — mint via `client.signInTokens.createSignInToken({ userId: 'user_3CLBg0yYT3odh00x09a2KnPiGr3', expiresInSeconds: 3600 })` using the live secret key, navigate with `redirect_url=https://accounts.hotal.forge-build.co.uk/user`, evaluate `window.Clerk.session.getToken({ skipCache: true })`) and a real, checkable inbox to reply from.
+Needs a live Clerk admin token for FORGE (browser-based sign-in-ticket flow — mint via `client.signInTokens.createSignInToken({ userId: 'user_3CLBg0yYT3odh00x09a2KnPiGr3', expiresInSeconds: 3600 })` using the live secret key, navigate to `https://accounts.hotal.forge-build.co.uk/sign-in?__clerk_ticket=<ticket>&redirect_url=https://accounts.hotal.forge-build.co.uk/user` — the query param is `__clerk_ticket`, not `ticket`; a plain `?ticket=` silently leaves the page on the sign-in screen with no session, confirmed the hard way — then poll for `window.Clerk.session` to appear (loads asynchronously, 1-2s) before evaluating `window.Clerk.session.getToken({ skipCache: true })`; also set a realistic `userAgent` on the browser context, since Clerk's Account Portal returned 403s under Playwright's default one) and a real, checkable inbox to reply from. Resend also rejects `to` addresses on placeholder domains (e.g. `example.com`) with a clear error — use a real deliverable address.
 
 ```bash
 LIVE_CLERK_TOKEN="<token from the browser flow>"
