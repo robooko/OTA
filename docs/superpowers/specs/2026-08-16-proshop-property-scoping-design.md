@@ -153,8 +153,16 @@ No automated test framework — manual checks (`curl` against a running
    with Robs's token for Robs's booking + a Robs item → `201`. For the
    foreign booking → `404`. For a foreign item against Robs's own
    booking → `404`.
-6. `GET /api/proshop/booking/:booking_id` for a foreign booking → `404`
-   (was reachable via any `X-Api-Key` before).
-7. `DELETE /api/proshop/booking/:booking_id/:id` for a foreign booking
-   → `404`; for Robs's own → `204`.
+6. `GET /api/proshop/booking/:booking_id` for a foreign booking →
+   `200`, empty array — `listBookingItems` filters by `property_id`
+   but (matching this codebase's convention for list-style GETs, e.g.
+   golf's `searchTeeTimes`) has no explicit booking-existence check,
+   so a real-but-foreign `booking_id` simply matches no rows rather
+   than 404ing. Was reachable via any `X-Api-Key` before regardless.
+7. `DELETE /api/proshop/booking/:booking_id/:id` where `booking_id`
+   and `id` both correctly match a real row but the row belongs to a
+   different property → `404` (isolates the new `property_id` check
+   specifically, distinct from the pre-existing `booking_id` mismatch
+   case, which already 404'd before this phase). For Robs's own →
+   `204`.
 8. Repeat the core checks (2, 3, 5) against live once local passes.
