@@ -1,7 +1,7 @@
 const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
-const { publishNewInquiry } = require('../lib/ably');
-const { sendReply } = require('../lib/resend');
+const { publishNewInquiry, publishNewReply } = require('../lib/ably');
+const { sendReply, verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
 
 async function listInquiries(req, res, next) {
   try {
@@ -96,4 +96,51 @@ async function createReply(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listInquiries, createInquiry, updateInquiry, listReplies, createReply };
+function stripHtml(html) {
+  return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+async function handleResendInboundWebhook(req, res, next) {
+  try {
+    const payload = req.body.toString(); // raw Buffer, from express.raw() -- see app.js
+    let event;
+    try {
+      event = verifyInboundWebhook(payload, req.headers);
+    } catch {
+      return res.status(400).json({ error: 'Invalid signature' });
+    }
+
+    if (event.type !== 'email.received') return res.status(200).end();
+
+    const toAddress = event.data.to?.[0] ?? '';
+    const match = toAddress.match(/^inquiry\+([0-9a-f-]{36})@/i);
+    if (!match) return res.status(200).end();
+
+    const inquiryId = match[1];
+    const { rows: inquiryRows } = await pool.query('SELECT * FROM event_inquiry WHERE id = $1', [inquiryId]);
+    if (!inquiryRows.length) return res.status(200).end();
+    const inquiry = inquiryRows[0];
+
+    const email = await getReceivedEmail(event.data.email_id);
+    const text = email.text ?? stripHtml(email.html ?? '');
+
+    let rows;
+    try {
+      ({ rows } = await pool.query(
+        `INSERT INTO event_inquiry_message (event_inquiry_id, direction, body, resend_email_id)
+         VALUES ($1, 'inbound', $2, $3) RETURNING *`,
+        [inquiry.id, text, event.data.email_id]
+      ));
+    } catch (err) {
+      if (err.code === '23505') return res.status(200).end();
+      throw err;
+    }
+
+    publishNewReply(inquiry.property_id, { inquiry_id: inquiry.id, name: inquiry.name, message: rows[0] })
+      .catch((err) => console.error('Ably publish failed:', err.message));
+
+    res.status(200).end();
+  } catch (err) { next(err); }
+}
+
+module.exports = { listInquiries, createInquiry, updateInquiry, listReplies, createReply, handleResendInboundWebhook };

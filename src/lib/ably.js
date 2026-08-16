@@ -30,4 +30,10 @@ async function publishOrderStatusChanged(restaurantId, payload) {
   await channel.publish('order-status-changed', payload);
 }
 
-module.exports = { publishNewInquiry, publishNewOrder, publishOrderStatusChanged, client };
+async function publishNewReply(propertyId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:inquiries`);
+  await channel.publish('new-reply', payload);
+}
+
+module.exports = { publishNewInquiry, publishNewOrder, publishOrderStatusChanged, publishNewReply, client };

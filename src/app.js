@@ -27,8 +27,19 @@ const mcpRoutes = require('./routes/mcp');
 
 const app = express();
 
+const { handleResendInboundWebhook } = require('./controllers/eventInquiries');
+
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
+
+// Must come before express.json() -- Svix verification needs the raw
+// body, and this scopes that requirement to exactly this one path.
+app.post(
+  '/api/event-inquiries/webhooks/resend-inbound',
+  express.raw({ type: 'application/json' }),
+  handleResendInboundWebhook
+);
+
 app.use(express.json());
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
