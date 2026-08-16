@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { publishNewOrder, publishOrderStatusChanged, client: ablyClient } = require('../lib/ably');
 
 // ── Menu items ────────────────────────────────────────────────────────────────
 
@@ -208,6 +209,7 @@ async function createOrder(req, res, next) {
       }
 
       await client.query('COMMIT');
+      publishNewOrder(restaurant_id, { ...order[0], items: resolvedItems }).catch((err) => console.error('Ably publish failed:', err.message));
       res.status(201).json({ ...order[0], items: resolvedItems });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -230,6 +232,7 @@ async function updateOrderStatus(req, res, next) {
       [status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
+    publishOrderStatusChanged(rows[0].restaurant_id, { id: rows[0].id, status: rows[0].status, restaurant_id: rows[0].restaurant_id }).catch((err) => console.error('Ably publish failed:', err.message));
     res.json(rows[0]);
   } catch (err) { next(err); }
 }
