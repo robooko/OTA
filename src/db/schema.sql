@@ -496,9 +496,18 @@ CREATE INDEX IF NOT EXISTS idx_restaurant_order_restaurant ON restaurant_order(r
 
 -- ── Pro Shop ──────────────────────────────────────────────────────────────────
 
+CREATE TABLE IF NOT EXISTS shop (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID         NOT NULL REFERENCES property(id),
+  name        VARCHAR(100) NOT NULL,
+  description TEXT,
+  status      VARCHAR(20)  DEFAULT 'active'
+);
+
 CREATE TABLE IF NOT EXISTS proshop_item (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id UUID          NOT NULL REFERENCES property(id),
+  shop_id     UUID          REFERENCES shop(id),
   name        VARCHAR(100)  NOT NULL,
   description TEXT,
   category    VARCHAR(50),
@@ -518,4 +527,6 @@ CREATE TABLE IF NOT EXISTS golf_booking_item (
 
 CREATE INDEX IF NOT EXISTS idx_golf_booking_item          ON golf_booking_item(booking_id);
 CREATE INDEX IF NOT EXISTS idx_golf_booking_item_property ON golf_booking_item(property_id);
-CREATE INDEX IF NOT EXISTS idx_proshop_item_property      ON proshop_item(property_id);
+CREATE INDEX IF NOT EXISTS idx_shop_property               ON shop(property_id);
+CREATE INDEX IF NOT EXISTS idx_proshop_item_property        ON proshop_item(property_id);
+CREATE INDEX IF NOT EXISTS idx_proshop_item_shop            ON proshop_item(shop_id);
