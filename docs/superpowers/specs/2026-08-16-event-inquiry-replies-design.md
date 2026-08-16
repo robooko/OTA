@@ -16,15 +16,19 @@ living wherever the thing that actually calls Ably lives).
 
 Confirmed with the user:
 - Two-way threaded conversation, not a one-off transactional email.
-- Reply-to addressing per inquiry (`inquiry+{id}@replies.forge-build.co.uk`)
+- Reply-to addressing per inquiry (`inquiry+{id}@replies.hotal.forge-build.co.uk`)
   to route inbound mail back to the right thread — simpler and more
   reliable than relying on email client threading headers.
-- A dedicated `replies.forge-build.co.uk` subdomain for inbound.
-  `forge-build.co.uk` itself is verified in Resend for sending only
-  (`receiving: disabled`, confirmed via `resend domains list`), and Resend's
-  own guidance is to use a subdomain for receiving rather than a domain
-  that already has other mail flowing to it.
-- Per-property sender name: `"{property.name} via Forge <inquiries@forge-build.co.uk>"`.
+- A dedicated `replies.hotal.forge-build.co.uk` subdomain for inbound, under
+  a separate Resend account/API key (`RESEND_HOTAL_API_KEY`'s account) from
+  the one backing the root `forge-build.co.uk` domain. Revised mid-implementation:
+  `hotal.forge-build.co.uk` matches the product's actual branding
+  (`hotal-ui`, `accounts.hotal.forge-build.co.uk` already in use for Clerk),
+  and is already verified in its own account for sending only
+  (`receiving: disabled`, confirmed via `resend domains list`); Resend's own
+  guidance is to use a subdomain for receiving rather than a domain that
+  already has other mail flowing to it, which still applies here.
+- Per-property sender name: `"{property.name} via Forge <inquiries@hotal.forge-build.co.uk>"`.
 - Sending the first reply auto-flips `status` from `new` to `contacted`.
 - An inbound reply publishes a realtime `new-reply` Ably event on the same
   per-property channel `new-inquiry` already uses, so the dashboard can
@@ -229,9 +233,9 @@ if (process.env.RESEND_API_KEY) {
 async function sendReply(inquiry, propertyName, body) {
   if (!client) throw new Error('Resend not configured');
   const { data, error } = await client.emails.send({
-    from: `${propertyName} via Forge <inquiries@forge-build.co.uk>`,
+    from: `${propertyName} via Forge <inquiries@hotal.forge-build.co.uk>`,
     to: inquiry.email,
-    reply_to: `inquiry+${inquiry.id}@replies.forge-build.co.uk`,
+    reply_to: `inquiry+${inquiry.id}@replies.hotal.forge-build.co.uk`,
     subject: 'Re: Your event inquiry',
     text: body,
   });
@@ -324,17 +328,24 @@ app.use('/api/event-inquiries', eventInquiryRoutes);
 
 New env vars, in `OTA/.env` and OTA's Render env (not
 `ota-table-bookings` — Resend is never called from the frontend):
-- `RESEND_API_KEY` — moved from `ota-table-bookings/.env`, same value.
+- `RESEND_API_KEY` — moved from `ota-table-bookings/.env`, the
+  `hotal.forge-build.co.uk` account's key (`RESEND_HOTAL_API_KEY` in that
+  repo's `.env`), not the root `forge-build.co.uk` account's key.
 - `RESEND_WEBHOOK_SECRET` — from the Resend dashboard/CLI once the webhook
   (step 2 below) is created.
 
 Manual one-time account setup, via the `resend` CLI (installed locally
 this session) or the dashboard — done once this plan is approved, before
-deploying:
+deploying. Both accounts (root and `hotal.` subdomain) are on Resend's free
+tier, capped at 1 domain each, already occupied by their respective
+sending-only domain — adding a receiving domain requires the Pro plan
+($20/mo, 10 domains) on whichever account backs this feature; confirmed
+with the user this is a known, accepted upcoming cost, not a blocker to
+finishing the rest of this plan first:
 
-1. Add `replies.forge-build.co.uk` as a receiving domain in Resend
-   (`resend domains create --domain replies.forge-build.co.uk` or via the
-   dashboard) and add the MX record it returns to DNS.
+1. Add `replies.hotal.forge-build.co.uk` as a receiving domain in Resend
+   (`resend domains create --name replies.hotal.forge-build.co.uk --receiving`
+   or via the dashboard) and add the MX record it returns to DNS.
 2. Create a webhook subscribed to the `email.received` event, endpoint URL
    `https://ota-u6ii.onrender.com/api/event-inquiries/webhooks/resend-inbound`;
    copy its signing secret into `RESEND_WEBHOOK_SECRET`.
