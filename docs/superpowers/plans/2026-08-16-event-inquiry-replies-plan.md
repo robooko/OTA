@@ -33,7 +33,7 @@
 - `RESEND_API_KEY`: the same value already sitting in `ota-table-bookings/.env` gets copied into `OTA/.env` for local dev (confirmed with the user during brainstorming — Resend is never called from the frontend, so it's relocating, not duplicating). Read it directly from that file rather than asking the user to retype it.
 - The `resend` CLI is already installed locally (`npm i -g resend-cli`, binary name `resend`) and can read `RESEND_API_KEY` from the environment per-command (`RESEND_API_KEY=... resend domains list --json`) without persisting login.
 - Before any local verification block, confirm the dev server is responding: `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/docs.json --max-time 3` should print `200`. No auto-restart — kill and restart `npm start` (as a background task) after any controller/route/`app.js`/`.env` change.
-- **Scope:** exactly `event_inquiry_message`, the two `/replies` routes, the inbound webhook route, `src/lib/resend.js`, and the two new `src/lib/ably.js` exports it doesn't need (none — no Ably changes in this plan). No change to any other module.
+- **Scope:** exactly `event_inquiry_message`, the two `/replies` routes, the inbound webhook route, `src/lib/resend.js`, and one new `src/lib/ably.js` export (`publishNewReply`, added in Task 4 for the webhook handler to call). No change to any other module.
 
 ---
 
