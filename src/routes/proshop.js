@@ -1,15 +1,15 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/proshop');
-const { requireApiKey } = require('../middleware/apiKey');
+const { authenticate } = require('../middleware/auth');
 
 // Catalogue
-router.get('/items', ctrl.listItems);
-router.post('/items', requireApiKey, ctrl.createItem);
-router.put('/items/:id', requireApiKey, ctrl.updateItem);
+router.get('/items', authenticate, ctrl.listItems);
+router.post('/items', authenticate, ctrl.createItem);
+router.put('/items/:id', authenticate, ctrl.updateItem);
 
 // Booking items
-router.get('/booking/:booking_id', requireApiKey, ctrl.listBookingItems);
-router.post('/booking/:booking_id', requireApiKey, ctrl.addBookingItem);
-router.delete('/booking/:booking_id/:id', requireApiKey, ctrl.removeBookingItem);
+router.get('/booking/:booking_id', authenticate, ctrl.listBookingItems);
+router.post('/booking/:booking_id', authenticate, ctrl.addBookingItem);
+router.delete('/booking/:booking_id/:id', authenticate, ctrl.removeBookingItem);
 
 module.exports = router;
