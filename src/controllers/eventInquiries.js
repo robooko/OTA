@@ -112,13 +112,27 @@ async function handleResendInboundWebhook(req, res, next) {
 
     if (event.type !== 'email.received') return res.status(200).end();
 
-    const toAddress = event.data.to?.[0] ?? '';
-    const match = toAddress.match(/^inquiry\+([0-9a-f-]{36})@/i);
-    if (!match) return res.status(200).end();
+    const candidateAddresses = [
+      ...(event.data.received_for ?? []),
+      ...(event.data.to ?? []),
+      ...(event.data.cc ?? []),
+    ];
+    const uuidRegex = /^inquiry\+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})@/i;
+    let inquiryId = null;
+    for (const addr of candidateAddresses) {
+      const match = addr.match(uuidRegex);
+      if (match) { inquiryId = match[1]; break; }
+    }
+    if (!inquiryId) {
+      console.warn('Resend inbound webhook: no recognized inquiry address in', candidateAddresses);
+      return res.status(200).end();
+    }
 
-    const inquiryId = match[1];
     const { rows: inquiryRows } = await pool.query('SELECT * FROM event_inquiry WHERE id = $1', [inquiryId]);
-    if (!inquiryRows.length) return res.status(200).end();
+    if (!inquiryRows.length) {
+      console.warn('Resend inbound webhook: no matching inquiry for id', inquiryId);
+      return res.status(200).end();
+    }
     const inquiry = inquiryRows[0];
 
     const email = await getReceivedEmail(event.data.email_id);

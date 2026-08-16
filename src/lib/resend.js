@@ -10,7 +10,7 @@ async function sendReply(inquiry, propertyName, body) {
   const { data, error } = await client.emails.send({
     from: `${propertyName} via Forge <inquiries@hotal.forge-build.co.uk>`,
     to: inquiry.email,
-    reply_to: `inquiry+${inquiry.id}@replies.hotal.forge-build.co.uk`,
+    reply_to: `inquiry+${inquiry.id}@${process.env.RESEND_REPLY_DOMAIN}`,
     subject: 'Re: Your event inquiry',
     text: body,
   });
