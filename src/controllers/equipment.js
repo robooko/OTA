@@ -9,6 +9,8 @@ async function listEquipment(req, res, next) {
     let query = "SELECT * FROM equipment WHERE status = 'active'";
     const params = [];
     if (type) { params.push(type); query += ` AND type = $${params.length}`; }
+    params.push(req.property_id);
+    query += ` AND property_id = $${params.length}`;
     query += ' ORDER BY name';
     const { rows } = await pool.query(query, params);
     res.json(rows);
@@ -22,9 +24,9 @@ async function createEquipment(req, res, next) {
       return res.status(400).json({ error: 'name, type, and quantity are required' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO equipment (name, type, description, quantity, price_per_day, price_per_hour)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [name, type, description ?? null, quantity, price_per_day ?? null, price_per_hour ?? null]
+      `INSERT INTO equipment (property_id, name, type, description, quantity, price_per_day, price_per_hour)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.property_id, name, type, description ?? null, quantity, price_per_day ?? null, price_per_hour ?? null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -42,8 +44,8 @@ async function updateEquipment(req, res, next) {
          price_per_day  = COALESCE($5, price_per_day),
          price_per_hour = COALESCE($6, price_per_hour),
          status         = COALESCE($7, status)
-       WHERE id = $8 RETURNING *`,
-      [name, type, description, quantity, price_per_day, price_per_hour, status, req.params.id]
+       WHERE id = $8 AND property_id = $9 RETURNING *`,
+      [name, type, description, quantity, price_per_day, price_per_hour, status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Equipment not found' });
     res.json(rows[0]);
@@ -62,10 +64,10 @@ async function searchEquipment(req, res, next) {
       SELECT e.*,
              e.quantity - COALESCE(SUM(eh.quantity) FILTER (WHERE eh.status != 'cancelled'), 0) AS available_quantity
       FROM equipment e
-      LEFT JOIN equipment_hire eh ON eh.equipment_id = e.id AND eh.hire_date = $1
-      WHERE e.status = 'active'
+      LEFT JOIN equipment_hire eh ON eh.equipment_id = e.id AND eh.hire_date = $1 AND eh.property_id = $2
+      WHERE e.status = 'active' AND e.property_id = $2
     `;
-    const params = [date];
+    const params = [date, req.property_id];
     if (type) { params.push(type); query += ` AND e.type = $${params.length}`; }
     query += ' GROUP BY e.id';
     if (quantity) { query += ` HAVING e.quantity - COALESCE(SUM(eh.quantity) FILTER (WHERE eh.status != 'cancelled'), 0) >= ${parseInt(quantity, 10)}`; }
@@ -79,7 +81,7 @@ async function searchEquipment(req, res, next) {
 
 async function listHires(req, res, next) {
   try {
-    const { date, status, guest_id, golf_booking_id } = req.query;
+    const { date, status, guest_id, golf_booking_id, equipment_id } = req.query;
     let query = `
       SELECT eh.*, e.name AS equipment_name, e.type, e.price_per_day, e.price_per_hour
       FROM equipment_hire eh
@@ -91,6 +93,9 @@ async function listHires(req, res, next) {
     if (status)          { params.push(status);          query += ` AND eh.status = $${params.length}`; }
     if (guest_id)        { params.push(guest_id);        query += ` AND eh.guest_id = $${params.length}`; }
     if (golf_booking_id) { params.push(golf_booking_id); query += ` AND eh.golf_booking_id = $${params.length}`; }
+    if (equipment_id)    { params.push(equipment_id);    query += ` AND eh.equipment_id = $${params.length}`; }
+    params.push(req.property_id);
+    query += ` AND eh.property_id = $${params.length}`;
     query += ' ORDER BY eh.hire_date, e.name';
     const { rows } = await pool.query(query, params);
     res.json(rows);
@@ -108,14 +113,14 @@ async function createHire(req, res, next) {
   try {
     await client.query('BEGIN');
 
-    const eqRes = await client.query('SELECT * FROM equipment WHERE id = $1', [equipment_id]);
+    const eqRes = await client.query('SELECT * FROM equipment WHERE id = $1 AND property_id = $2', [equipment_id, req.property_id]);
     if (!eqRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Equipment not found' }); }
     if (eqRes.rows[0].status !== 'active') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Equipment not available' }); }
 
     const hiredRes = await client.query(
       `SELECT COALESCE(SUM(quantity), 0) AS hired FROM equipment_hire
-       WHERE equipment_id = $1 AND hire_date = $2 AND status != 'cancelled'`,
-      [equipment_id, hire_date]
+       WHERE equipment_id = $1 AND hire_date = $2 AND status != 'cancelled' AND property_id = $3`,
+      [equipment_id, hire_date, req.property_id]
     );
     const hired = parseInt(hiredRes.rows[0].hired, 10);
     const available = eqRes.rows[0].quantity - hired;
@@ -129,9 +134,9 @@ async function createHire(req, res, next) {
     const total_price = (rate * quantity * duration).toFixed(2);
 
     const { rows } = await client.query(
-      `INSERT INTO equipment_hire (equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, start_time, quantity, rate_type, duration, notes, golf_booking_id, total_price)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
-      [equipment_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, hire_date, start_time ?? null, quantity, rate_type, duration, notes ?? null, golf_booking_id ?? null, total_price]
+      `INSERT INTO equipment_hire (property_id, equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, start_time, quantity, rate_type, duration, notes, golf_booking_id, total_price)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+      [req.property_id, equipment_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, hire_date, start_time ?? null, quantity, rate_type, duration, notes ?? null, golf_booking_id ?? null, total_price]
     );
 
     await client.query('COMMIT');
@@ -151,8 +156,8 @@ async function updateHire(req, res, next) {
       `UPDATE equipment_hire SET
          status = COALESCE($1, status),
          notes  = COALESCE($2, notes)
-       WHERE id = $3 RETURNING *`,
-      [status, notes, req.params.id]
+       WHERE id = $3 AND property_id = $4 RETURNING *`,
+      [status, notes, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Hire not found' });
     res.json(rows[0]);

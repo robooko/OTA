@@ -1,18 +1,18 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/equipment');
-const { requireApiKey } = require('../middleware/apiKey');
+const { authenticate } = require('../middleware/auth');
 
 // Equipment
-router.get('/', ctrl.listEquipment);
-router.post('/', requireApiKey, ctrl.createEquipment);
-router.put('/:id', requireApiKey, ctrl.updateEquipment);
+router.get('/', authenticate, ctrl.listEquipment);
+router.post('/', authenticate, ctrl.createEquipment);
+router.put('/:id', authenticate, ctrl.updateEquipment);
 
 // Search
-router.get('/search', ctrl.searchEquipment);
+router.get('/search', authenticate, ctrl.searchEquipment);
 
 // Hires
-router.get('/hires', requireApiKey, ctrl.listHires);
-router.post('/hires', requireApiKey, ctrl.createHire);
-router.put('/hires/:id', requireApiKey, ctrl.updateHire);
+router.get('/hires', authenticate, ctrl.listHires);
+router.post('/hires', authenticate, ctrl.createHire);
+router.put('/hires/:id', authenticate, ctrl.updateHire);
 
 module.exports = router;
