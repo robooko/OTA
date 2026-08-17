@@ -319,6 +319,24 @@ async function searchAvailability(req, res, next) {
 
 // ── Reservations ──────────────────────────────────────────────────────────────
 
+async function listAllReservations(req, res, next) {
+  try {
+    const { date, status } = req.query;
+    let query = `
+      SELECT rr.*, rt.table_number, rt.seats, rt.location, rt.restaurant_id
+      FROM restaurant_reservation rr
+      JOIN restaurant_table rt ON rt.id = rr.table_id
+      WHERE rr.property_id = $1
+    `;
+    const params = [req.property_id];
+    if (date) { params.push(date); query += ` AND rr.reservation_date = $${params.length}`; }
+    if (status) { params.push(status); query += ` AND rr.status = $${params.length}`; }
+    query += ' ORDER BY rr.created_at DESC';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) { next(err); }
+}
+
 async function listReservations(req, res, next) {
   try {
     const { restaurant_id } = req.params;
@@ -500,5 +518,6 @@ module.exports = {
   listTables, createTable, updateTable,
   listServicePeriods, setServicePeriods,
   searchAvailability,
+  listAllReservations,
   listReservations, getReservation, createReservation, updateReservation,
 };

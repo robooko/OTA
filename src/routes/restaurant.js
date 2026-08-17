@@ -4,8 +4,13 @@ const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
 
 // Restaurants
 router.get('/', authenticateOrApiKey, ctrl.listRestaurants);
-router.get('/:id', authenticateOrApiKey, ctrl.getRestaurant);
 router.post('/', authenticate, ctrl.createRestaurant);
+
+// Reservations across all of the property's restaurants -- must be registered
+// before GET /:id, otherwise Express matches "reservations" as the :id param.
+router.get('/reservations', authenticateOrApiKey, ctrl.listAllReservations);
+
+router.get('/:id', authenticateOrApiKey, ctrl.getRestaurant);
 router.put('/:id', authenticate, ctrl.updateRestaurant);
 
 // Tables
