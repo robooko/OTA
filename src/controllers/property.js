@@ -156,7 +156,10 @@ function defaultSinceUntil(since, until) {
 }
 
 // Prefers this property's own connected Vercel account (correctly scoped to
-// whoever connected) over the shared admin VERCEL_TOKEN fallback.
+// whoever connected) over the shared admin VERCEL_TOKEN fallback. Only safe
+// for endpoints like listing projects -- OAuth Integration installation
+// tokens are confirmed (see commit 0532a08) unable to read Web Analytics, so
+// analytics calls must use adminVercelAuth() below instead.
 async function resolveVercelAuth(propertyId) {
   const { rows } = await pool.query(
     'SELECT vercel_access_token, vercel_team_id FROM property WHERE id = $1',
@@ -167,6 +170,10 @@ async function resolveVercelAuth(propertyId) {
     token: own?.vercel_access_token || process.env.VERCEL_TOKEN,
     teamId: own?.vercel_access_token ? own.vercel_team_id : process.env.VERCEL_TEAM_ID,
   };
+}
+
+function adminVercelAuth() {
+  return { token: process.env.VERCEL_TOKEN, teamId: process.env.VERCEL_TEAM_ID };
 }
 
 async function fetchVercelAnalytics({ token, teamId, projectId, sinceIso, untilIso }) {
@@ -201,7 +208,7 @@ async function getWebsiteAnalytics(req, res, next) {
     const { vercel_project_id } = rows[0];
     if (!vercel_project_id) return res.status(400).json({ error: 'Website is not mapped to a Vercel project' });
 
-    const { token, teamId } = await resolveVercelAuth(req.property_id);
+    const { token, teamId } = adminVercelAuth();
     if (!token) {
       return res.status(503).json({ error: 'Vercel analytics is not configured on this server' });
     }
@@ -221,7 +228,7 @@ async function getVercelProjectAnalytics(req, res, next) {
     if (since !== undefined && !isValidDate(since)) return res.status(400).json({ error: 'since must be YYYY-MM-DD' });
     if (until !== undefined && !isValidDate(until)) return res.status(400).json({ error: 'until must be YYYY-MM-DD' });
 
-    const { token, teamId } = await resolveVercelAuth(req.property_id);
+    const { token, teamId } = adminVercelAuth();
     if (!token) {
       return res.status(503).json({ error: 'Vercel analytics is not configured on this server' });
     }
