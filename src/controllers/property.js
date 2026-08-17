@@ -198,7 +198,53 @@ async function listVercelProjects(req, res, next) {
   }
 }
 
+// One-off diagnostic: exchanges the OAuth `code` for an installation access
+// token, then immediately tries the Web Analytics endpoint with it, to
+// confirm (rather than assume) that installation tokens lack analytics
+// access. Not part of the permanent API -- remove once confirmed.
+async function vercelOauthTestCallback(req, res, next) {
+  try {
+    const { code } = req.query;
+    if (!code) return res.status(400).json({ error: 'Missing code' });
+
+    const tokenRes = await fetch(`${VERCEL_API_BASE}/v2/oauth/access_token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: process.env.VERCEL_INTEGRATION_ID,
+        client_secret: process.env.VERCEL_INTEGRATION_SECRET,
+        code,
+        redirect_uri: 'https://ota-u6ii.onrender.com/api/property/vercel/callback',
+      }),
+    });
+    const tokenBody = await tokenRes.json();
+    if (!tokenRes.ok) {
+      return res.status(502).json({ step: 'token exchange', ok: false, status: tokenRes.status, body: tokenBody });
+    }
+
+    const { access_token, team_id } = tokenBody;
+    const teamQuery = team_id ? `&teamId=${team_id}` : '';
+    const analyticsRes = await fetch(
+      `${VERCEL_API_BASE}/v1/query/web-analytics/visits/count?projectId=prj_yldy78dt6LDf3iJQ3M00FWi9E4ED&since=2026-07-18T00:00:00.000Z&until=2026-08-17T23:59:59.000Z${teamQuery}`,
+      { headers: { Authorization: `Bearer ${access_token}` } }
+    );
+    const analyticsBody = await analyticsRes.json().catch(() => null);
+
+    res.json({
+      step: 'analytics call',
+      tokenExchangeOk: true,
+      teamId: team_id,
+      analyticsCallOk: analyticsRes.ok,
+      analyticsStatus: analyticsRes.status,
+      analyticsBody,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects,
+  vercelOauthTestCallback,
 };
