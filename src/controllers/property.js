@@ -155,6 +155,38 @@ function defaultSinceUntil(since, until) {
   return { sinceIso: sinceDate.toISOString(), untilIso: untilDate.toISOString() };
 }
 
+// Prefers this property's own connected Vercel account (correctly scoped to
+// whoever connected) over the shared admin VERCEL_TOKEN fallback.
+async function resolveVercelAuth(propertyId) {
+  const { rows } = await pool.query(
+    'SELECT vercel_access_token, vercel_team_id FROM property WHERE id = $1',
+    [propertyId]
+  );
+  const own = rows[0];
+  return {
+    token: own?.vercel_access_token || process.env.VERCEL_TOKEN,
+    teamId: own?.vercel_access_token ? own.vercel_team_id : process.env.VERCEL_TEAM_ID,
+  };
+}
+
+async function fetchVercelAnalytics({ token, teamId, projectId, sinceIso, untilIso }) {
+  const headers = { Authorization: `Bearer ${token}` };
+  const teamQuery = teamId ? `&teamId=${teamId}` : '';
+  const params = `projectId=${projectId}&since=${sinceIso}&until=${untilIso}${teamQuery}`;
+
+  const [countRes, dailyRes] = await Promise.all([
+    fetch(`${VERCEL_API_BASE}/v1/query/web-analytics/visits/count?${params}`, { headers }),
+    fetch(`${VERCEL_API_BASE}/v1/query/web-analytics/visits/aggregate?${params}&by=day`, { headers }),
+  ]);
+  if (!countRes.ok || !dailyRes.ok) return null;
+  const [countBody, dailyBody] = await Promise.all([countRes.json(), dailyRes.json()]);
+  return {
+    visitors: countBody.data.visitors,
+    pageviews: countBody.data.pageviews,
+    daily: dailyBody.data.map((d) => ({ date: d.timestamp.slice(0, 10), visitors: d.visitors, pageviews: d.pageviews })),
+  };
+}
+
 async function getWebsiteAnalytics(req, res, next) {
   try {
     const { since, until } = req.query;
@@ -169,29 +201,35 @@ async function getWebsiteAnalytics(req, res, next) {
     const { vercel_project_id } = rows[0];
     if (!vercel_project_id) return res.status(400).json({ error: 'Website is not mapped to a Vercel project' });
 
-    if (!process.env.VERCEL_TOKEN) {
+    const { token, teamId } = await resolveVercelAuth(req.property_id);
+    if (!token) {
       return res.status(503).json({ error: 'Vercel analytics is not configured on this server' });
     }
 
     const { sinceIso, untilIso } = defaultSinceUntil(since, until);
-    const headers = { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` };
-    const teamQuery = process.env.VERCEL_TEAM_ID ? `&teamId=${process.env.VERCEL_TEAM_ID}` : '';
-    const params = `projectId=${vercel_project_id}&since=${sinceIso}&until=${untilIso}${teamQuery}`;
+    const analytics = await fetchVercelAnalytics({ token, teamId, projectId: vercel_project_id, sinceIso, untilIso });
+    if (!analytics) return res.status(502).json({ error: 'Failed to fetch analytics from Vercel' });
+    res.json(analytics);
+  } catch (err) {
+    next(err);
+  }
+}
 
-    const [countRes, dailyRes] = await Promise.all([
-      fetch(`${VERCEL_API_BASE}/v1/query/web-analytics/visits/count?${params}`, { headers }),
-      fetch(`${VERCEL_API_BASE}/v1/query/web-analytics/visits/aggregate?${params}&by=day`, { headers }),
-    ]);
-    if (!countRes.ok || !dailyRes.ok) {
-      return res.status(502).json({ error: 'Failed to fetch analytics from Vercel' });
+async function getVercelProjectAnalytics(req, res, next) {
+  try {
+    const { since, until } = req.query;
+    if (since !== undefined && !isValidDate(since)) return res.status(400).json({ error: 'since must be YYYY-MM-DD' });
+    if (until !== undefined && !isValidDate(until)) return res.status(400).json({ error: 'until must be YYYY-MM-DD' });
+
+    const { token, teamId } = await resolveVercelAuth(req.property_id);
+    if (!token) {
+      return res.status(503).json({ error: 'Vercel analytics is not configured on this server' });
     }
-    const [countBody, dailyBody] = await Promise.all([countRes.json(), dailyRes.json()]);
 
-    res.json({
-      visitors: countBody.data.visitors,
-      pageviews: countBody.data.pageviews,
-      daily: dailyBody.data.map((d) => ({ date: d.timestamp.slice(0, 10), visitors: d.visitors, pageviews: d.pageviews })),
-    });
+    const { sinceIso, untilIso } = defaultSinceUntil(since, until);
+    const analytics = await fetchVercelAnalytics({ token, teamId, projectId: req.params.projectId, sinceIso, untilIso });
+    if (!analytics) return res.status(502).json({ error: 'Failed to fetch analytics from Vercel' });
+    res.json(analytics);
   } catch (err) {
     next(err);
   }
@@ -199,16 +237,7 @@ async function getWebsiteAnalytics(req, res, next) {
 
 async function listVercelProjects(req, res, next) {
   try {
-    // Prefer this property's own connected account (correctly scoped to
-    // whoever connected) over the shared admin VERCEL_TOKEN fallback.
-    const { rows } = await pool.query(
-      'SELECT vercel_access_token, vercel_team_id FROM property WHERE id = $1',
-      [req.property_id]
-    );
-    const own = rows[0];
-
-    const token = own?.vercel_access_token || process.env.VERCEL_TOKEN;
-    const teamId = own?.vercel_access_token ? own.vercel_team_id : process.env.VERCEL_TEAM_ID;
+    const { token, teamId } = await resolveVercelAuth(req.property_id);
     if (!token) {
       return res.status(503).json({ error: 'Vercel analytics is not configured on this server' });
     }
@@ -295,6 +324,6 @@ async function disconnectVercel(req, res, next) {
 
 module.exports = {
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
-  listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects,
+  listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,
 };

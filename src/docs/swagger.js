@@ -189,6 +189,9 @@ const swaggerSpec = {
     '/api/property/vercel/projects': {
       get: { tags: ['Property'], summary: "List the connected Vercel account's projects (id, name) for the website-mapping picker", responses: { 200: { description: 'Array of { id, name }' }, 503: { description: 'Server not configured with VERCEL_TOKEN' } } },
     },
+    '/api/property/vercel/projects/{projectId}/analytics': {
+      get: { tags: ['Property'], summary: "Get a Vercel project's Web Analytics directly by project ID, without a property_website mapping", security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'projectId', in: 'path', required: true, schema: { type: 'string' } }, { name: 'since', in: 'query', schema: { type: 'string', format: 'date' }, description: 'Defaults to 30 days before until' }, { name: 'until', in: 'query', schema: { type: 'string', format: 'date' }, description: 'Defaults to today' }], responses: { 200: { description: 'visitors, pageviews, and a daily breakdown' }, 400: { description: 'Invalid date' }, 502: { description: 'Vercel API request failed' }, 503: { description: 'Server not configured with VERCEL_TOKEN' } } },
+    },
     '/api/property/vercel/connect': {
       get: { tags: ['Property'], summary: 'Get the URL to start the Vercel Integration install flow for the current property', responses: { 200: { description: '{ url }' } } },
     },
