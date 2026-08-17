@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS property (
   timezone         VARCHAR(50)  NOT NULL DEFAULT 'Europe/London',
   vercel_team_id       VARCHAR(100),
   vercel_connected_at  TIMESTAMPTZ,
+  vercel_access_token  TEXT, -- "Projects: Read" scope only -- confirmed can't read Web Analytics
   created_at       TIMESTAMPTZ  DEFAULT now()
 );
 

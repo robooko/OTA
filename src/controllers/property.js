@@ -199,11 +199,21 @@ async function getWebsiteAnalytics(req, res, next) {
 
 async function listVercelProjects(req, res, next) {
   try {
-    if (!process.env.VERCEL_TOKEN) {
+    // Prefer this property's own connected account (correctly scoped to
+    // whoever connected) over the shared admin VERCEL_TOKEN fallback.
+    const { rows } = await pool.query(
+      'SELECT vercel_access_token, vercel_team_id FROM property WHERE id = $1',
+      [req.property_id]
+    );
+    const own = rows[0];
+
+    const token = own?.vercel_access_token || process.env.VERCEL_TOKEN;
+    const teamId = own?.vercel_access_token ? own.vercel_team_id : process.env.VERCEL_TEAM_ID;
+    if (!token) {
       return res.status(503).json({ error: 'Vercel analytics is not configured on this server' });
     }
-    const headers = { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` };
-    const teamQuery = process.env.VERCEL_TEAM_ID ? `&teamId=${process.env.VERCEL_TEAM_ID}` : '';
+    const headers = { Authorization: `Bearer ${token}` };
+    const teamQuery = teamId ? `&teamId=${teamId}` : '';
     const vercelRes = await fetch(`${VERCEL_API_BASE}/v9/projects?limit=100${teamQuery}`, { headers });
     if (!vercelRes.ok) {
       return res.status(502).json({ error: 'Failed to fetch projects from Vercel' });
@@ -246,8 +256,8 @@ async function vercelConnectCallback(req, res, next) {
     }
 
     await pool.query(
-      'UPDATE property SET vercel_team_id = $1, vercel_connected_at = now() WHERE id = $2',
-      [tokenBody.team_id ?? null, propertyId]
+      'UPDATE property SET vercel_team_id = $1, vercel_access_token = $2, vercel_connected_at = now() WHERE id = $3',
+      [tokenBody.team_id ?? null, tokenBody.access_token ?? null, propertyId]
     );
 
     // Vercel gives us `next` to send the user back to close out its own UI.
@@ -274,7 +284,7 @@ async function getVercelConnectionStatus(req, res, next) {
 async function disconnectVercel(req, res, next) {
   try {
     await pool.query(
-      'UPDATE property SET vercel_team_id = NULL, vercel_connected_at = NULL WHERE id = $1',
+      'UPDATE property SET vercel_team_id = NULL, vercel_access_token = NULL, vercel_connected_at = NULL WHERE id = $1',
       [req.property_id]
     );
     res.json({ connected: false });
