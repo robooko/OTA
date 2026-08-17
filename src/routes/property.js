@@ -11,7 +11,6 @@ router.post('/api-key/disable', authenticate, requireRole('admin'), ctrl.disable
 router.post('/api-key/enable', authenticate, requireRole('admin'), ctrl.enableApiKey);
 
 router.get('/vercel/projects', authenticate, ctrl.listVercelProjects);
-router.get('/vercel/callback', ctrl.vercelOauthTestCallback);
 
 router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
 router.post('/websites', authenticate, ctrl.createWebsite);
