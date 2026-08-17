@@ -33,4 +33,13 @@ function isValidTimezone(str) {
   }
 }
 
-module.exports = { requireFields, isValidDate, isValidUuid, isValidTime, isValidCurrencyCode, isValidTimezone };
+function isValidUrl(str) {
+  try {
+    const url = new URL(str);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { requireFields, isValidDate, isValidUuid, isValidTime, isValidCurrencyCode, isValidTimezone, isValidUrl };

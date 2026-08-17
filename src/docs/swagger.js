@@ -186,6 +186,13 @@ const swaggerSpec = {
     '/api/property/api-key/enable': {
       post: { tags: ['Property'], summary: "Re-enable the current property's API key (admin only) — restores access using the same key value", responses: { 200: { description: 'Current key and enabled state (true)', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' }, api_key_enabled: { type: 'boolean' } } } } } }, 403: { description: 'Insufficient permissions' } } },
     },
+    '/api/property/websites': {
+      get: { tags: ['Property'], summary: "List the current property's websites", security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], responses: { 200: { description: 'Array of websites' } } },
+      post: { tags: ['Property'], summary: 'Add a website to the current property', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['url'], properties: { url: { type: 'string', example: 'https://bonito-eta.vercel.app' }, label: { type: 'string', example: 'Bonito' } } } } } }, responses: { 201: { description: 'Created' }, 400: { description: 'Missing or invalid url' } } },
+    },
+    '/api/property/websites/{id}': {
+      put: { tags: ['Property'], summary: 'Update a website (url, label, or status)', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { url: { type: 'string' }, label: { type: 'string' }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Website not found' } } },
+    },
 
     // ── Guests ──────────────────────────────────────────────────────────────
     '/api/guests': {

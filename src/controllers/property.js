@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const pool = require('../db');
-const { isValidCurrencyCode, isValidTimezone } = require('../middleware/validate');
+const { isValidCurrencyCode, isValidTimezone, isValidUrl } = require('../middleware/validate');
 
 function generateApiKey() {
   return 'prop_' + crypto.randomBytes(32).toString('hex');
@@ -80,4 +80,55 @@ async function enableApiKey(req, res, next) {
   }
 }
 
-module.exports = { getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey };
+async function listWebsites(req, res, next) {
+  try {
+    const { rows } = await pool.query(
+      "SELECT id, url, label FROM property_website WHERE property_id = $1 AND status = 'active' ORDER BY created_at",
+      [req.property_id]
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function createWebsite(req, res, next) {
+  try {
+    const { url, label } = req.body;
+    if (!url) return res.status(400).json({ error: 'url is required' });
+    if (!isValidUrl(url)) return res.status(400).json({ error: 'url must be a valid http(s) URL' });
+    const { rows } = await pool.query(
+      'INSERT INTO property_website (property_id, url, label) VALUES ($1, $2, $3) RETURNING id, url, label',
+      [req.property_id, url, label ?? null]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateWebsite(req, res, next) {
+  try {
+    const { url, label, status } = req.body;
+    if (url !== undefined && !isValidUrl(url)) {
+      return res.status(400).json({ error: 'url must be a valid http(s) URL' });
+    }
+    const { rows } = await pool.query(
+      `UPDATE property_website SET
+         url    = COALESCE($1, url),
+         label  = COALESCE($2, label),
+         status = COALESCE($3, status)
+       WHERE id = $4 AND property_id = $5 RETURNING id, url, label, status`,
+      [url, label, status, req.params.id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Website not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = {
+  getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
+  listWebsites, createWebsite, updateWebsite,
+};

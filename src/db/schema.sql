@@ -18,6 +18,15 @@ CREATE TABLE IF NOT EXISTS property (
   created_at       TIMESTAMPTZ  DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS property_website (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id  UUID        NOT NULL REFERENCES property(id),
+  url          TEXT        NOT NULL,
+  label        VARCHAR(100),
+  status       VARCHAR(20) DEFAULT 'active',
+  created_at   TIMESTAMPTZ DEFAULT now()
+);
+
 -- Guests
 CREATE TABLE IF NOT EXISTS guest (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
