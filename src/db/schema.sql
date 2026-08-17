@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS property (
   api_key          TEXT UNIQUE,
   api_key_enabled  BOOLEAN NOT NULL DEFAULT true,
   currency         VARCHAR(3)   NOT NULL DEFAULT 'GBP',
+  timezone         VARCHAR(50)  NOT NULL DEFAULT 'Europe/London',
   created_at       TIMESTAMPTZ  DEFAULT now()
 );
 

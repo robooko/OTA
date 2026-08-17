@@ -7,22 +7,34 @@ function generateApiKey() {
 
 async function getCurrentProperty(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT id, name, currency FROM property WHERE id = $1', [req.property_id]);
+    const { rows } = await pool.query('SELECT id, name, currency, timezone FROM property WHERE id = $1', [req.property_id]);
     res.json(rows[0]);
   } catch (err) {
     next(err);
   }
 }
 
+function isValidTimezone(tz) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function updateCurrentProperty(req, res, next) {
   try {
-    const { currency } = req.body;
+    const { currency, timezone } = req.body;
     if (currency !== undefined && !/^[A-Z]{3}$/.test(currency)) {
       return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP)' });
     }
+    if (timezone !== undefined && !isValidTimezone(timezone)) {
+      return res.status(400).json({ error: 'timezone must be a valid IANA timezone name (e.g. Europe/London)' });
+    }
     const { rows } = await pool.query(
-      'UPDATE property SET currency = COALESCE($1, currency) WHERE id = $2 RETURNING id, name, currency',
-      [currency, req.property_id]
+      'UPDATE property SET currency = COALESCE($1, currency), timezone = COALESCE($2, timezone) WHERE id = $3 RETURNING id, name, currency, timezone',
+      [currency, timezone, req.property_id]
     );
     res.json(rows[0]);
   } catch (err) {
