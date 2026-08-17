@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const pool = require('../db');
+const { isValidCurrencyCode, isValidTimezone } = require('../middleware/validate');
 
 function generateApiKey() {
   return 'prop_' + crypto.randomBytes(32).toString('hex');
@@ -14,19 +15,10 @@ async function getCurrentProperty(req, res, next) {
   }
 }
 
-function isValidTimezone(tz) {
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function updateCurrentProperty(req, res, next) {
   try {
     const { currency, timezone } = req.body;
-    if (currency !== undefined && !/^[A-Z]{3}$/.test(currency)) {
+    if (currency !== undefined && !isValidCurrencyCode(currency)) {
       return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP)' });
     }
     if (timezone !== undefined && !isValidTimezone(timezone)) {

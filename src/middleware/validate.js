@@ -20,4 +20,17 @@ function isValidTime(str) {
   return /^([01]\d|2[0-3]):[0-5]\d$/.test(str);
 }
 
-module.exports = { requireFields, isValidDate, isValidUuid, isValidTime };
+function isValidCurrencyCode(str) {
+  return /^[A-Z]{3}$/.test(str);
+}
+
+function isValidTimezone(str) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: str });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { requireFields, isValidDate, isValidUuid, isValidTime, isValidCurrencyCode, isValidTimezone };

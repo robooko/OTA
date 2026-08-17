@@ -172,6 +172,8 @@ CREATE TABLE IF NOT EXISTS restaurant (
   default_duration_minutes  INT          NOT NULL,
   closed_days               SMALLINT[]   NOT NULL DEFAULT '{}',
   status                    VARCHAR(20)  DEFAULT 'active',
+  currency                  VARCHAR(3),  -- NULL = inherit property.currency
+  timezone                  VARCHAR(50), -- NULL = inherit property.timezone
   created_at                TIMESTAMPTZ DEFAULT now()
 );
 

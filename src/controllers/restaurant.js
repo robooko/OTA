@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { isValidDate, isValidTime } = require('../middleware/validate');
+const { isValidDate, isValidTime, isValidCurrencyCode, isValidTimezone } = require('../middleware/validate');
 
 function addMinutesToTime(timeStr, minutesToAdd) {
   const [h, m] = timeStr.split(':').map(Number);
@@ -47,17 +47,23 @@ async function getRestaurant(req, res, next) {
 
 async function createRestaurant(req, res, next) {
   try {
-    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone } = req.body;
     if (!name || !default_duration_minutes) {
       return res.status(400).json({ error: 'name and default_duration_minutes are required' });
     }
     if (closed_days !== undefined && !isValidClosedDays(closed_days)) {
       return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
     }
+    if (currency !== undefined && !isValidCurrencyCode(currency)) {
+      return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP)' });
+    }
+    if (timezone !== undefined && !isValidTimezone(timezone)) {
+      return res.status(400).json({ error: 'timezone must be a valid IANA timezone name (e.g. Europe/London)' });
+    }
     const { rows } = await pool.query(
-      `INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? []]
+      `INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? [], currency ?? null, timezone ?? null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -65,9 +71,15 @@ async function createRestaurant(req, res, next) {
 
 async function updateRestaurant(req, res, next) {
   try {
-    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone } = req.body;
     if (closed_days !== undefined && !isValidClosedDays(closed_days)) {
       return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
+    }
+    if (currency !== undefined && !isValidCurrencyCode(currency)) {
+      return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP)' });
+    }
+    if (timezone !== undefined && !isValidTimezone(timezone)) {
+      return res.status(400).json({ error: 'timezone must be a valid IANA timezone name (e.g. Europe/London)' });
     }
     const { rows } = await pool.query(
       `UPDATE restaurant SET
@@ -77,9 +89,11 @@ async function updateRestaurant(req, res, next) {
          slot_interval_minutes    = COALESCE($4, slot_interval_minutes),
          default_duration_minutes = COALESCE($5, default_duration_minutes),
          closed_days              = COALESCE($6, closed_days),
-         status                   = COALESCE($7, status)
-       WHERE id = $8 AND property_id = $9 RETURNING *`,
-      [name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, req.params.id, req.property_id]
+         status                   = COALESCE($7, status),
+         currency                 = COALESCE($8, currency),
+         timezone                 = COALESCE($9, timezone)
+       WHERE id = $10 AND property_id = $11 RETURNING *`,
+      [name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
     res.json(rows[0]);
