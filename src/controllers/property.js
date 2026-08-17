@@ -8,16 +8,17 @@ const VERCEL_CALLBACK_URL = 'https://ota-u6ii.onrender.com/api/property/vercel/c
 
 // Signs property_id into the OAuth `state` param so the callback (which
 // Vercel calls directly, with no Clerk session) can trust which property to
-// mark connected. In-memory secret is fine -- the round trip is seconds long.
-const STATE_SECRET = crypto.randomBytes(32);
+// mark connected. Reuses VERCEL_INTEGRATION_SECRET (already required to be
+// present here) rather than a per-process random value, so state survives
+// server restarts/redeploys between the connect click and the callback.
 function signState(propertyId) {
-  const sig = crypto.createHmac('sha256', STATE_SECRET).update(propertyId).digest('hex');
+  const sig = crypto.createHmac('sha256', process.env.VERCEL_INTEGRATION_SECRET).update(propertyId).digest('hex');
   return `${propertyId}.${sig}`;
 }
 function verifyState(state) {
   const [propertyId, sig] = String(state ?? '').split('.');
   if (!propertyId || !sig) return null;
-  const expected = crypto.createHmac('sha256', STATE_SECRET).update(propertyId).digest('hex');
+  const expected = crypto.createHmac('sha256', process.env.VERCEL_INTEGRATION_SECRET).update(propertyId).digest('hex');
   return sig === expected ? propertyId : null;
 }
 
