@@ -13,5 +13,6 @@ router.post('/api-key/enable', authenticate, requireRole('admin'), ctrl.enableAp
 router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
 router.post('/websites', authenticate, ctrl.createWebsite);
 router.put('/websites/:id', authenticate, ctrl.updateWebsite);
+router.get('/websites/:id/analytics', authenticateOrApiKey, ctrl.getWebsiteAnalytics);
 
 module.exports = router;

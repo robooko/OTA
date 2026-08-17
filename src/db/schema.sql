@@ -19,12 +19,13 @@ CREATE TABLE IF NOT EXISTS property (
 );
 
 CREATE TABLE IF NOT EXISTS property_website (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  property_id  UUID        NOT NULL REFERENCES property(id),
-  url          TEXT        NOT NULL,
-  label        VARCHAR(100),
-  status       VARCHAR(20) DEFAULT 'active',
-  created_at   TIMESTAMPTZ DEFAULT now()
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id        UUID        NOT NULL REFERENCES property(id),
+  url                TEXT        NOT NULL,
+  label              VARCHAR(100),
+  vercel_project_id  VARCHAR(100), -- NULL = not mapped, no analytics available
+  status             VARCHAR(20) DEFAULT 'active',
+  created_at         TIMESTAMPTZ DEFAULT now()
 );
 
 -- Guests

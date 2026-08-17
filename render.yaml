@@ -13,3 +13,7 @@ services:
         sync: false # set manually in the Render dashboard
       - key: API_KEY
         sync: false # set manually in the Render dashboard
+      - key: VERCEL_TOKEN
+        sync: false # set manually in the Render dashboard -- a Vercel personal access token, scoped to the robert-okoroafors-projects team
+      - key: VERCEL_TEAM_ID
+        value: team_IcqvHykk4CZRv090ChuNAzyT
