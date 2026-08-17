@@ -179,7 +179,26 @@ async function getWebsiteAnalytics(req, res, next) {
   }
 }
 
+async function listVercelProjects(req, res, next) {
+  try {
+    if (!process.env.VERCEL_TOKEN) {
+      return res.status(503).json({ error: 'Vercel analytics is not configured on this server' });
+    }
+    const headers = { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` };
+    const teamQuery = process.env.VERCEL_TEAM_ID ? `&teamId=${process.env.VERCEL_TEAM_ID}` : '';
+    const vercelRes = await fetch(`${VERCEL_API_BASE}/v9/projects?limit=100${teamQuery}`, { headers });
+    if (!vercelRes.ok) {
+      return res.status(502).json({ error: 'Failed to fetch projects from Vercel' });
+    }
+    const body = await vercelRes.json();
+    const projects = (body.projects ?? []).map((p) => ({ id: p.id, name: p.name })).sort((a, b) => a.name.localeCompare(b.name));
+    res.json(projects);
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
-  listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics,
+  listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects,
 };

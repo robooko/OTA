@@ -10,6 +10,8 @@ router.post('/api-key/rotate', authenticate, requireRole('admin'), ctrl.rotateAp
 router.post('/api-key/disable', authenticate, requireRole('admin'), ctrl.disableApiKey);
 router.post('/api-key/enable', authenticate, requireRole('admin'), ctrl.enableApiKey);
 
+router.get('/vercel/projects', authenticate, ctrl.listVercelProjects);
+
 router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
 router.post('/websites', authenticate, ctrl.createWebsite);
 router.put('/websites/:id', authenticate, ctrl.updateWebsite);
