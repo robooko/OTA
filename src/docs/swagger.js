@@ -196,10 +196,16 @@ const swaggerSpec = {
       get: { tags: ['Property'], summary: 'Get the URL to start the Vercel Integration install flow for the current property', responses: { 200: { description: '{ url }' } } },
     },
     '/api/property/vercel/status': {
-      get: { tags: ['Property'], summary: "Whether the current property has completed the Vercel Integration install flow (note: this tracks installation status only -- installation tokens can't read Web Analytics)", responses: { 200: { description: '{ connected, teamId, connectedAt }' } } },
+      get: { tags: ['Property'], summary: "Whether the current property has completed the Vercel Integration install flow, and whether an analytics-capable PAT is configured (note: install-flow connection tracks installation status only -- installation tokens can't read Web Analytics)", responses: { 200: { description: '{ connected, teamId, connectedAt, analyticsPatConfigured }' } } },
     },
     '/api/property/vercel/disconnect': {
       post: { tags: ['Property'], summary: 'Clear the stored Vercel connection status for the current property', responses: { 200: { description: '{ connected: false }' } } },
+    },
+    '/api/property/vercel/pat': {
+      put: { tags: ['Property'], summary: "Set the current property's Vercel Personal Access Token, used for Web Analytics (admin only) -- unlike the OAuth install flow, a PAT can actually read Web Analytics", security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['vercel_pat'], properties: { vercel_pat: { type: 'string' }, vercel_team_id: { type: 'string', description: 'Optional -- overrides the stored team ID if the PAT belongs to a different team' } } } } } }, responses: { 200: { description: '{ analyticsPatConfigured: true }' }, 400: { description: 'Missing vercel_pat' }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/property/vercel/pat/clear': {
+      post: { tags: ['Property'], summary: "Clear the current property's Vercel Personal Access Token (admin only)", security: [{ bearerAuth: [] }], responses: { 200: { description: '{ analyticsPatConfigured: false }' }, 403: { description: 'Insufficient permissions' } } },
     },
     '/api/property/websites': {
       get: { tags: ['Property'], summary: "List the current property's websites", security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], responses: { 200: { description: 'Array of websites' } } },

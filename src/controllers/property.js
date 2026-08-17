@@ -159,7 +159,7 @@ function defaultSinceUntil(since, until) {
 // whoever connected) over the shared admin VERCEL_TOKEN fallback. Only safe
 // for endpoints like listing projects -- OAuth Integration installation
 // tokens are confirmed (see commit 0532a08) unable to read Web Analytics, so
-// analytics calls must use adminVercelAuth() below instead.
+// analytics calls must use resolveAnalyticsAuth() below instead.
 async function resolveVercelAuth(propertyId) {
   const { rows } = await pool.query(
     'SELECT vercel_access_token, vercel_team_id FROM property WHERE id = $1',
@@ -172,8 +172,20 @@ async function resolveVercelAuth(propertyId) {
   };
 }
 
-function adminVercelAuth() {
-  return { token: process.env.VERCEL_TOKEN, teamId: process.env.VERCEL_TEAM_ID };
+// Web Analytics needs a token that can actually read it -- OAuth Integration
+// installation tokens can't (see resolveVercelAuth above), so this prefers a
+// property-supplied Personal Access Token, then falls back to the shared
+// admin VERCEL_TOKEN env var.
+async function resolveAnalyticsAuth(propertyId) {
+  const { rows } = await pool.query(
+    'SELECT vercel_pat, vercel_team_id FROM property WHERE id = $1',
+    [propertyId]
+  );
+  const own = rows[0];
+  return {
+    token: own?.vercel_pat || process.env.VERCEL_TOKEN,
+    teamId: own?.vercel_team_id || process.env.VERCEL_TEAM_ID,
+  };
 }
 
 async function fetchVercelAnalytics({ token, teamId, projectId, sinceIso, untilIso }) {
@@ -208,7 +220,7 @@ async function getWebsiteAnalytics(req, res, next) {
     const { vercel_project_id } = rows[0];
     if (!vercel_project_id) return res.status(400).json({ error: 'Website is not mapped to a Vercel project' });
 
-    const { token, teamId } = adminVercelAuth();
+    const { token, teamId } = await resolveAnalyticsAuth(req.property_id);
     if (!token) {
       return res.status(503).json({ error: 'Vercel analytics is not configured on this server' });
     }
@@ -228,7 +240,7 @@ async function getVercelProjectAnalytics(req, res, next) {
     if (since !== undefined && !isValidDate(since)) return res.status(400).json({ error: 'since must be YYYY-MM-DD' });
     if (until !== undefined && !isValidDate(until)) return res.status(400).json({ error: 'until must be YYYY-MM-DD' });
 
-    const { token, teamId } = adminVercelAuth();
+    const { token, teamId } = await resolveAnalyticsAuth(req.property_id);
     if (!token) {
       return res.status(503).json({ error: 'Vercel analytics is not configured on this server' });
     }
@@ -307,11 +319,16 @@ async function vercelConnectCallback(req, res, next) {
 async function getVercelConnectionStatus(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT vercel_team_id, vercel_connected_at FROM property WHERE id = $1',
+      'SELECT vercel_team_id, vercel_connected_at, vercel_pat FROM property WHERE id = $1',
       [req.property_id]
     );
     const row = rows[0] ?? {};
-    res.json({ connected: !!row.vercel_connected_at, teamId: row.vercel_team_id ?? null, connectedAt: row.vercel_connected_at ?? null });
+    res.json({
+      connected: !!row.vercel_connected_at,
+      teamId: row.vercel_team_id ?? null,
+      connectedAt: row.vercel_connected_at ?? null,
+      analyticsPatConfigured: !!row.vercel_pat,
+    });
   } catch (err) {
     next(err);
   }
@@ -329,8 +346,34 @@ async function disconnectVercel(req, res, next) {
   }
 }
 
+async function setVercelPat(req, res, next) {
+  try {
+    const { vercel_pat, vercel_team_id } = req.body;
+    if (!vercel_pat || typeof vercel_pat !== 'string') {
+      return res.status(400).json({ error: 'vercel_pat is required' });
+    }
+    await pool.query(
+      'UPDATE property SET vercel_pat = $1, vercel_team_id = COALESCE($2, vercel_team_id) WHERE id = $3',
+      [vercel_pat, vercel_team_id || null, req.property_id]
+    );
+    res.json({ analyticsPatConfigured: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function clearVercelPat(req, res, next) {
+  try {
+    await pool.query('UPDATE property SET vercel_pat = NULL WHERE id = $1', [req.property_id]);
+    res.json({ analyticsPatConfigured: false });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,
+  setVercelPat, clearVercelPat,
 };

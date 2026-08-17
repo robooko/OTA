@@ -16,6 +16,8 @@ router.get('/vercel/connect', authenticate, ctrl.getVercelConnectUrl);
 router.get('/vercel/callback', ctrl.vercelConnectCallback);
 router.get('/vercel/status', authenticate, ctrl.getVercelConnectionStatus);
 router.post('/vercel/disconnect', authenticate, ctrl.disconnectVercel);
+router.put('/vercel/pat', authenticate, requireRole('admin'), ctrl.setVercelPat);
+router.post('/vercel/pat/clear', authenticate, requireRole('admin'), ctrl.clearVercelPat);
 
 router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
 router.post('/websites', authenticate, ctrl.createWebsite);

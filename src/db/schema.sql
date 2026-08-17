@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS property (
   vercel_team_id       VARCHAR(100),
   vercel_connected_at  TIMESTAMPTZ,
   vercel_access_token  TEXT, -- "Projects: Read" scope only -- confirmed can't read Web Analytics
+  vercel_pat           TEXT, -- Personal Access Token, optionally set per-property so Web Analytics works
   created_at       TIMESTAMPTZ  DEFAULT now()
 );
 
