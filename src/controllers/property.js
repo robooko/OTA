@@ -7,7 +7,23 @@ function generateApiKey() {
 
 async function getCurrentProperty(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT id, name FROM property WHERE id = $1', [req.property_id]);
+    const { rows } = await pool.query('SELECT id, name, currency FROM property WHERE id = $1', [req.property_id]);
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateCurrentProperty(req, res, next) {
+  try {
+    const { currency } = req.body;
+    if (currency !== undefined && !/^[A-Z]{3}$/.test(currency)) {
+      return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP)' });
+    }
+    const { rows } = await pool.query(
+      'UPDATE property SET currency = COALESCE($1, currency) WHERE id = $2 RETURNING id, name, currency',
+      [currency, req.property_id]
+    );
     res.json(rows[0]);
   } catch (err) {
     next(err);
@@ -60,4 +76,4 @@ async function enableApiKey(req, res, next) {
   }
 }
 
-module.exports = { getCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey };
+module.exports = { getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey };

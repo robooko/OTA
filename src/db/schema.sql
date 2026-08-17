@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS property (
   clerk_org_id     VARCHAR(255) UNIQUE,
   api_key          TEXT UNIQUE,
   api_key_enabled  BOOLEAN NOT NULL DEFAULT true,
+  currency         VARCHAR(3)   NOT NULL DEFAULT 'GBP',
   created_at       TIMESTAMPTZ  DEFAULT now()
 );
 

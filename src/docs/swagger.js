@@ -171,7 +171,8 @@ const swaggerSpec = {
 
     // ── Property ────────────────────────────────────────────────────────────
     '/api/property/me': {
-      get: { tags: ['Property'], summary: 'Get the current property (id, name)', responses: { 200: { description: 'Property identity', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, name: { type: 'string' } } } } } } } },
+      get: { tags: ['Property'], summary: 'Get the current property (id, name, currency)', responses: { 200: { description: 'Property identity', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, name: { type: 'string' }, currency: { type: 'string' } } } } } } } },
+      put: { tags: ['Property'], summary: 'Update the current property (admin only)', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { currency: { type: 'string', description: '3-letter ISO 4217 code, e.g. GBP' } } } } } }, responses: { 200: { description: 'Updated' }, 400: { description: 'Invalid currency format' }, 403: { description: 'Insufficient permissions' } } },
     },
     '/api/property/api-key': {
       get: { tags: ['Property'], summary: "Get the current property's API key (admin only)", responses: { 200: { description: 'API key and enabled state', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' }, api_key_enabled: { type: 'boolean' } } } } } }, 403: { description: 'Insufficient permissions' } } },
