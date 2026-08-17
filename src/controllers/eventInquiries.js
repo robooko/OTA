@@ -1,30 +1,44 @@
 const pool = require('../db');
-const { isValidDate } = require('../middleware/validate');
+const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { publishNewInquiry, publishNewReply } = require('../lib/ably');
 const { sendReply, verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
 
 async function listInquiries(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT * FROM event_inquiry WHERE property_id = $1 ORDER BY created_at DESC',
+      `SELECT ei.*, r.name AS restaurant_name FROM event_inquiry ei
+       LEFT JOIN restaurant r ON r.id = ei.restaurant_id
+       WHERE ei.property_id = $1 ORDER BY ei.created_at DESC`,
       [req.property_id]
     );
     res.json(rows);
   } catch (err) { next(err); }
 }
 
+// Confirms restaurant_id, if given, is a real restaurant on this property --
+// prevents an inquiry from being tagged with another property's restaurant.
+async function validateRestaurantId(restaurant_id, property_id) {
+  if (restaurant_id == null) return true;
+  if (!isValidUuid(restaurant_id)) return false;
+  const { rows } = await pool.query('SELECT 1 FROM restaurant WHERE id = $1 AND property_id = $2', [restaurant_id, property_id]);
+  return rows.length > 0;
+}
+
 async function createInquiry(req, res, next) {
   try {
-    const { name, email, phone, event_date, guests, event_type, format, message } = req.body;
+    const { name, email, phone, event_date, guests, event_type, format, message, restaurant_id } = req.body;
     if (!name || !email || !event_date) {
       return res.status(400).json({ error: 'name, email, and event_date are required' });
     }
     if (!isValidDate(event_date)) return res.status(400).json({ error: 'Invalid date format' });
+    if (!(await validateRestaurantId(restaurant_id, req.property_id))) {
+      return res.status(400).json({ error: 'restaurant_id must belong to this property' });
+    }
 
     const { rows } = await pool.query(
-      `INSERT INTO event_inquiry (property_id, name, email, phone, event_date, guests, event_type, format, message)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.property_id, name, email, phone || null, event_date, guests || null, event_type || null, format || null, message || null]
+      `INSERT INTO event_inquiry (property_id, restaurant_id, name, email, phone, event_date, guests, event_type, format, message)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [req.property_id, restaurant_id || null, name, email, phone || null, event_date, guests || null, event_type || null, format || null, message || null]
     );
 
     publishNewInquiry(req.property_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
@@ -35,10 +49,14 @@ async function createInquiry(req, res, next) {
 
 async function updateInquiry(req, res, next) {
   try {
-    const { status } = req.body;
+    const { status, restaurant_id } = req.body;
+    if (restaurant_id !== undefined && !(await validateRestaurantId(restaurant_id, req.property_id))) {
+      return res.status(400).json({ error: 'restaurant_id must belong to this property' });
+    }
     const { rows } = await pool.query(
-      `UPDATE event_inquiry SET status = COALESCE($1, status) WHERE id = $2 AND property_id = $3 RETURNING *`,
-      [status, req.params.id, req.property_id]
+      `UPDATE event_inquiry SET status = COALESCE($1, status), restaurant_id = COALESCE($2, restaurant_id)
+       WHERE id = $3 AND property_id = $4 RETURNING *`,
+      [status, restaurant_id, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Inquiry not found' });
     res.json(rows[0]);
