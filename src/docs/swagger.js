@@ -189,6 +189,15 @@ const swaggerSpec = {
     '/api/property/vercel/projects': {
       get: { tags: ['Property'], summary: "List the connected Vercel account's projects (id, name) for the website-mapping picker", responses: { 200: { description: 'Array of { id, name }' }, 503: { description: 'Server not configured with VERCEL_TOKEN' } } },
     },
+    '/api/property/vercel/connect': {
+      get: { tags: ['Property'], summary: 'Get the URL to start the Vercel Integration install flow for the current property', responses: { 200: { description: '{ url }' } } },
+    },
+    '/api/property/vercel/status': {
+      get: { tags: ['Property'], summary: "Whether the current property has completed the Vercel Integration install flow (note: this tracks installation status only -- installation tokens can't read Web Analytics)", responses: { 200: { description: '{ connected, teamId, connectedAt }' } } },
+    },
+    '/api/property/vercel/disconnect': {
+      post: { tags: ['Property'], summary: 'Clear the stored Vercel connection status for the current property', responses: { 200: { description: '{ connected: false }' } } },
+    },
     '/api/property/websites': {
       get: { tags: ['Property'], summary: "List the current property's websites", security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], responses: { 200: { description: 'Array of websites' } } },
       post: { tags: ['Property'], summary: 'Add a website to the current property', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['url'], properties: { url: { type: 'string', example: 'https://bonito-eta.vercel.app' }, label: { type: 'string', example: 'Bonito' }, vercel_project_id: { type: 'string', description: 'Vercel project ID, enables the analytics endpoint below' } } } } } }, responses: { 201: { description: 'Created' }, 400: { description: 'Missing or invalid url' } } },

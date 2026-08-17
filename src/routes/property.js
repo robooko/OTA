@@ -11,6 +11,10 @@ router.post('/api-key/disable', authenticate, requireRole('admin'), ctrl.disable
 router.post('/api-key/enable', authenticate, requireRole('admin'), ctrl.enableApiKey);
 
 router.get('/vercel/projects', authenticate, ctrl.listVercelProjects);
+router.get('/vercel/connect', authenticate, ctrl.getVercelConnectUrl);
+router.get('/vercel/callback', ctrl.vercelConnectCallback);
+router.get('/vercel/status', authenticate, ctrl.getVercelConnectionStatus);
+router.post('/vercel/disconnect', authenticate, ctrl.disconnectVercel);
 
 router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
 router.post('/websites', authenticate, ctrl.createWebsite);

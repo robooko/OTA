@@ -3,6 +3,23 @@ const pool = require('../db');
 const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate } = require('../middleware/validate');
 
 const VERCEL_API_BASE = 'https://api.vercel.com';
+const VERCEL_INSTALL_URL = 'https://vercel.com/integrations/forge-build/new';
+const VERCEL_CALLBACK_URL = 'https://ota-u6ii.onrender.com/api/property/vercel/callback';
+
+// Signs property_id into the OAuth `state` param so the callback (which
+// Vercel calls directly, with no Clerk session) can trust which property to
+// mark connected. In-memory secret is fine -- the round trip is seconds long.
+const STATE_SECRET = crypto.randomBytes(32);
+function signState(propertyId) {
+  const sig = crypto.createHmac('sha256', STATE_SECRET).update(propertyId).digest('hex');
+  return `${propertyId}.${sig}`;
+}
+function verifyState(state) {
+  const [propertyId, sig] = String(state ?? '').split('.');
+  if (!propertyId || !sig) return null;
+  const expected = crypto.createHmac('sha256', STATE_SECRET).update(propertyId).digest('hex');
+  return sig === expected ? propertyId : null;
+}
 
 function generateApiKey() {
   return 'prop_' + crypto.randomBytes(32).toString('hex');
@@ -198,7 +215,75 @@ async function listVercelProjects(req, res, next) {
   }
 }
 
+function getVercelConnectUrl(req, res) {
+  const state = signState(req.property_id);
+  const url = `${VERCEL_INSTALL_URL}?state=${state}`;
+  res.json({ url });
+}
+
+async function vercelConnectCallback(req, res, next) {
+  try {
+    const { code, state } = req.query;
+    const propertyId = verifyState(state);
+    if (!code || !propertyId) {
+      return res.status(400).send('Invalid or expired connect link. Close this tab and try again from Settings.');
+    }
+
+    const tokenRes = await fetch(`${VERCEL_API_BASE}/v2/oauth/access_token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: process.env.VERCEL_INTEGRATION_ID,
+        client_secret: process.env.VERCEL_INTEGRATION_SECRET,
+        code,
+        redirect_uri: VERCEL_CALLBACK_URL,
+      }),
+    });
+    const tokenBody = await tokenRes.json();
+    if (!tokenRes.ok) {
+      return res.status(502).send('Failed to connect Vercel. Close this tab and try again from Settings.');
+    }
+
+    await pool.query(
+      'UPDATE property SET vercel_team_id = $1, vercel_connected_at = now() WHERE id = $2',
+      [tokenBody.team_id ?? null, propertyId]
+    );
+
+    // Vercel gives us `next` to send the user back to close out its own UI.
+    if (req.query.next) return res.redirect(req.query.next);
+    res.send('<p>Vercel connected. You can close this tab and return to Settings.</p>');
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getVercelConnectionStatus(req, res, next) {
+  try {
+    const { rows } = await pool.query(
+      'SELECT vercel_team_id, vercel_connected_at FROM property WHERE id = $1',
+      [req.property_id]
+    );
+    const row = rows[0] ?? {};
+    res.json({ connected: !!row.vercel_connected_at, teamId: row.vercel_team_id ?? null, connectedAt: row.vercel_connected_at ?? null });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function disconnectVercel(req, res, next) {
+  try {
+    await pool.query(
+      'UPDATE property SET vercel_team_id = NULL, vercel_connected_at = NULL WHERE id = $1',
+      [req.property_id]
+    );
+    res.json({ connected: false });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects,
+  getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,
 };
