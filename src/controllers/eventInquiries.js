@@ -1,22 +1,27 @@
+const { createClerkClient } = require('@clerk/backend');
 const pool = require('../db');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { publishNewInquiry, publishNewReply } = require('../lib/ably');
 const { sendReply, verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
 
+const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
+
 async function listInquiries(req, res, next) {
   try {
     // last_reply_direction drives the feed's avatar-vs-status-badge display
     // (event-inquiries-feed, hotal-ui >= 0.12.12) -- 'outbound' means staff
-    // last replied, 'inbound' means the guest did, null means no replies
-    // yet. Replies aren't attributed to a specific sender in this schema,
-    // so the client fills in an avatar for 'outbound' using whoever's
-    // currently signed in, not the true historical sender.
+    // last replied, 'inbound' means the guest did, null means no replies yet.
+    // sent_by_name/sent_by_avatar_url come from event_inquiry_message,
+    // captured at send time (see migrate-2026-08-18-event-inquiry-message-sender.sql);
+    // they're null on outbound rows sent before that migration, since there's
+    // no way to know who actually sent those.
     const { rows } = await pool.query(
-      `SELECT ei.*, r.name AS restaurant_name, lrm.direction AS last_reply_direction
+      `SELECT ei.*, r.name AS restaurant_name, lrm.direction AS last_reply_direction,
+              lrm.sent_by_name AS last_reply_by_name, lrm.sent_by_avatar_url AS last_reply_avatar_url
        FROM event_inquiry ei
        LEFT JOIN restaurant r ON r.id = ei.restaurant_id
        LEFT JOIN LATERAL (
-         SELECT direction FROM event_inquiry_message m
+         SELECT direction, sent_by_name, sent_by_avatar_url FROM event_inquiry_message m
          WHERE m.event_inquiry_id = ei.id
          ORDER BY m.created_at DESC LIMIT 1
        ) lrm ON true
@@ -107,10 +112,24 @@ async function createReply(req, res, next) {
 
     const emailId = await sendReply(inquiry, inquiry.property_name, body);
 
+    // Best-effort: the email has already gone out at this point, so a Clerk
+    // hiccup here shouldn't fail the whole reply and leave the sent email
+    // with no saved message row -- it just means this row won't carry a
+    // sender (same as replies sent before sender attribution existed).
+    let senderName = null;
+    let senderAvatarUrl = null;
+    try {
+      const sender = await clerkClient.users.getUser(req.user.id);
+      senderName = [sender.firstName, sender.lastName].filter(Boolean).join(' ') || sender.username || 'Staff';
+      senderAvatarUrl = sender.imageUrl;
+    } catch (err) {
+      console.error('Failed to look up sender for reply attribution:', err.message);
+    }
+
     const { rows } = await pool.query(
-      `INSERT INTO event_inquiry_message (event_inquiry_id, direction, body, resend_email_id)
-       VALUES ($1, 'outbound', $2, $3) RETURNING *`,
-      [inquiry.id, body, emailId]
+      `INSERT INTO event_inquiry_message (event_inquiry_id, direction, body, resend_email_id, sent_by_user_id, sent_by_name, sent_by_avatar_url)
+       VALUES ($1, 'outbound', $2, $3, $4, $5, $6) RETURNING *`,
+      [inquiry.id, body, emailId, req.user.id, senderName, senderAvatarUrl]
     );
 
     let updatedInquiry = inquiry;
