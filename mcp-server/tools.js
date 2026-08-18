@@ -163,6 +163,21 @@ function createTools(apiRequest) {
     run: () => apiRequest('GET', '/api/restaurant'),
   },
   {
+    name: 'create_restaurant',
+    description: 'Create a restaurant',
+    inputSchema: {
+      name: z.string(),
+      description: z.string().optional(),
+      phone: z.string().optional(),
+      slot_interval_minutes: z.number().int().optional(),
+      default_duration_minutes: z.number().int(),
+      closed_days: z.array(z.number().int().min(1).max(7)).optional(),
+      currency: z.string().optional().describe('ISO 4217 code, e.g. GBP. Omit to inherit the property\'s currency'),
+      timezone: z.string().optional().describe('IANA timezone name, e.g. Europe/London. Omit to inherit the property\'s timezone'),
+    },
+    run: (args) => apiRequest('POST', '/api/restaurant', { body: args }),
+  },
+  {
     name: 'get_restaurant',
     description: 'Get a restaurant by id',
     inputSchema: { id: z.string() },
