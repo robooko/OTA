@@ -5,9 +5,21 @@ const { sendReply, verifyInboundWebhook, getReceivedEmail } = require('../lib/re
 
 async function listInquiries(req, res, next) {
   try {
+    // last_reply_direction drives the feed's avatar-vs-status-badge display
+    // (event-inquiries-feed, hotal-ui >= 0.12.12) -- 'outbound' means staff
+    // last replied, 'inbound' means the guest did, null means no replies
+    // yet. Replies aren't attributed to a specific sender in this schema,
+    // so the client fills in an avatar for 'outbound' using whoever's
+    // currently signed in, not the true historical sender.
     const { rows } = await pool.query(
-      `SELECT ei.*, r.name AS restaurant_name FROM event_inquiry ei
+      `SELECT ei.*, r.name AS restaurant_name, lrm.direction AS last_reply_direction
+       FROM event_inquiry ei
        LEFT JOIN restaurant r ON r.id = ei.restaurant_id
+       LEFT JOIN LATERAL (
+         SELECT direction FROM event_inquiry_message m
+         WHERE m.event_inquiry_id = ei.id
+         ORDER BY m.created_at DESC LIMIT 1
+       ) lrm ON true
        WHERE ei.property_id = $1 ORDER BY ei.created_at DESC`,
       [req.property_id]
     );
