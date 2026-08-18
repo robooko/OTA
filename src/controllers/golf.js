@@ -1,6 +1,16 @@
 const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
 
+// Steps a 'YYYY-MM-DD' string forward by whole days via UTC epoch math --
+// `new Date(str); d.setDate(d.getDate() + 1)` looks equivalent but
+// setDate() operates in the Node process's LOCAL timezone, so the date
+// this actually produces depends on where the server happens to be
+// running. This is deterministic regardless of process.env.TZ.
+function addDaysUTC(dateStr, days) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d) + days * 86400000).toISOString().slice(0, 10);
+}
+
 // ── Courses ───────────────────────────────────────────────────────────────────
 
 async function listCourses(req, res, next) {
@@ -59,10 +69,8 @@ async function bulkCreateTeeTimes(req, res, next) {
     if (!courseRes.rows.length) return res.status(404).json({ error: 'Course not found' });
 
     const created = [];
-    const d = new Date(from);
-    const end = new Date(to);
-    while (d <= end) {
-      const date = d.toISOString().slice(0, 10);
+    let date = from;
+    while (date <= to) {
       for (const time of times) {
         const { rows } = await pool.query(
           `INSERT INTO tee_time (property_id, course_id, tee_date, tee_time, max_players)
@@ -73,7 +81,7 @@ async function bulkCreateTeeTimes(req, res, next) {
         );
         if (rows.length) created.push(rows[0]);
       }
-      d.setDate(d.getDate() + 1);
+      date = addDaysUTC(date, 1);
     }
     res.status(201).json({ created: created.length, tee_times: created });
   } catch (err) { next(err); }
