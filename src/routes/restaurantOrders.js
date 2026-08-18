@@ -6,6 +6,7 @@ const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
 router.get('/menu', authenticateOrApiKey, ctrl.listMenuItems);
 router.post('/menu', authenticateOrApiKey, ctrl.createMenuItem);
 router.put('/menu/bulk-delete', authenticateOrApiKey, ctrl.bulkDeleteMenuItems);
+router.put('/menu/rename-category', authenticateOrApiKey, ctrl.renameMenuCategory);
 router.put('/menu/:id', authenticateOrApiKey, ctrl.updateMenuItem);
 
 // Orders

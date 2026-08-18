@@ -246,6 +246,16 @@ function createTools(apiRequest) {
     run: (args) => apiRequest('PUT', '/api/restaurant-orders/menu/bulk-delete', { body: args }),
   },
   {
+    name: 'rename_restaurant_menu_category',
+    description: 'Rename a menu category on every item that has it, e.g. to merge duplicates like "cocktail" and "Cocktails" into one name',
+    inputSchema: {
+      restaurant_id: z.string().optional().describe('Omit to rename across every restaurant on the property'),
+      from: z.string(),
+      to: z.string(),
+    },
+    run: (args) => apiRequest('PUT', '/api/restaurant-orders/menu/rename-category', { body: args }),
+  },
+  {
     name: 'get_restaurant_service_periods',
     description: "List a restaurant's service periods (bookable windows)",
     inputSchema: { restaurant_id: z.string() },

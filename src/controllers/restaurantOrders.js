@@ -98,6 +98,21 @@ async function bulkDeleteMenuItems(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function renameMenuCategory(req, res, next) {
+  try {
+    const { restaurant_id, from, to } = req.body;
+    if (!from || !to) return res.status(400).json({ error: 'from and to are required' });
+
+    let query = `UPDATE restaurant_menu_item SET category = $1 WHERE category = $2 AND property_id = $3`;
+    const params = [to, from, req.property_id];
+    if (restaurant_id) { params.push(restaurant_id); query += ` AND restaurant_id = $${params.length}`; }
+    query += ' RETURNING id';
+
+    const { rows } = await pool.query(query, params);
+    res.json({ renamed: rows.length, ids: rows.map((r) => r.id) });
+  } catch (err) { next(err); }
+}
+
 // ── Orders ────────────────────────────────────────────────────────────────────
 
 async function listOrders(req, res, next) {
@@ -281,4 +296,4 @@ async function getAblyToken(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, listOrders, getOrder, createOrder, updateOrderStatus, getAblyToken };
+module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, renameMenuCategory, listOrders, getOrder, createOrder, updateOrderStatus, getAblyToken };
