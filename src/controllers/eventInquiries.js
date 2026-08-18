@@ -1,6 +1,6 @@
 const { createClerkClient } = require('@clerk/backend');
 const pool = require('../db');
-const { isValidDate, isValidUuid } = require('../middleware/validate');
+const { isValidDate, isValidUuid, isValidTime } = require('../middleware/validate');
 const { publishNewInquiry, publishNewReply } = require('../lib/ably');
 const { sendReply, verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
 
@@ -66,14 +66,28 @@ async function createInquiry(req, res, next) {
 
 async function updateInquiry(req, res, next) {
   try {
-    const { status, restaurant_id } = req.body;
+    const { status, restaurant_id, event_date, event_time, guests } = req.body;
     if (restaurant_id !== undefined && !(await validateRestaurantId(restaurant_id, req.property_id))) {
       return res.status(400).json({ error: 'restaurant_id must belong to this property' });
     }
+    if (event_date !== undefined && !isValidDate(event_date)) {
+      return res.status(400).json({ error: 'Invalid event_date format' });
+    }
+    if (event_time !== undefined && event_time !== null && !isValidTime(event_time)) {
+      return res.status(400).json({ error: 'Invalid event_time format, use HH:MM' });
+    }
+    if (guests !== undefined && guests !== null && (!Number.isInteger(guests) || guests <= 0)) {
+      return res.status(400).json({ error: 'guests must be a positive integer' });
+    }
     const { rows } = await pool.query(
-      `UPDATE event_inquiry SET status = COALESCE($1, status), restaurant_id = COALESCE($2, restaurant_id)
-       WHERE id = $3 AND property_id = $4 RETURNING *`,
-      [status, restaurant_id, req.params.id, req.property_id]
+      `UPDATE event_inquiry SET
+         status        = COALESCE($1, status),
+         restaurant_id = COALESCE($2, restaurant_id),
+         event_date    = COALESCE($3, event_date),
+         event_time    = COALESCE($4, event_time),
+         guests        = COALESCE($5, guests)
+       WHERE id = $6 AND property_id = $7 RETURNING *`,
+      [status, restaurant_id, event_date, event_time, guests, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Inquiry not found' });
     res.json(rows[0]);

@@ -399,11 +399,14 @@ function createTools(apiRequest) {
   },
   {
     name: 'update_event_inquiry',
-    description: 'Update an event inquiry\'s status or restaurant assignment',
+    description: 'Update an event inquiry\'s status, restaurant assignment, or event details',
     inputSchema: {
       id: z.string(),
       status: z.string().optional(),
       restaurant_id: z.string().optional(),
+      event_date: z.string().optional().describe('YYYY-MM-DD'),
+      event_time: z.string().optional().describe('HH:MM'),
+      guests: z.number().int().optional(),
     },
     run: ({ id, ...body }) => apiRequest('PUT', `/api/event-inquiries/${id}`, { body }),
   },
