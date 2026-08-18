@@ -485,7 +485,8 @@ CREATE TABLE IF NOT EXISTS restaurant_menu_item (
   category      VARCHAR(50),
   price         NUMERIC(10,2) NOT NULL,
   allergens     TEXT[]        NOT NULL DEFAULT '{}',
-  status        VARCHAR(20)   DEFAULT 'active'
+  status        VARCHAR(20)   DEFAULT 'active',
+  translations  JSONB         NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS restaurant_order (
