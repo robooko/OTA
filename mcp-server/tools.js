@@ -95,6 +95,7 @@ function createTools(apiRequest) {
       max_occupancy: z.number().int().optional(),
       base_rate: z.number().optional(),
       status: z.enum(['active', 'inactive']).optional(),
+      floor_plan: z.record(z.any()).optional().describe('{ rooms: [{id, type, label, x, y, w, h, sqm?, imgUrl?}], items: [{id, asset, x, y, w, h}], w, h }'),
     },
     run: ({ id, ...body }) => apiRequest('PUT', `/api/room-types/${id}`, { body }),
   },

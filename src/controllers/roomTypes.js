@@ -1,5 +1,9 @@
 const pool = require('../db');
 
+function isValidFloorPlan(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 async function listRoomTypes(req, res, next) {
   try {
     const { rows } = await pool.query(
@@ -44,16 +48,20 @@ async function createRoomType(req, res, next) {
 
 async function updateRoomType(req, res, next) {
   try {
-    const { name, description, max_occupancy, base_rate, status } = req.body;
+    const { name, description, max_occupancy, base_rate, status, floor_plan } = req.body;
+    if (floor_plan !== undefined && !isValidFloorPlan(floor_plan)) {
+      return res.status(400).json({ error: 'floor_plan must be a JSON object' });
+    }
     const { rows } = await pool.query(
       `UPDATE room_type SET
          name          = COALESCE($1, name),
          description   = COALESCE($2, description),
          max_occupancy = COALESCE($3, max_occupancy),
          base_rate     = COALESCE($4, base_rate),
-         status        = COALESCE($5, status)
-       WHERE id = $6 AND property_id = $7 RETURNING *`,
-      [name, description, max_occupancy, base_rate, status, req.params.id, req.property_id]
+         status        = COALESCE($5, status),
+         floor_plan    = COALESCE($6::jsonb, floor_plan)
+       WHERE id = $7 AND property_id = $8 RETURNING *`,
+      [name, description, max_occupancy, base_rate, status, floor_plan ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Room type not found' });
     res.json(rows[0]);
