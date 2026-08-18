@@ -140,6 +140,24 @@ function createTools(apiRequest) {
     run: ({ id }) => apiRequest('GET', `/api/restaurant/${id}`),
   },
   {
+    name: 'update_restaurant',
+    description: 'Update a restaurant',
+    inputSchema: {
+      id: z.string(),
+      name: z.string().optional(),
+      description: z.string().optional(),
+      phone: z.string().optional(),
+      slot_interval_minutes: z.number().int().optional(),
+      default_duration_minutes: z.number().int().optional(),
+      closed_days: z.array(z.number().int().min(1).max(7)).optional(),
+      status: z.enum(['active', 'inactive']).optional(),
+      currency: z.string().optional(),
+      timezone: z.string().optional(),
+      floor_plan: z.record(z.any()).optional().describe('{ tables: [{otaId, number, seats, x, y, shape}], w, h }'),
+    },
+    run: ({ id, ...body }) => apiRequest('PUT', `/api/restaurant/${id}`, { body }),
+  },
+  {
     name: 'list_restaurant_reservations',
     description: 'List reservations for a restaurant, optionally filtered by date, status, or guest',
     inputSchema: {

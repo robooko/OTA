@@ -71,7 +71,7 @@ async function createRestaurant(req, res, next) {
 
 async function updateRestaurant(req, res, next) {
   try {
-    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan } = req.body;
     if (closed_days !== undefined && !isValidClosedDays(closed_days)) {
       return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
     }
@@ -80,6 +80,9 @@ async function updateRestaurant(req, res, next) {
     }
     if (timezone !== undefined && !isValidTimezone(timezone)) {
       return res.status(400).json({ error: 'timezone must be a valid IANA timezone name (e.g. Europe/London)' });
+    }
+    if (floor_plan !== undefined && !isValidMetadata(floor_plan)) {
+      return res.status(400).json({ error: 'floor_plan must be a JSON object' });
     }
     const { rows } = await pool.query(
       `UPDATE restaurant SET
@@ -91,9 +94,10 @@ async function updateRestaurant(req, res, next) {
          closed_days              = COALESCE($6, closed_days),
          status                   = COALESCE($7, status),
          currency                 = COALESCE($8, currency),
-         timezone                 = COALESCE($9, timezone)
-       WHERE id = $10 AND property_id = $11 RETURNING *`,
-      [name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, req.params.id, req.property_id]
+         timezone                 = COALESCE($9, timezone),
+         floor_plan               = COALESCE($10::jsonb, floor_plan)
+       WHERE id = $11 AND property_id = $12 RETURNING *`,
+      [name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
     res.json(rows[0]);
