@@ -66,7 +66,7 @@ async function createInquiry(req, res, next) {
 
 async function updateInquiry(req, res, next) {
   try {
-    const { status, restaurant_id, event_date, event_time, guests } = req.body;
+    const { status, restaurant_id, event_date, event_time, guests, name, email, phone } = req.body;
     if (restaurant_id !== undefined && !(await validateRestaurantId(restaurant_id, req.property_id))) {
       return res.status(400).json({ error: 'restaurant_id must belong to this property' });
     }
@@ -79,15 +79,24 @@ async function updateInquiry(req, res, next) {
     if (guests !== undefined && guests !== null && (!Number.isInteger(guests) || guests <= 0)) {
       return res.status(400).json({ error: 'guests must be a positive integer' });
     }
+    if (name !== undefined && !name) {
+      return res.status(400).json({ error: 'name cannot be empty' });
+    }
+    if (email !== undefined && !email) {
+      return res.status(400).json({ error: 'email cannot be empty' });
+    }
     const { rows } = await pool.query(
       `UPDATE event_inquiry SET
          status        = COALESCE($1, status),
          restaurant_id = COALESCE($2, restaurant_id),
          event_date    = COALESCE($3, event_date),
          event_time    = COALESCE($4, event_time),
-         guests        = COALESCE($5, guests)
-       WHERE id = $6 AND property_id = $7 RETURNING *`,
-      [status, restaurant_id, event_date, event_time, guests, req.params.id, req.property_id]
+         guests        = COALESCE($5, guests),
+         name          = COALESCE($6, name),
+         email         = COALESCE($7, email),
+         phone         = COALESCE($8, phone)
+       WHERE id = $9 AND property_id = $10 RETURNING *`,
+      [status, restaurant_id, event_date, event_time, guests, name, email, phone, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Inquiry not found' });
     res.json(rows[0]);
