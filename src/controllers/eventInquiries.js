@@ -1,7 +1,7 @@
 const { createClerkClient } = require('@clerk/backend');
 const pool = require('../db');
 const { isValidDate, isValidUuid, isValidTime } = require('../middleware/validate');
-const { publishNewInquiry, publishNewReply } = require('../lib/ably');
+const { publishNewInquiry, publishNewReply, publishInquiryUpdated } = require('../lib/ably');
 const { sendReply, verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
 
 const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
@@ -99,6 +99,9 @@ async function updateInquiry(req, res, next) {
       [status, restaurant_id, event_date, event_time, guests, name, email, phone, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Inquiry not found' });
+
+    publishInquiryUpdated(req.property_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
+
     res.json(rows[0]);
   } catch (err) { next(err); }
 }
@@ -162,7 +165,14 @@ async function createReply(req, res, next) {
         [inquiry.id]
       );
       updatedInquiry = statusRows[0];
+      publishInquiryUpdated(req.property_id, updatedInquiry).catch((err) => console.error('Ably publish failed:', err.message));
     }
+
+    // Same payload shape as the inbound-webhook publish below, so feed
+    // clients handle staff and guest replies identically -- the message row
+    // carries direction and sender attribution for the item's avatar.
+    publishNewReply(req.property_id, { inquiry_id: inquiry.id, name: inquiry.name, message: rows[0] })
+      .catch((err) => console.error('Ably publish failed:', err.message));
 
     res.status(201).json({ message: rows[0], inquiry: updatedInquiry });
   } catch (err) { next(err); }

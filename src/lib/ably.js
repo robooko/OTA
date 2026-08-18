@@ -36,4 +36,10 @@ async function publishNewReply(propertyId, payload) {
   await channel.publish('new-reply', payload);
 }
 
-module.exports = { publishNewInquiry, publishNewOrder, publishOrderStatusChanged, publishNewReply, client };
+async function publishInquiryUpdated(propertyId, inquiry) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:inquiries`);
+  await channel.publish('inquiry-updated', inquiry);
+}
+
+module.exports = { publishNewInquiry, publishNewOrder, publishOrderStatusChanged, publishNewReply, publishInquiryUpdated, client };
