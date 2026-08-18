@@ -84,6 +84,20 @@ async function updateMenuItem(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function bulkDeleteMenuItems(req, res, next) {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || !ids.length) {
+      return res.status(400).json({ error: 'ids must be a non-empty array' });
+    }
+    const { rows } = await pool.query(
+      `UPDATE restaurant_menu_item SET status = 'inactive' WHERE id = ANY($1) AND property_id = $2 RETURNING id`,
+      [ids, req.property_id]
+    );
+    res.json({ deleted: rows.length, ids: rows.map((r) => r.id) });
+  } catch (err) { next(err); }
+}
+
 // ── Orders ────────────────────────────────────────────────────────────────────
 
 async function listOrders(req, res, next) {
@@ -267,4 +281,4 @@ async function getAblyToken(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listMenuItems, createMenuItem, updateMenuItem, listOrders, getOrder, createOrder, updateOrderStatus, getAblyToken };
+module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, listOrders, getOrder, createOrder, updateOrderStatus, getAblyToken };

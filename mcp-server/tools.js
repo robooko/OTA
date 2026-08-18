@@ -240,6 +240,12 @@ function createTools(apiRequest) {
     run: ({ id, ...body }) => apiRequest('PUT', `/api/restaurant-orders/menu/${id}`, { body }),
   },
   {
+    name: 'bulk_delete_restaurant_menu_items',
+    description: 'Soft-delete multiple menu items at once by setting their status to "inactive" — there is no hard-delete endpoint',
+    inputSchema: { ids: z.array(z.string()).min(1) },
+    run: (args) => apiRequest('PUT', '/api/restaurant-orders/menu/bulk-delete', { body: args }),
+  },
+  {
     name: 'get_restaurant_service_periods',
     description: "List a restaurant's service periods (bookable windows)",
     inputSchema: { restaurant_id: z.string() },
