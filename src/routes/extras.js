@@ -1,9 +1,9 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/extras');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
 
 // Extras catalogue
-router.get('/', authenticate, ctrl.listExtras);
+router.get('/', authenticateOrApiKey, ctrl.listExtras);
 router.post('/', authenticate, ctrl.createExtra);
 router.put('/:id', authenticate, ctrl.updateExtra);
 
