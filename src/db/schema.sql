@@ -56,10 +56,25 @@ CREATE TABLE IF NOT EXISTS room_type (
   description    TEXT,
   max_occupancy  INT             NOT NULL,
   base_rate      NUMERIC(10,2)   NOT NULL,
+  floor_plan     JSONB           NOT NULL DEFAULT '{}',
   status         VARCHAR(20)     DEFAULT 'active'
 );
 
 CREATE INDEX IF NOT EXISTS idx_room_type_property ON room_type(property_id);
+
+-- Dated nightly rates per room type (rate calendar). One row per date; a
+-- missing row falls back to base_rate, and a per-room
+-- room_availability.override_rate still outranks both.
+CREATE TABLE IF NOT EXISTS room_type_rate (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID          NOT NULL REFERENCES property(id),
+  room_type_id  UUID          NOT NULL REFERENCES room_type(id),
+  date          DATE          NOT NULL,
+  rate          NUMERIC(10,2) NOT NULL,
+  UNIQUE (room_type_id, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_room_type_rate_property ON room_type_rate(property_id);
 
 -- Rooms
 CREATE TABLE IF NOT EXISTS room (
@@ -126,12 +141,15 @@ SELECT
   r.property_id,
   r.room_type_id,
   ra.date,
-  COUNT(*)                                        AS total_rooms,
-  COUNT(*) FILTER (WHERE ra.is_available = true)  AS available_rooms,
-  MIN(COALESCE(ra.override_rate, rt.base_rate))   AS min_rate
+  COUNT(*)                                                AS total_rooms,
+  COUNT(*) FILTER (WHERE ra.is_available = true)          AS available_rooms,
+  MIN(COALESCE(ra.override_rate, rtr.rate, rt.base_rate)) AS min_rate
 FROM room_availability ra
 JOIN room      r  ON r.id  = ra.room_id
 JOIN room_type rt ON rt.id = r.room_type_id
+LEFT JOIN room_type_rate rtr
+       ON rtr.room_type_id = r.room_type_id
+      AND rtr.date         = ra.date
 GROUP BY r.property_id, r.room_type_id, ra.date;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rta_property_type_date ON room_type_availability(property_id, room_type_id, date);

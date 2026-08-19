@@ -145,8 +145,15 @@ async function upsertRoomAvailability(req, res, next) {
         );
         results.push(rows[0]);
       }
-      await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
       await client.query('COMMIT');
+      // After COMMIT: older Postgres rejects CONCURRENTLY inside a
+      // transaction block, and the committed write must not 500 on a
+      // failed refresh -- the view self-heals on the next refresh.
+      try {
+        await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
+      } catch (e) {
+        console.error('MV refresh failed after commit:', e.message);
+      }
       res.json(results);
     } catch (err) {
       await client.query('ROLLBACK');

@@ -55,10 +55,23 @@ Implement the following tables exactly. Use UUIDs as primary keys (`gen_random_u
 | room_id | UUID | FK → room |
 | date | DATE | NOT NULL |
 | is_available | BOOLEAN | DEFAULT true |
-| override_rate | NUMERIC(10,2) | NULL = fall back to room_type.base_rate |
+| override_rate | NUMERIC(10,2) | NULL = fall back to room_type_rate.rate, then room_type.base_rate |
 | block_reason | VARCHAR(100) | e.g. maintenance, ota_hold, owner_block |
 
 Add a UNIQUE constraint on `(room_id, date)`.
+
+### `room_type_rate`
+
+Dated nightly rates per room type (rate calendar). One row per date; a missing row falls back to `base_rate`; a per-room `room_availability.override_rate` outranks both.
+
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID | PK |
+| room_type_id | UUID | FK → room_type |
+| date | DATE | NOT NULL |
+| rate | NUMERIC(10,2) | NOT NULL |
+
+Add a UNIQUE constraint on `(room_type_id, date)`.
 
 ### `booking`
 | Column | Type | Notes |
@@ -92,12 +105,15 @@ CREATE MATERIALIZED VIEW room_type_availability AS
 SELECT
   r.room_type_id,
   ra.date,
-  COUNT(*)                                        AS total_rooms,
-  COUNT(*) FILTER (WHERE ra.is_available = true)  AS available_rooms,
-  MIN(COALESCE(ra.override_rate, rt.base_rate))   AS min_rate
+  COUNT(*)                                                AS total_rooms,
+  COUNT(*) FILTER (WHERE ra.is_available = true)          AS available_rooms,
+  MIN(COALESCE(ra.override_rate, rtr.rate, rt.base_rate)) AS min_rate
 FROM room_availability ra
 JOIN room r         ON r.id  = ra.room_id
 JOIN room_type rt   ON rt.id = r.room_type_id
+LEFT JOIN room_type_rate rtr
+       ON rtr.room_type_id = r.room_type_id
+      AND rtr.date         = ra.date
 GROUP BY r.room_type_id, ra.date;
 
 CREATE UNIQUE INDEX ON room_type_availability (room_type_id, date);
@@ -159,6 +175,8 @@ Refresh this view whenever bookings or availability records change.
 | GET | `/:id` | Get room type by ID |
 | POST | `/` | Create room type |
 | PUT | `/:id` | Update room type |
+| GET | `/:id/rates` | List dated nightly rates (supports `?from=&to=`, `to` exclusive) |
+| PUT | `/:id/rates` | Bulk set dated rates over ranges — `{ rates: [{ from, to, rate }] }`, `to` exclusive, `rate: null` clears back to base_rate |
 
 ### Rooms — `/api/rooms`
 | Method | Path | Description |
@@ -204,7 +222,7 @@ When `POST /api/bookings` is called:
 3. Query `room_availability` — ensure `is_available = true` for **every date** in `[check_in, check_out)`. If any date is blocked, return `409 Conflict`.
 4. Also check no overlapping confirmed booking exists for the same room.
 5. Calculate `total_price`:
-   - For each night, use `override_rate` if set, otherwise `room_type.base_rate`
+   - For each night, use the room's `override_rate` if set, else the room type's dated `room_type_rate.rate` for that night, else `room_type.base_rate`
    - Sum all nightly rates
 6. Insert the booking record.
 7. Update `room_availability` to set `is_available = false` for all dates in the range.

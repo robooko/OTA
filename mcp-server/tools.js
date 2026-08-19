@@ -114,6 +114,29 @@ function createTools(apiRequest) {
     run: ({ room_id, dates }) => apiRequest('PUT', `/api/availability/rooms/${room_id}`, { body: { dates } }),
   },
   {
+    name: 'list_room_type_rates',
+    description: "List a room type's dated nightly rates. Dates without a row fall back to base_rate; a per-room override_rate still wins over these.",
+    inputSchema: {
+      room_type_id: z.string(),
+      from: z.string().optional().describe('YYYY-MM-DD, inclusive'),
+      to: z.string().optional().describe('YYYY-MM-DD, exclusive'),
+    },
+    run: ({ room_type_id, ...query }) => apiRequest('GET', `/api/room-types/${room_type_id}/rates`, { query }),
+  },
+  {
+    name: 'upsert_room_type_rates',
+    description: "Set a room type's nightly rate over date ranges (to is exclusive, like check_out). rate: null clears the range back to base_rate. A per-room override_rate still takes precedence.",
+    inputSchema: {
+      room_type_id: z.string(),
+      rates: z.array(z.object({
+        from: z.string().describe('YYYY-MM-DD, inclusive'),
+        to: z.string().describe('YYYY-MM-DD, exclusive'),
+        rate: z.number().nullable().describe('Nightly rate > 0, or null to delete the dated rates in range'),
+      })),
+    },
+    run: ({ room_type_id, rates }) => apiRequest('PUT', `/api/room-types/${room_type_id}/rates`, { body: { rates } }),
+  },
+  {
     name: 'list_restaurants',
     description: 'List all restaurants',
     inputSchema: {},

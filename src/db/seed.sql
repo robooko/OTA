@@ -63,14 +63,13 @@ FROM room r
 WHERE r.status = 'active'
 ON CONFLICT (room_id, date) DO NOTHING;
 
--- Override rates for peak season (June)
-UPDATE room_availability ra
-SET override_rate = rt.base_rate * 1.25
-FROM room r
-JOIN room_type rt ON rt.id = r.room_type_id
-WHERE ra.room_id = r.id
-  AND ra.date >= '2026-06-01'
-  AND ra.date <  '2026-07-01';
+-- Peak-season (June) dated rates at the room-type level: 25% over base.
+-- Per-room override_rate is reserved for genuine per-room exceptions.
+INSERT INTO room_type_rate (property_id, room_type_id, date, rate)
+SELECT rt.property_id, rt.id, d::date, ROUND(rt.base_rate * 1.25, 2)
+FROM room_type rt
+CROSS JOIN generate_series('2026-06-01'::timestamp, '2026-06-30'::timestamp, interval '1 day') d
+ON CONFLICT (room_type_id, date) DO NOTHING;
 
 -- Block room 101 for maintenance Apr 10-12
 UPDATE room_availability

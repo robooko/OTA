@@ -132,9 +132,10 @@ async function createBooking(req, res, next) {
     }
 
     let candidates;
+    let rateTypeId;
     if (room_id) {
       const roomRes = await client.query(
-        `SELECT r.id, r.status, rt.base_rate
+        `SELECT r.id, r.status, r.room_type_id, rt.base_rate
          FROM room r JOIN room_type rt ON rt.id = r.room_type_id
          WHERE r.id = $1 AND r.property_id = $2`,
         [room_id, req.property_id]
@@ -148,6 +149,7 @@ async function createBooking(req, res, next) {
         return res.status(409).json({ error: 'Room is not active' });
       }
       candidates = [{ id: roomRes.rows[0].id, base_rate: roomRes.rows[0].base_rate }];
+      rateTypeId = roomRes.rows[0].room_type_id;
     } else {
       const typeRes = await client.query(
         'SELECT id FROM room_type WHERE id = $1 AND property_id = $2', [room_type_id, req.property_id]
@@ -164,7 +166,18 @@ async function createBooking(req, res, next) {
         [room_type_id, req.property_id]
       );
       candidates = roomsRes.rows;
+      rateTypeId = room_type_id;
     }
+
+    // Dated type-level rates for the stay -- one fetch covers every candidate,
+    // since both branches yield rooms of a single room type.
+    const { rows: typeRateRows } = await client.query(
+      `SELECT date, rate FROM room_type_rate
+       WHERE room_type_id = $1 AND date >= $2 AND date < $3`,
+      [rateTypeId, check_in, check_out]
+    );
+    const typeRates = {};
+    for (const row of typeRateRows) typeRates[row.date] = parseFloat(row.rate);
 
     let booked = null;
     let lastUnavailableDate = null;
@@ -203,7 +216,9 @@ async function createBooking(req, res, next) {
       const baseRate = parseFloat(candidate.base_rate);
       for (const date of required) {
         const entry = availMap[date];
-        total += entry && entry.override_rate != null ? parseFloat(entry.override_rate) : baseRate;
+        if (entry && entry.override_rate != null) total += parseFloat(entry.override_rate);
+        else if (typeRates[date] != null) total += typeRates[date];
+        else total += baseRate;
       }
 
       try {
@@ -240,8 +255,17 @@ async function createBooking(req, res, next) {
       [booked.room_id, check_in, check_out]
     );
 
-    await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
     await client.query('COMMIT');
+
+    // After COMMIT: older Postgres rejects CONCURRENTLY inside a transaction
+    // block, and a failed refresh must not turn a committed booking into a
+    // 500 -- the exclusion constraint guards double-booking, not the view,
+    // and the view self-heals on the next refresh from any call site.
+    try {
+      await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
+    } catch (e) {
+      console.error('MV refresh failed after commit:', e.message);
+    }
 
     publishNewBooking(req.property_id, booked).catch((err) => console.error('Ably publish failed:', err.message));
 
@@ -313,8 +337,14 @@ async function cancelBooking(req, res, next) {
       [room_id, check_in, check_out]
     );
 
-    await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
     await client.query('COMMIT');
+
+    // After COMMIT -- see the matching note in createBooking.
+    try {
+      await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
+    } catch (e) {
+      console.error('MV refresh failed after commit:', e.message);
+    }
 
     publishBookingStatusChanged(req.property_id, { id: rows[0].id, status: rows[0].status, room_id: rows[0].room_id })
       .catch((err) => console.error('Ably publish failed:', err.message));
