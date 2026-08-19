@@ -76,7 +76,7 @@ async function sendReply(inquiry, propertyName, body, priorMessages = []) {
   const { data, error } = await client.emails.send({
     from: `${propertyName} via Forge <inquiries@hotal.forge-build.co.uk>`,
     to: inquiry.email,
-    reply_to: `inquiry+${inquiry.id}@${process.env.RESEND_REPLY_DOMAIN}`,
+    replyTo: `inquiry+${inquiry.id}@${process.env.RESEND_REPLY_DOMAIN}`,
     subject: 'Re: Your event inquiry',
     text: `${body}${buildHistoryText(history)}`,
     html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.5;max-width:600px;">${textToHtmlParagraphs(
