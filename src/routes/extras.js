@@ -9,7 +9,7 @@ router.put('/:id', authenticateOrApiKey, ctrl.updateExtra);
 
 // Booking extras
 router.get('/booking/:booking_id', authenticate, ctrl.listBookingExtras);
-router.post('/booking/:booking_id', authenticate, ctrl.addBookingExtra);
-router.delete('/booking/:booking_id/:id', authenticate, ctrl.removeBookingExtra);
+router.post('/booking/:booking_id', authenticateOrApiKey, ctrl.addBookingExtra);
+router.delete('/booking/:booking_id/:id', authenticateOrApiKey, ctrl.removeBookingExtra);
 
 module.exports = router;

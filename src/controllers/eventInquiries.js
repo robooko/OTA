@@ -148,20 +148,25 @@ async function createReply(req, res, next) {
     // hiccup here shouldn't fail the whole reply and leave the sent email
     // with no saved message row -- it just means this row won't carry a
     // sender (same as replies sent before sender attribution existed).
+    // req.user is only set for Clerk-authenticated staff -- an API-key/MCP
+    // caller has no Clerk identity to look up, so the reply is stored
+    // unattributed rather than attempted against a missing user id.
     let senderName = null;
     let senderAvatarUrl = null;
-    try {
-      const sender = await clerkClient.users.getUser(req.user.id);
-      senderName = [sender.firstName, sender.lastName].filter(Boolean).join(' ') || sender.username || 'Staff';
-      senderAvatarUrl = sender.imageUrl;
-    } catch (err) {
-      console.error('Failed to look up sender for reply attribution:', err.message);
+    if (req.user) {
+      try {
+        const sender = await clerkClient.users.getUser(req.user.id);
+        senderName = [sender.firstName, sender.lastName].filter(Boolean).join(' ') || sender.username || 'Staff';
+        senderAvatarUrl = sender.imageUrl;
+      } catch (err) {
+        console.error('Failed to look up sender for reply attribution:', err.message);
+      }
     }
 
     const { rows } = await pool.query(
       `INSERT INTO event_inquiry_message (event_inquiry_id, direction, body, resend_email_id, sent_by_user_id, sent_by_name, sent_by_avatar_url)
        VALUES ($1, 'outbound', $2, $3, $4, $5, $6) RETURNING *`,
-      [inquiry.id, body, emailId, req.user.id, senderName, senderAvatarUrl]
+      [inquiry.id, body, emailId, req.user?.id ?? null, senderName, senderAvatarUrl]
     );
 
     let updatedInquiry = inquiry;

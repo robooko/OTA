@@ -11,7 +11,7 @@ router.post('/', authenticateOrApiKey, ctrl.createRestaurant);
 router.get('/reservations', authenticateOrApiKey, ctrl.listAllReservations);
 
 router.get('/:id', authenticateOrApiKey, ctrl.getRestaurant);
-router.put('/:id', authenticate, ctrl.updateRestaurant);
+router.put('/:id', authenticateOrApiKey, ctrl.updateRestaurant);
 
 // Tables
 router.get('/:restaurant_id/tables', authenticateOrApiKey, ctrl.listTables);
