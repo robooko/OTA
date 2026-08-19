@@ -1,5 +1,6 @@
 const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
+const { publishNewBooking, publishBookingStatusChanged } = require('../lib/ably');
 
 function isValidMetadata(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -9,7 +10,7 @@ async function listBookings(req, res, next) {
   try {
     const { status, guest_id, from, to, skip, take } = req.query;
     let query = `
-      SELECT b.*, g.first_name, g.last_name, g.email,
+      SELECT b.*, g.first_name, g.last_name, g.email, g.phone,
              r.room_number, r.floor,
              rt.id AS room_type_id, rt.name AS room_type_name,
              rt.description AS room_type_description, rt.max_occupancy, rt.base_rate,
@@ -43,7 +44,7 @@ async function listBookings(req, res, next) {
 
     const filterParams = [...params]; // snapshot before pagination params are appended below
 
-    query += ' GROUP BY b.id, g.first_name, g.last_name, g.email, r.room_number, r.floor, rt.id, rt.name, rt.description, rt.max_occupancy, rt.base_rate';
+    query += ' GROUP BY b.id, g.first_name, g.last_name, g.email, g.phone, r.room_number, r.floor, rt.id, rt.name, rt.description, rt.max_occupancy, rt.base_rate';
     query += ' ORDER BY b.created_at DESC';
 
     if (take) { params.push(parseInt(take, 10)); query += ` LIMIT $${params.length}`; }
@@ -242,6 +243,8 @@ async function createBooking(req, res, next) {
     await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
     await client.query('COMMIT');
 
+    publishNewBooking(req.property_id, booked).catch((err) => console.error('Ably publish failed:', err.message));
+
     res.status(201).json(booked);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -257,6 +260,14 @@ async function updateBooking(req, res, next) {
     if (metadata !== undefined && !isValidMetadata(metadata)) {
       return res.status(400).json({ error: 'metadata must be a JSON object' });
     }
+
+    const beforeRes = await pool.query('SELECT status FROM booking WHERE id = $1 AND property_id = $2', [
+      req.params.id,
+      req.property_id,
+    ]);
+    if (!beforeRes.rows.length) return res.status(404).json({ error: 'Booking not found' });
+    const statusBefore = beforeRes.rows[0].status;
+
     const { rows } = await pool.query(
       `UPDATE booking SET
          status   = COALESCE($1, status),
@@ -266,6 +277,12 @@ async function updateBooking(req, res, next) {
       [status, guests, metadata ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
+
+    if (rows[0].status !== statusBefore) {
+      publishBookingStatusChanged(req.property_id, { id: rows[0].id, status: rows[0].status, room_id: rows[0].room_id })
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    }
+
     res.json(rows[0]);
   } catch (err) {
     next(err);
@@ -298,6 +315,9 @@ async function cancelBooking(req, res, next) {
 
     await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
     await client.query('COMMIT');
+
+    publishBookingStatusChanged(req.property_id, { id: rows[0].id, status: rows[0].status, room_id: rows[0].room_id })
+      .catch((err) => console.error('Ably publish failed:', err.message));
 
     res.json(rows[0]);
   } catch (err) {

@@ -42,4 +42,25 @@ async function publishInquiryUpdated(propertyId, inquiry) {
   await channel.publish('inquiry-updated', inquiry);
 }
 
-module.exports = { publishNewInquiry, publishNewOrder, publishOrderStatusChanged, publishNewReply, publishInquiryUpdated, client };
+async function publishNewBooking(propertyId, booking) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:bookings`);
+  await channel.publish('new-booking', booking);
+}
+
+async function publishBookingStatusChanged(propertyId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:bookings`);
+  await channel.publish('booking-status-changed', payload);
+}
+
+module.exports = {
+  publishNewInquiry,
+  publishNewOrder,
+  publishOrderStatusChanged,
+  publishNewReply,
+  publishInquiryUpdated,
+  publishNewBooking,
+  publishBookingStatusChanged,
+  client,
+};
