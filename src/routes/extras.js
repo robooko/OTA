@@ -4,8 +4,8 @@ const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
 
 // Extras catalogue
 router.get('/', authenticateOrApiKey, ctrl.listExtras);
-router.post('/', authenticate, ctrl.createExtra);
-router.put('/:id', authenticate, ctrl.updateExtra);
+router.post('/', authenticateOrApiKey, ctrl.createExtra);
+router.put('/:id', authenticateOrApiKey, ctrl.updateExtra);
 
 // Booking extras
 router.get('/booking/:booking_id', authenticate, ctrl.listBookingExtras);
