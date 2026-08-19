@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { seedRoomAvailability } = require('../lib/availabilitySeeder');
 
 async function listRooms(req, res, next) {
   try {
@@ -56,6 +57,13 @@ async function createRoom(req, res, next) {
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [req.property_id, room_type_id, room_number, floor || null, status || 'active']
     );
+
+    // Open-by-default availability: seed the horizon for the new room right
+    // away rather than waiting for the daily sweep. Fire-and-forget, same as
+    // the Ably publishes -- a seed hiccup shouldn't fail the create, the
+    // sweep will catch it up.
+    seedRoomAvailability(rows[0].id).catch((err) => console.error('Availability seed failed:', err.message));
+
     res.status(201).json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Room number already exists' });
@@ -86,6 +94,13 @@ async function updateRoom(req, res, next) {
       [room_type_id, room_number, floor, status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Room not found' });
+
+    // A room flipped (back) to active gets its horizon topped up immediately;
+    // for rooms already seeded this no-ops on the conflict clause.
+    if (rows[0].status === 'active') {
+      seedRoomAvailability(rows[0].id).catch((err) => console.error('Availability seed failed:', err.message));
+    }
+
     res.json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Room number already exists' });
