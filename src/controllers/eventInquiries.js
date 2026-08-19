@@ -1,4 +1,5 @@
 const { createClerkClient } = require('@clerk/backend');
+const EmailReplyParser = require('email-reply-parser').default;
 const pool = require('../db');
 const { isValidDate, isValidUuid, isValidTime } = require('../middleware/validate');
 const { publishNewInquiry, publishNewReply, publishInquiryUpdated } = require('../lib/ably');
@@ -224,13 +225,19 @@ async function handleResendInboundWebhook(req, res, next) {
 
     const email = await getReceivedEmail(event.data.email_id);
     const text = email.text ?? stripHtml(email.html ?? '');
+    // Guest replies come back with the whole quoted thread glued below the new
+    // text (their client re-includes our own "Previous messages" block, which
+    // would otherwise re-grow with every round trip) -- strip it down to just
+    // what the guest actually typed. Heuristic-based, so fall back to the raw
+    // text if parsing strips everything (e.g. an unrecognized quote format).
+    const body = new EmailReplyParser().read(text).getVisibleText().trim() || text;
 
     let rows;
     try {
       ({ rows } = await pool.query(
         `INSERT INTO event_inquiry_message (event_inquiry_id, direction, body, resend_email_id)
          VALUES ($1, 'inbound', $2, $3) RETURNING *`,
-        [inquiry.id, text, event.data.email_id]
+        [inquiry.id, body, event.data.email_id]
       ));
     } catch (err) {
       if (err.code === '23505') return res.status(200).end();
