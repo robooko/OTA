@@ -136,7 +136,12 @@ async function createReply(req, res, next) {
     if (!inquiryRows.length) return res.status(404).json({ error: 'Inquiry not found' });
     const inquiry = inquiryRows[0];
 
-    const emailId = await sendReply(inquiry, inquiry.property_name, body);
+    const { rows: priorMessages } = await pool.query(
+      'SELECT direction, body, sent_by_name, created_at FROM event_inquiry_message WHERE event_inquiry_id = $1 ORDER BY created_at ASC',
+      [inquiry.id]
+    );
+
+    const emailId = await sendReply(inquiry, inquiry.property_name, body, priorMessages);
 
     // Best-effort: the email has already gone out at this point, so a Clerk
     // hiccup here shouldn't fail the whole reply and leave the sent email
