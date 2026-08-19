@@ -4,7 +4,7 @@
 
 **Goal:** Publish `new-reservation`/`reservation-status-changed` Ably events on reservation create/status-change, and add a new property-wide `GET /api/restaurant/reservations` endpoint, so the Dashboard can show a live cross-restaurant reservations feed — per `docs/superpowers/specs/2026-08-16-reservations-realtime-feed-design.md`.
 
-**Architecture:** `src/lib/ably.js` gains two publish functions, same shape as the existing three, on a new `property:{property_id}:reservations` channel. `createReservation` publishes after its existing transaction commits (mirroring `restaurantOrders.js`'s `publishNewOrder` placement). `updateReservation` reads the reservation's status before applying its update, and only publishes `reservation-status-changed` if the value actually changed — a fix versus the original companion-session proposal, since this is a combined update endpoint (status/notes/contact fields together), not a dedicated status-only endpoint like orders has. `listPropertyReservations` is a new controller function reusing the existing `restaurant_table` join, added as a new route registered at the fixed one-segment path `/reservations` (no path collision with the existing two-segment `/:restaurant_id/reservations`).
+**Architecture:** `src/lib/ably.js` gains two publish functions, same shape as the existing three, on a new `property:{property_id}:reservations` channel. `createReservation` publishes after its existing transaction commits (mirroring `restaurantOrders.js`'s `publishNewOrder` placement). `updateReservation` reads the reservation's status before applying its update, and only publishes `reservation-status-changed` if the value actually changed — a fix versus the original companion-session proposal, since this is a combined update endpoint (status/notes/contact fields together), not a dedicated status-only endpoint like orders has. `listPropertyReservations` is a new controller function reusing the existing `restaurant_table` join, added as a new route at the fixed one-segment path `/reservations`. **Route ordering matters:** `src/routes/restaurant.js` already has `router.get('/:id', authenticateOrApiKey, ctrl.getRestaurant)` registered near the top of the file (single segment, same depth as `/reservations`) — Express matches same-depth routes in registration order, so `/reservations` MUST be registered before that `/:id` route, or every request to it would instead hit `getRestaurant` with `id="reservations"` (confirmed as a live bug during this session: that exact request crashes the whole server, since `getRestaurant` doesn't validate its `:id` param is a UUID before querying). This is unrelated to the two-segment `/:restaurant_id/reservations` route, which never collides regardless of ordering.
 
 **Tech Stack:** Node/Express, `pg` (plain SQL), PostgreSQL, `ably` (already a dependency).
 
@@ -353,25 +353,43 @@ module.exports = {
 };
 ```
 
-- [ ] **Step 2: Add the route**
+- [ ] **Step 2: Add the route — BEFORE the `/:id` restaurant route, not in the Reservations section**
+
+**This exact placement matters and is not optional.** `src/routes/restaurant.js` already has, near the top of the file:
+
+```js
+// Restaurants
+router.get('/', authenticateOrApiKey, ctrl.listRestaurants);
+router.get('/:id', authenticateOrApiKey, ctrl.getRestaurant);
+```
+
+`/:id` is a single dynamic segment, the same depth as the new `/reservations` route. Express matches same-depth routes in registration order, so if `/reservations` were registered anywhere after `/:id` (e.g. down in the "Reservations" section, where it might seem to belong visually), every request to `GET /api/restaurant/reservations` would instead match `/:id` first, with `id` literally set to the string `"reservations"` — `getRestaurant` would then try to query with that as a UUID and crash (confirmed live during this session: this exact request pattern takes down the whole server, since `getRestaurant` doesn't validate `:id` is a UUID before querying Postgres with it). The new route must be registered in the "Restaurants" block itself, immediately after `listRestaurants` and before `getRestaurant`.
 
 In `src/routes/restaurant.js`, replace:
 
 ```js
-// Reservations
-router.get('/:restaurant_id/reservations', authenticateOrApiKey, ctrl.listReservations);
-router.get('/:restaurant_id/reservations/:id', authenticateOrApiKey, ctrl.getReservation);
-router.post('/:restaurant_id/reservations', authenticateOrApiKey, ctrl.createReservation);
-router.put('/:restaurant_id/reservations/:id', authenticateOrApiKey, ctrl.updateReservation);
-
-module.exports = router;
+// Restaurants
+router.get('/', authenticateOrApiKey, ctrl.listRestaurants);
+router.get('/:id', authenticateOrApiKey, ctrl.getRestaurant);
+router.post('/', authenticate, ctrl.createRestaurant);
+router.put('/:id', authenticate, ctrl.updateRestaurant);
 ```
 
 with:
 
 ```js
-// Reservations
+// Restaurants
+router.get('/', authenticateOrApiKey, ctrl.listRestaurants);
 router.get('/reservations', authenticate, ctrl.listPropertyReservations);
+router.get('/:id', authenticateOrApiKey, ctrl.getRestaurant);
+router.post('/', authenticate, ctrl.createRestaurant);
+router.put('/:id', authenticate, ctrl.updateRestaurant);
+```
+
+The existing "Reservations" section further down stays completely unchanged:
+
+```js
+// Reservations
 router.get('/:restaurant_id/reservations', authenticateOrApiKey, ctrl.listReservations);
 router.get('/:restaurant_id/reservations/:id', authenticateOrApiKey, ctrl.getReservation);
 router.post('/:restaurant_id/reservations', authenticateOrApiKey, ctrl.createReservation);
@@ -380,7 +398,7 @@ router.put('/:restaurant_id/reservations/:id', authenticateOrApiKey, ctrl.update
 module.exports = router;
 ```
 
-(Registered above the `:restaurant_id`-parameterized routes so it's visually grouped as "the property-wide one," though route matching in Express is by path shape/segment count, not registration order, so this placement doesn't affect behavior — either position would work.)
+(That two-segment `/:restaurant_id/reservations` shape never collides with the new one-segment `/reservations` route regardless of ordering — only same-depth routes compete. The collision is specifically with `/:id`, which is why the fix has to go where `/:id` is, not where the other reservation routes are.)
 
 - [ ] **Step 3: Update Swagger**
 
@@ -417,6 +435,15 @@ curl -s -w "\nHTTP_STATUS:%{http_code}\n" http://localhost:3000/api/restaurant/r
 
 echo "--- with Robs's token ---"
 curl -s -w "\nHTTP_STATUS:%{http_code}\n" http://localhost:3000/api/restaurant/reservations -H "Authorization: Bearer $CLERK_TOKEN"
+
+echo "--- confirm this hit listPropertyReservations, not getRestaurant (the route-collision check) ---"
+curl -s http://localhost:3000/api/restaurant/reservations -H "Authorization: Bearer $CLERK_TOKEN" | node -e "
+let d=''; process.stdin.on('data',c=>d+=c).on('end',()=>{
+  const body = JSON.parse(d);
+  console.log('Is array:', Array.isArray(body));
+  console.log('Has a bare .name/.status at top level (would indicate a single restaurant object, i.e. the collision bug):', typeof body === 'object' && !Array.isArray(body) && 'name' in body);
+});
+"
 
 echo "--- filtered by status=cancelled ---"
 curl -s -w "\nHTTP_STATUS:%{http_code}\n" "http://localhost:3000/api/restaurant/reservations?status=cancelled" -H "Authorization: Bearer $CLERK_TOKEN"
