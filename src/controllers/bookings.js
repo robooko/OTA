@@ -6,6 +6,27 @@ function isValidMetadata(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+// Same JOINs as getBooking, minus the extras query -- used everywhere a
+// booking gets published to a live feed. Consumers (hotal-ui's
+// <live-room-bookings-feed>) upsert-by-replace on every event, so a payload
+// missing these fields blanks out the guest name / room line rather than
+// leaving it unchanged.
+async function fetchJoinedBooking(id) {
+  const { rows } = await pool.query(
+    `SELECT b.*,
+            g.first_name, g.last_name, g.email, g.phone,
+            r.room_number, r.floor, r.status AS room_status,
+            rt.id AS room_type_id, rt.name AS room_type_name, rt.base_rate
+     FROM booking b
+     JOIN guest     g  ON g.id  = b.guest_id
+     JOIN room      r  ON r.id  = b.room_id
+     JOIN room_type rt ON rt.id = r.room_type_id
+     WHERE b.id = $1`,
+    [id]
+  );
+  return rows[0];
+}
+
 async function listBookings(req, res, next) {
   try {
     const { status, guest_id, from, to, skip, take } = req.query;
@@ -268,26 +289,10 @@ async function createBooking(req, res, next) {
     }
 
     // `booked` is only the raw `booking` row (INSERT ... RETURNING *) -- no
-    // guest/room/room_type fields. listBookings/getBooking join those in, and
-    // live-feed consumers (hotal-ui's <live-room-bookings-feed>) render
-    // straight off whatever shape they receive over Ably, so a live-pushed
-    // booking would otherwise show a blank guest name / room line. Re-fetch
-    // the joined shape (same JOINs as getBooking) so both the Ably payload
-    // and the HTTP response carry it, consistent with every other booking
-    // read.
-    const { rows: joined } = await pool.query(
-      `SELECT b.*,
-              g.first_name, g.last_name, g.email, g.phone,
-              r.room_number, r.floor, r.status AS room_status,
-              rt.id AS room_type_id, rt.name AS room_type_name, rt.base_rate
-       FROM booking b
-       JOIN guest     g  ON g.id  = b.guest_id
-       JOIN room      r  ON r.id  = b.room_id
-       JOIN room_type rt ON rt.id = r.room_type_id
-       WHERE b.id = $1`,
-      [booked.id]
-    );
-    const bookedFull = joined[0] ?? booked;
+    // guest/room/room_type fields. Re-fetch the joined shape so both the Ably
+    // payload and the HTTP response carry it, consistent with every other
+    // booking read (see fetchJoinedBooking).
+    const bookedFull = (await fetchJoinedBooking(booked.id)) ?? booked;
 
     publishNewBooking(req.property_id, bookedFull).catch((err) => console.error('Ably publish failed:', err.message));
 
@@ -324,12 +329,17 @@ async function updateBooking(req, res, next) {
     );
     if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
 
+    const bookedFull = (await fetchJoinedBooking(rows[0].id)) ?? rows[0];
+
     if (rows[0].status !== statusBefore) {
-      publishBookingStatusChanged(req.property_id, { id: rows[0].id, status: rows[0].status, room_id: rows[0].room_id })
-        .catch((err) => console.error('Ably publish failed:', err.message));
+      // Full joined row, not just {id, status, room_id} -- the live feed
+      // upserts by replacing the whole list item on every event (see
+      // fetchJoinedBooking), so a partial payload here blanked out the
+      // guest name / room line on every status change, not just creation.
+      publishBookingStatusChanged(req.property_id, bookedFull).catch((err) => console.error('Ably publish failed:', err.message));
     }
 
-    res.json(rows[0]);
+    res.json(bookedFull);
   } catch (err) {
     next(err);
   }
@@ -368,10 +378,11 @@ async function cancelBooking(req, res, next) {
       console.error('MV refresh failed after commit:', e.message);
     }
 
-    publishBookingStatusChanged(req.property_id, { id: rows[0].id, status: rows[0].status, room_id: rows[0].room_id })
-      .catch((err) => console.error('Ably publish failed:', err.message));
+    // Full joined row -- see the matching note in updateBooking.
+    const bookedFull = (await fetchJoinedBooking(rows[0].id)) ?? rows[0];
+    publishBookingStatusChanged(req.property_id, bookedFull).catch((err) => console.error('Ably publish failed:', err.message));
 
-    res.json(rows[0]);
+    res.json(bookedFull);
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
