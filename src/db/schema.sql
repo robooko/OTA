@@ -529,7 +529,8 @@ CREATE TABLE IF NOT EXISTS restaurant_order_item (
   item_id     UUID          REFERENCES restaurant_menu_item(id),
   item_name   VARCHAR(100)  NOT NULL,
   quantity    INT           NOT NULL DEFAULT 1,
-  unit_price  NUMERIC(10,2) NOT NULL
+  unit_price  NUMERIC(10,2) NOT NULL,
+  variant     VARCHAR(100)
 );
 
 CREATE INDEX IF NOT EXISTS idx_restaurant_order_booking    ON restaurant_order(booking_id);

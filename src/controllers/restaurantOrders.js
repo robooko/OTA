@@ -140,6 +140,7 @@ async function listOrders(req, res, next) {
                'item_name', oi.item_name,
                'quantity', oi.quantity,
                'unit_price', oi.unit_price,
+               'variant', oi.variant,
                'total', (oi.quantity * oi.unit_price)
              )) AS items
       FROM restaurant_order o
@@ -182,6 +183,7 @@ async function getOrder(req, res, next) {
                 'item_name', oi.item_name,
                 'quantity', oi.quantity,
                 'unit_price', oi.unit_price,
+                'variant', oi.variant,
                 'total', (oi.quantity * oi.unit_price)
               )) AS items
        FROM restaurant_order o
@@ -232,7 +234,7 @@ async function createOrder(req, res, next) {
       let total = 0;
       const resolvedItems = [];
       for (const item of items) {
-        const { item_id, quantity = 1 } = item;
+        const { item_id, quantity = 1, variant } = item;
         const { rows: found } = await client.query(
           `SELECT id, name, price FROM restaurant_menu_item WHERE id = $1 AND property_id = $2 AND status = 'active'`,
           [item_id, req.property_id]
@@ -243,7 +245,7 @@ async function createOrder(req, res, next) {
         }
         const unit_price = parseFloat(found[0].price);
         total += unit_price * quantity;
-        resolvedItems.push({ item_id, item_name: found[0].name, quantity, unit_price });
+        resolvedItems.push({ item_id, item_name: found[0].name, quantity, unit_price, variant: variant || null });
       }
 
       // Create order
@@ -256,9 +258,9 @@ async function createOrder(req, res, next) {
       // Insert line items
       for (const li of resolvedItems) {
         await client.query(
-          `INSERT INTO restaurant_order_item (order_id, item_id, item_name, quantity, unit_price)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [order[0].id, li.item_id, li.item_name, li.quantity, li.unit_price]
+          `INSERT INTO restaurant_order_item (order_id, item_id, item_name, quantity, unit_price, variant)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [order[0].id, li.item_id, li.item_name, li.quantity, li.unit_price, li.variant]
         );
       }
 
@@ -287,11 +289,38 @@ async function updateOrderStatus(req, res, next) {
       [status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
+
+    // live-dining-orders-feed's upsert() replaces the whole list item for an
+    // id on every event (see the matching fix in OTA/bookings.js) -- a bare
+    // {id, status, restaurant_id} patch would blank out the order's items/
+    // total/table/booking on every status change. Re-fetch the joined shape
+    // (same as getOrder) for the two order-feed channels; the room-service
+    // booking-scoped channel keeps the narrow payload since its consumer
+    // (peter-island) isn't verified to expect the fuller shape.
+    const { rows: full } = await pool.query(
+      `SELECT o.*,
+              json_agg(json_build_object(
+                'id', oi.id,
+                'item_id', oi.item_id,
+                'item_name', oi.item_name,
+                'quantity', oi.quantity,
+                'unit_price', oi.unit_price,
+                'variant', oi.variant,
+                'total', (oi.quantity * oi.unit_price)
+              )) AS items
+       FROM restaurant_order o
+       LEFT JOIN restaurant_order_item oi ON oi.order_id = o.id
+       WHERE o.id = $1
+       GROUP BY o.id`,
+      [rows[0].id]
+    );
+    const orderFull = full[0] ?? rows[0];
+
     const payload = { id: rows[0].id, status: rows[0].status, restaurant_id: rows[0].restaurant_id };
-    publishOrderStatusChanged(rows[0].restaurant_id, payload).catch((err) => console.error('Ably publish failed:', err.message));
-    publishOrderStatusChangedForProperty(rows[0].property_id, payload).catch((err) => console.error('Ably publish failed:', err.message));
+    publishOrderStatusChanged(rows[0].restaurant_id, orderFull).catch((err) => console.error('Ably publish failed:', err.message));
+    publishOrderStatusChangedForProperty(rows[0].property_id, orderFull).catch((err) => console.error('Ably publish failed:', err.message));
     publishOrderStatusChangedForBooking(rows[0].booking_id, payload).catch((err) => console.error('Ably publish failed:', err.message));
-    res.json(rows[0]);
+    res.json(orderFull);
   } catch (err) { next(err); }
 }
 
