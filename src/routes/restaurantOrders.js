@@ -14,6 +14,6 @@ router.get('/ably-token', authenticate, ctrl.getAblyToken);
 router.get('/', authenticateOrApiKey, ctrl.listOrders);
 router.get('/:id', authenticate, ctrl.getOrder);
 router.post('/', authenticateOrApiKey, ctrl.createOrder);
-router.put('/:id/status', authenticate, ctrl.updateOrderStatus);
+router.put('/:id/status', authenticateOrApiKey, ctrl.updateOrderStatus);
 
 module.exports = router;

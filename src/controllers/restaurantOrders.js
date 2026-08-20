@@ -1,5 +1,12 @@
 const pool = require('../db');
-const { publishNewOrder, publishOrderStatusChanged, publishOrderStatusChangedForBooking, client: ablyClient } = require('../lib/ably');
+const {
+  publishNewOrder,
+  publishOrderStatusChanged,
+  publishNewOrderForProperty,
+  publishOrderStatusChangedForProperty,
+  publishOrderStatusChangedForBooking,
+  client: ablyClient,
+} = require('../lib/ably');
 
 function isValidTranslations(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -257,6 +264,7 @@ async function createOrder(req, res, next) {
 
       await client.query('COMMIT');
       publishNewOrder(restaurant_id, { ...order[0], items: resolvedItems }).catch((err) => console.error('Ably publish failed:', err.message));
+      publishNewOrderForProperty(req.property_id, { ...order[0], items: resolvedItems }).catch((err) => console.error('Ably publish failed:', err.message));
       res.status(201).json({ ...order[0], items: resolvedItems });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -281,6 +289,7 @@ async function updateOrderStatus(req, res, next) {
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
     const payload = { id: rows[0].id, status: rows[0].status, restaurant_id: rows[0].restaurant_id };
     publishOrderStatusChanged(rows[0].restaurant_id, payload).catch((err) => console.error('Ably publish failed:', err.message));
+    publishOrderStatusChangedForProperty(rows[0].property_id, payload).catch((err) => console.error('Ably publish failed:', err.message));
     publishOrderStatusChangedForBooking(rows[0].booking_id, payload).catch((err) => console.error('Ably publish failed:', err.message));
     res.json(rows[0]);
   } catch (err) { next(err); }

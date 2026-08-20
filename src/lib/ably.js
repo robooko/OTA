@@ -30,6 +30,31 @@ async function publishOrderStatusChanged(restaurantId, payload) {
   await channel.publish('order-status-changed', payload);
 }
 
+// Mirrors new-order/order-status-changed onto a property-wide channel, for a
+// dashboard that shows orders across every restaurant on the property rather
+// than one restaurant at a time (the restaurant-scoped channel above stays,
+// for guest-facing views scoped to a single restaurant).
+async function publishNewOrderForProperty(propertyId, order) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:orders`);
+  await channel.publish('new-order', order);
+}
+
+async function publishOrderStatusChangedForProperty(propertyId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:orders`);
+  await channel.publish('order-status-changed', payload);
+}
+
+// Mirrors the restaurant-wide status event onto a per-booking channel, so a
+// guest-facing view can subscribe without seeing every other guest's orders
+// (peter-island mints a booking-scoped Ably token for that channel).
+async function publishOrderStatusChangedForBooking(bookingId, payload) {
+  if (!client || !bookingId) return;
+  const channel = client.channels.get(`room-service:${bookingId}`);
+  await channel.publish('order-status-changed', payload);
+}
+
 async function publishNewReply(propertyId, payload) {
   if (!client) return;
   const channel = client.channels.get(`property:${propertyId}:inquiries`);
@@ -58,6 +83,9 @@ module.exports = {
   publishNewInquiry,
   publishNewOrder,
   publishOrderStatusChanged,
+  publishNewOrderForProperty,
+  publishOrderStatusChangedForProperty,
+  publishOrderStatusChangedForBooking,
   publishNewReply,
   publishInquiryUpdated,
   publishNewBooking,
