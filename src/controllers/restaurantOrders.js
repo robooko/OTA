@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { publishNewOrder, publishOrderStatusChanged, client: ablyClient } = require('../lib/ably');
+const { publishNewOrder, publishOrderStatusChanged, publishOrderStatusChangedForBooking, client: ablyClient } = require('../lib/ably');
 
 function isValidTranslations(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -22,10 +22,13 @@ async function listMenuItems(req, res, next) {
 
 async function createMenuItem(req, res, next) {
   try {
-    const { name, description, category, price, restaurant_id, allergens, translations } = req.body;
+    const { name, description, category, price, restaurant_id, allergens, variants, translations } = req.body;
     if (!name || price == null) return res.status(400).json({ error: 'name and price are required' });
     if (allergens !== undefined && !Array.isArray(allergens)) {
       return res.status(400).json({ error: 'allergens must be an array of strings' });
+    }
+    if (variants !== undefined && !Array.isArray(variants)) {
+      return res.status(400).json({ error: 'variants must be an array of strings' });
     }
     if (translations !== undefined && !isValidTranslations(translations)) {
       return res.status(400).json({ error: 'translations must be a JSON object keyed by language code' });
@@ -40,9 +43,9 @@ async function createMenuItem(req, res, next) {
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO restaurant_menu_item (property_id, restaurant_id, name, description, category, price, allergens, translations)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.property_id, restaurant_id || null, name, description || null, category || null, price, allergens ?? [], translations ?? {}]
+      `INSERT INTO restaurant_menu_item (property_id, restaurant_id, name, description, category, price, allergens, variants, translations)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.property_id, restaurant_id || null, name, description || null, category || null, price, allergens ?? [], variants ?? [], translations ?? {}]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -50,9 +53,12 @@ async function createMenuItem(req, res, next) {
 
 async function updateMenuItem(req, res, next) {
   try {
-    const { name, description, category, price, status, restaurant_id, allergens, translations } = req.body;
+    const { name, description, category, price, status, restaurant_id, allergens, variants, translations } = req.body;
     if (allergens !== undefined && !Array.isArray(allergens)) {
       return res.status(400).json({ error: 'allergens must be an array of strings' });
+    }
+    if (variants !== undefined && !Array.isArray(variants)) {
+      return res.status(400).json({ error: 'variants must be an array of strings' });
     }
     if (translations !== undefined && !isValidTranslations(translations)) {
       return res.status(400).json({ error: 'translations must be a JSON object keyed by language code' });
@@ -75,9 +81,10 @@ async function updateMenuItem(req, res, next) {
          status        = COALESCE($5, status),
          restaurant_id = COALESCE($6, restaurant_id),
          allergens     = COALESCE($7, allergens),
-         translations  = COALESCE($8::jsonb, translations)
-       WHERE id = $9 AND property_id = $10 RETURNING *`,
-      [name, description, category, price, status, restaurant_id, allergens ?? null, translations ?? null, req.params.id, req.property_id]
+         variants      = COALESCE($8, variants),
+         translations  = COALESCE($9::jsonb, translations)
+       WHERE id = $10 AND property_id = $11 RETURNING *`,
+      [name, description, category, price, status, restaurant_id, allergens ?? null, variants ?? null, translations ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Item not found' });
     res.json(rows[0]);
@@ -272,7 +279,9 @@ async function updateOrderStatus(req, res, next) {
       [status, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
-    publishOrderStatusChanged(rows[0].restaurant_id, { id: rows[0].id, status: rows[0].status, restaurant_id: rows[0].restaurant_id }).catch((err) => console.error('Ably publish failed:', err.message));
+    const payload = { id: rows[0].id, status: rows[0].status, restaurant_id: rows[0].restaurant_id };
+    publishOrderStatusChanged(rows[0].restaurant_id, payload).catch((err) => console.error('Ably publish failed:', err.message));
+    publishOrderStatusChangedForBooking(rows[0].booking_id, payload).catch((err) => console.error('Ably publish failed:', err.message));
     res.json(rows[0]);
   } catch (err) { next(err); }
 }

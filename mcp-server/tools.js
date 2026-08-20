@@ -257,6 +257,7 @@ function createTools(apiRequest) {
       price: z.number(),
       restaurant_id: z.string().optional().describe('Omit for a property-wide item not tied to one restaurant'),
       allergens: z.array(z.string()).optional(),
+      variants: z.array(z.string()).optional().describe('e.g. ["Small", "Large"], ["Mild", "Hot"]'),
       translations: z.record(z.object({ name: z.string().optional(), description: z.string().optional() }))
         .optional()
         .describe('Keyed by language code, e.g. { "fr": { "name": "...", "description": "..." } }'),
@@ -274,6 +275,7 @@ function createTools(apiRequest) {
       price: z.number().optional(),
       restaurant_id: z.string().optional(),
       allergens: z.array(z.string()).optional(),
+      variants: z.array(z.string()).optional().describe('e.g. ["Small", "Large"], ["Mild", "Hot"]'),
       translations: z.record(z.object({ name: z.string().optional(), description: z.string().optional() }))
         .optional()
         .describe('Keyed by language code -- replaces the whole object, not a per-language merge'),
