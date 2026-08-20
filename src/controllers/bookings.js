@@ -267,9 +267,31 @@ async function createBooking(req, res, next) {
       console.error('MV refresh failed after commit:', e.message);
     }
 
-    publishNewBooking(req.property_id, booked).catch((err) => console.error('Ably publish failed:', err.message));
+    // `booked` is only the raw `booking` row (INSERT ... RETURNING *) -- no
+    // guest/room/room_type fields. listBookings/getBooking join those in, and
+    // live-feed consumers (hotal-ui's <live-room-bookings-feed>) render
+    // straight off whatever shape they receive over Ably, so a live-pushed
+    // booking would otherwise show a blank guest name / room line. Re-fetch
+    // the joined shape (same JOINs as getBooking) so both the Ably payload
+    // and the HTTP response carry it, consistent with every other booking
+    // read.
+    const { rows: joined } = await pool.query(
+      `SELECT b.*,
+              g.first_name, g.last_name, g.email, g.phone,
+              r.room_number, r.floor, r.status AS room_status,
+              rt.id AS room_type_id, rt.name AS room_type_name, rt.base_rate
+       FROM booking b
+       JOIN guest     g  ON g.id  = b.guest_id
+       JOIN room      r  ON r.id  = b.room_id
+       JOIN room_type rt ON rt.id = r.room_type_id
+       WHERE b.id = $1`,
+      [booked.id]
+    );
+    const bookedFull = joined[0] ?? booked;
 
-    res.status(201).json(booked);
+    publishNewBooking(req.property_id, bookedFull).catch((err) => console.error('Ably publish failed:', err.message));
+
+    res.status(201).json(bookedFull);
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
