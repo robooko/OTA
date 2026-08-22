@@ -13,6 +13,8 @@ router.get('/tee-times/search', authenticateOrApiKey, ctrl.searchTeeTimes);
 
 // Bookings
 router.get('/bookings', authenticateOrApiKey, ctrl.listBookings);
+// Cursor-paginated, newest-first -- for the live feed, not the admin table above.
+router.get('/bookings/live', authenticateOrApiKey, ctrl.listBookingsForProperty);
 router.post('/bookings', authenticateOrApiKey, ctrl.createBooking);
 router.put('/bookings/:id', authenticateOrApiKey, ctrl.updateBooking);
 

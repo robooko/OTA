@@ -109,6 +109,21 @@ async function publishSpaBookingStatusChangedForProperty(propertyId, payload) {
   await channel.publish('booking-status-changed', payload);
 }
 
+// For @forgebuild/hotal-ui's <live-golf-bookings-feed> -- golf has no prior
+// per-course Ably channel to mirror (unlike spa's spa:{id}:appointments), so
+// this is the only publish path for golf bookings.
+async function publishNewGolfBookingForProperty(propertyId, booking) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:golf-bookings`);
+  await channel.publish('new-booking', booking);
+}
+
+async function publishGolfBookingStatusChangedForProperty(propertyId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:golf-bookings`);
+  await channel.publish('booking-status-changed', payload);
+}
+
 module.exports = {
   publishNewInquiry,
   publishNewOrder,
@@ -124,5 +139,7 @@ module.exports = {
   publishAppointmentStatusChanged,
   publishNewSpaBookingForProperty,
   publishSpaBookingStatusChangedForProperty,
+  publishNewGolfBookingForProperty,
+  publishGolfBookingStatusChangedForProperty,
   client,
 };

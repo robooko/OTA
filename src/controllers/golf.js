@@ -1,5 +1,6 @@
 const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
+const { publishNewGolfBookingForProperty, publishGolfBookingStatusChangedForProperty } = require('../lib/ably');
 
 // Steps a 'YYYY-MM-DD' string forward by whole days via UTC epoch math --
 // `new Date(str); d.setDate(d.getDate() + 1)` looks equivalent but
@@ -122,6 +123,77 @@ async function searchTeeTimes(req, res, next) {
 
 // ── Bookings ──────────────────────────────────────────────────────────────────
 
+// Same JOIN as listBookings (minus proshop_items) -- used everywhere a
+// booking gets published to a live feed or reshaped for one.
+async function fetchJoinedBooking(id) {
+  const { rows } = await pool.query(
+    `SELECT gb.*, tt.tee_date, tt.tee_time, gc.name AS course_name, gc.holes, gc.price_per_player
+     FROM golf_booking gb
+     JOIN tee_time tt ON tt.id = gb.tee_time_id
+     JOIN golf_course gc ON gc.id = tt.course_id
+     WHERE gb.id = $1`,
+    [id]
+  );
+  return rows[0];
+}
+
+// golf_booking stores one 'contact_name' field (same convention as spa/
+// equipment/beach-club/tours bookings) -- but @forgebuild/hotal-ui's
+// <live-golf-bookings-feed> expects split first_name/last_name (modeled on
+// the guest table shape used by room bookings). Split on the first space
+// rather than adding a name column just to satisfy this one feed.
+function splitContactName(name) {
+  const trimmed = (name || '').trim();
+  const spaceIdx = trimmed.indexOf(' ');
+  return spaceIdx === -1
+    ? { first_name: trimmed, last_name: '' }
+    : { first_name: trimmed.slice(0, spaceIdx), last_name: trimmed.slice(spaceIdx + 1) };
+}
+
+// Shapes a joined golf_booking row (see fetchJoinedBooking) into the
+// GolfBooking contract hotal-ui's feed expects. tee_time is built as a plain
+// 'YYYY-MM-DDTHH:MM:SS' string, deliberately not UTC-normalized -- tee times
+// have no stored timezone, so this is treated as the property's own local
+// wall-clock time and the client renders it as-is (same reasoning as spa's
+// toLiveSpaBooking start_time).
+function toGolfBooking(row) {
+  const { first_name, last_name } = splitContactName(row.contact_name);
+  return {
+    id: row.id,
+    first_name,
+    last_name,
+    email: row.contact_email,
+    phone: row.contact_phone,
+    course_name: row.course_name,
+    tee_time: `${row.tee_date instanceof Date ? row.tee_date.toISOString().slice(0, 10) : row.tee_date}T${row.tee_time}`,
+    players: row.players,
+    holes: row.holes,
+    price: row.total_price,
+    status: row.status,
+    created_at: row.created_at,
+  };
+}
+
+async function listBookingsForProperty(req, res, next) {
+  try {
+    const { cursor, limit } = req.query;
+    const take = Math.min(parseInt(limit, 10) || 30, 100);
+    let query = `
+      SELECT gb.*, tt.tee_date, tt.tee_time, gc.name AS course_name, gc.holes, gc.price_per_player
+      FROM golf_booking gb
+      JOIN tee_time tt ON tt.id = gb.tee_time_id
+      JOIN golf_course gc ON gc.id = tt.course_id
+      WHERE gb.property_id = $1
+    `;
+    const params = [req.property_id];
+    if (cursor) { params.push(cursor); query += ` AND gb.created_at < $${params.length}`; }
+    params.push(take);
+    query += ` ORDER BY gb.created_at DESC LIMIT $${params.length}`;
+    const { rows } = await pool.query(query, params);
+    res.json(rows.map(toGolfBooking));
+  } catch (err) { next(err); }
+}
+
 async function listBookings(req, res, next) {
   try {
     const { date, status, guest_id, skip, take } = req.query;
@@ -203,6 +275,13 @@ async function createBooking(req, res, next) {
     );
 
     await client.query('COMMIT');
+
+    const full = await fetchJoinedBooking(rows[0].id);
+    if (full) {
+      publishNewGolfBookingForProperty(req.property_id, toGolfBooking(full))
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    }
+
     res.status(201).json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -226,6 +305,19 @@ async function updateBooking(req, res, next) {
       [status, notes, contact_name, contact_email, contact_phone, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
+
+    // live-golf-bookings-feed's upsert replaces the whole list item for an
+    // id on every event (same as live-spa-bookings-feed/live-dining-orders-
+    // feed) -- only mirror explicit status changes (the cancel button), same
+    // scope as spa's property-wide publish.
+    if (status !== undefined) {
+      const full = await fetchJoinedBooking(rows[0].id);
+      if (full) {
+        publishGolfBookingStatusChangedForProperty(req.property_id, toGolfBooking(full))
+          .catch((err) => console.error('Ably publish failed:', err.message));
+      }
+    }
+
     res.json(rows[0]);
   } catch (err) { next(err); }
 }
@@ -234,4 +326,5 @@ module.exports = {
   listCourses, createCourse, updateCourse,
   bulkCreateTeeTimes, searchTeeTimes,
   listBookings, createBooking, updateBooking,
+  listBookingsForProperty,
 };
