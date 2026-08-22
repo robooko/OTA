@@ -123,15 +123,22 @@ async function searchTeeTimes(req, res, next) {
 
 // ── Bookings ──────────────────────────────────────────────────────────────────
 
-// Same JOIN as listBookings (minus proshop_items) -- used everywhere a
+// Same JOIN as listBookings (including proshop_items) -- used everywhere a
 // booking gets published to a live feed or reshaped for one.
 async function fetchJoinedBooking(id) {
   const { rows } = await pool.query(
-    `SELECT gb.*, tt.tee_date, tt.tee_time, gc.name AS course_name, gc.holes, gc.price_per_player
+    `SELECT gb.*, tt.tee_date, tt.tee_time, gc.name AS course_name, gc.holes, gc.price_per_player,
+            COALESCE(json_agg(json_build_object(
+              'id', gbi.id, 'item_id', gbi.item_id, 'item_name', gbi.item_name,
+              'quantity', gbi.quantity, 'unit_price', gbi.unit_price,
+              'total', (gbi.quantity * gbi.unit_price)
+            )) FILTER (WHERE gbi.id IS NOT NULL), '[]') AS proshop_items
      FROM golf_booking gb
      JOIN tee_time tt ON tt.id = gb.tee_time_id
      JOIN golf_course gc ON gc.id = tt.course_id
-     WHERE gb.id = $1`,
+     LEFT JOIN golf_booking_item gbi ON gbi.booking_id = gb.id
+     WHERE gb.id = $1
+     GROUP BY gb.id, tt.tee_date, tt.tee_time, gc.name, gc.holes, gc.price_per_player`,
     [id]
   );
   return rows[0];
@@ -169,6 +176,7 @@ function toGolfBooking(row) {
     players: row.players,
     holes: row.holes,
     price: row.total_price,
+    items: row.proshop_items ?? [],
     status: row.status,
     created_at: row.created_at,
   };
@@ -179,14 +187,21 @@ async function listBookingsForProperty(req, res, next) {
     const { cursor, limit } = req.query;
     const take = Math.min(parseInt(limit, 10) || 30, 100);
     let query = `
-      SELECT gb.*, tt.tee_date, tt.tee_time, gc.name AS course_name, gc.holes, gc.price_per_player
+      SELECT gb.*, tt.tee_date, tt.tee_time, gc.name AS course_name, gc.holes, gc.price_per_player,
+             COALESCE(json_agg(json_build_object(
+               'id', gbi.id, 'item_id', gbi.item_id, 'item_name', gbi.item_name,
+               'quantity', gbi.quantity, 'unit_price', gbi.unit_price,
+               'total', (gbi.quantity * gbi.unit_price)
+             )) FILTER (WHERE gbi.id IS NOT NULL), '[]') AS proshop_items
       FROM golf_booking gb
       JOIN tee_time tt ON tt.id = gb.tee_time_id
       JOIN golf_course gc ON gc.id = tt.course_id
+      LEFT JOIN golf_booking_item gbi ON gbi.booking_id = gb.id
       WHERE gb.property_id = $1
     `;
     const params = [req.property_id];
     if (cursor) { params.push(cursor); query += ` AND gb.created_at < $${params.length}`; }
+    query += ' GROUP BY gb.id, tt.tee_date, tt.tee_time, gc.name, gc.holes, gc.price_per_player';
     params.push(take);
     query += ` ORDER BY gb.created_at DESC LIMIT $${params.length}`;
     const { rows } = await pool.query(query, params);
