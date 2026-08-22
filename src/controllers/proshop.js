@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { publishProshopItemAdded, publishProshopItemRemoved } = require('../lib/ably');
 
 // ── Shops ─────────────────────────────────────────────────────────────────────
 
@@ -132,7 +133,11 @@ async function addBookingItem(req, res, next) {
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
       [req.property_id, booking_id, item_id, items[0].name, quantity, items[0].price]
     );
-    res.status(201).json({ ...rows[0], total: rows[0].quantity * rows[0].unit_price });
+    const created = { ...rows[0], total: rows[0].quantity * rows[0].unit_price };
+
+    publishProshopItemAdded(req.property_id, created).catch((err) => console.error('Ably publish failed:', err.message));
+
+    res.status(201).json(created);
   } catch (err) { next(err); }
 }
 
@@ -143,6 +148,10 @@ async function removeBookingItem(req, res, next) {
       [req.params.id, req.params.booking_id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Item not found' });
+
+    publishProshopItemRemoved(req.property_id, { id: rows[0].id, booking_id: req.params.booking_id })
+      .catch((err) => console.error('Ably publish failed:', err.message));
+
     res.status(204).end();
   } catch (err) { next(err); }
 }

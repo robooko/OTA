@@ -124,6 +124,24 @@ async function publishGolfBookingStatusChangedForProperty(propertyId, payload) {
   await channel.publish('booking-status-changed', payload);
 }
 
+// Pro shop purchases don't have a "booking" of their own -- an item is a line
+// added to (or removed from) an existing golf booking, so there's no
+// new-booking/status-changed lifecycle to mirror here, just the item event
+// itself. Property-wide only: addBookingItem/removeBookingItem take no
+// shop_id, so there's no per-shop channel to scope to (unlike spa's
+// spa:{id}:appointments).
+async function publishProshopItemAdded(propertyId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:proshop`);
+  await channel.publish('item-added', payload);
+}
+
+async function publishProshopItemRemoved(propertyId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:proshop`);
+  await channel.publish('item-removed', payload);
+}
+
 module.exports = {
   publishNewInquiry,
   publishNewOrder,
@@ -141,5 +159,7 @@ module.exports = {
   publishSpaBookingStatusChangedForProperty,
   publishNewGolfBookingForProperty,
   publishGolfBookingStatusChangedForProperty,
+  publishProshopItemAdded,
+  publishProshopItemRemoved,
   client,
 };
