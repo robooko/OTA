@@ -1,20 +1,20 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/tours');
-const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
+const { authenticateOrApiKey } = require('../middleware/auth');
 
 // Tours
-router.get('/', authenticate, ctrl.listTours);
-router.post('/', authenticate, ctrl.createTour);
-router.put('/:id', authenticate, ctrl.updateTour);
+router.get('/', authenticateOrApiKey, ctrl.listTours);
+router.post('/', authenticateOrApiKey, ctrl.createTour);
+router.put('/:id', authenticateOrApiKey, ctrl.updateTour);
 
 // Slots
-router.post('/slots/bulk', authenticate, ctrl.bulkCreateSlots);
-router.get('/slots/search', authenticate, ctrl.searchSlots);
+router.post('/slots/bulk', authenticateOrApiKey, ctrl.bulkCreateSlots);
+router.get('/slots/search', authenticateOrApiKey, ctrl.searchSlots);
 router.put('/slots/:id', authenticateOrApiKey, ctrl.updateSlot);
 
 // Bookings
-router.get('/bookings', authenticate, ctrl.listBookings);
+router.get('/bookings', authenticateOrApiKey, ctrl.listBookings);
 router.post('/bookings', authenticateOrApiKey, ctrl.createBooking);
-router.put('/bookings/:id', authenticate, ctrl.updateBooking);
+router.put('/bookings/:id', authenticateOrApiKey, ctrl.updateBooking);
 
 module.exports = router;
