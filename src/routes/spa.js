@@ -4,6 +4,9 @@ const { authenticateOrApiKey } = require('../middleware/auth');
 
 // Spas
 router.get('/', authenticateOrApiKey, ctrl.listSpas);
+// Property-wide, across every spa -- must come before /:id or Express would
+// match "appointments" as a spa id.
+router.get('/appointments', authenticateOrApiKey, ctrl.listAppointmentsForProperty);
 router.get('/:id', authenticateOrApiKey, ctrl.getSpa);
 router.post('/', authenticateOrApiKey, ctrl.createSpa);
 router.put('/:id', authenticateOrApiKey, ctrl.updateSpa);

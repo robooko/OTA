@@ -91,6 +91,24 @@ async function publishAppointmentStatusChanged(spaId, payload) {
   await channel.publish('appointment-status-changed', payload);
 }
 
+// Mirrors new-appointment/appointment-status-changed onto a property-wide
+// channel, for @forgebuild/hotal-ui's <live-spa-bookings-feed> (a property
+// dashboard showing bookings across every spa, not one spa at a time --
+// same relationship as publishNewOrderForProperty is to publishNewOrder).
+// Event names ('new-booking'/'booking-status-changed') match what that
+// component subscribes to, not the spa-scoped appointment event names above.
+async function publishNewSpaBookingForProperty(propertyId, booking) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:spa-bookings`);
+  await channel.publish('new-booking', booking);
+}
+
+async function publishSpaBookingStatusChangedForProperty(propertyId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:spa-bookings`);
+  await channel.publish('booking-status-changed', payload);
+}
+
 module.exports = {
   publishNewInquiry,
   publishNewOrder,
@@ -104,5 +122,7 @@ module.exports = {
   publishBookingStatusChanged,
   publishNewAppointment,
   publishAppointmentStatusChanged,
+  publishNewSpaBookingForProperty,
+  publishSpaBookingStatusChangedForProperty,
   client,
 };

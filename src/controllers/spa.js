@@ -1,6 +1,11 @@
 const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
-const { publishNewAppointment, publishAppointmentStatusChanged } = require('../lib/ably');
+const {
+  publishNewAppointment,
+  publishAppointmentStatusChanged,
+  publishNewSpaBookingForProperty,
+  publishSpaBookingStatusChangedForProperty,
+} = require('../lib/ably');
 
 // Steps a 'YYYY-MM-DD' string forward by whole days via UTC epoch math --
 // `new Date(str); d.setDate(d.getDate() + 1)` looks equivalent but
@@ -275,6 +280,67 @@ async function updateSlot(req, res, next) {
 
 // ── Appointments ──────────────────────────────────────────────────────────────
 
+// spa_appointment stores one 'contact_name' field (same convention as golf/
+// equipment/beach-club/tours bookings) -- but @forgebuild/hotal-ui's
+// <live-spa-bookings-feed> expects split first_name/last_name (modeled on
+// the guest table shape used by room bookings). Split on the first space
+// rather than adding a name column just to satisfy this one feed.
+function splitContactName(name) {
+  const trimmed = (name || '').trim();
+  const spaceIdx = trimmed.indexOf(' ');
+  return spaceIdx === -1
+    ? { first_name: trimmed, last_name: '' }
+    : { first_name: trimmed.slice(0, spaceIdx), last_name: trimmed.slice(spaceIdx + 1) };
+}
+
+// Shapes a joined spa_appointment row (sa.*, ss.slot_date, ss.slot_time,
+// st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins,
+// tr.price) into the LiveSpaBooking contract hotal-ui's feed expects.
+// start_time is built as a plain 'YYYY-MM-DDTHH:MM:SS' string, deliberately
+// not UTC-normalized -- slots have no stored timezone, so this is treated as
+// the property's own local wall-clock time and the client renders it as-is
+// (new Date() with no offset parses as the *viewer's* local time, so an
+// unconverted string round-trips through toLocaleString unchanged).
+function toLiveSpaBooking(row) {
+  const { first_name, last_name } = splitContactName(row.contact_name);
+  return {
+    id: row.id,
+    first_name,
+    last_name,
+    email: row.contact_email,
+    phone: row.contact_phone,
+    treatment_name: row.treatment_name,
+    therapist_name: row.therapist_name,
+    start_time: `${row.slot_date instanceof Date ? row.slot_date.toISOString().slice(0, 10) : row.slot_date}T${row.slot_time}`,
+    duration_minutes: row.duration_mins,
+    price: row.price,
+    status: row.status,
+    created_at: row.created_at,
+  };
+}
+
+async function listAppointmentsForProperty(req, res, next) {
+  try {
+    const { cursor, limit } = req.query;
+    const take = Math.min(parseInt(limit, 10) || 30, 100);
+    let query = `
+      SELECT sa.*, ss.slot_date, ss.slot_time,
+             st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
+      FROM spa_appointment sa
+      JOIN spa_slot ss ON ss.id = sa.slot_id
+      JOIN spa_therapist st ON st.id = ss.therapist_id
+      JOIN spa_treatment tr ON tr.id = ss.treatment_id
+      WHERE sa.property_id = $1
+    `;
+    const params = [req.property_id];
+    if (cursor) { params.push(cursor); query += ` AND sa.created_at < $${params.length}`; }
+    params.push(take);
+    query += ` ORDER BY sa.created_at DESC LIMIT $${params.length}`;
+    const { rows } = await pool.query(query, params);
+    res.json(rows.map(toLiveSpaBooking));
+  } catch (err) { next(err); }
+}
+
 async function listAppointments(req, res, next) {
   try {
     const { spa_id } = req.params;
@@ -355,6 +421,21 @@ async function createAppointment(req, res, next) {
 
     publishNewAppointment(spa_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
 
+    const { rows: full } = await pool.query(
+      `SELECT sa.*, ss.slot_date, ss.slot_time,
+              st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
+       FROM spa_appointment sa
+       JOIN spa_slot ss ON ss.id = sa.slot_id
+       JOIN spa_therapist st ON st.id = ss.therapist_id
+       JOIN spa_treatment tr ON tr.id = ss.treatment_id
+       WHERE sa.id = $1`,
+      [rows[0].id]
+    );
+    if (full.length) {
+      publishNewSpaBookingForProperty(req.property_id, toLiveSpaBooking(full[0]))
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    }
+
     res.status(201).json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -397,6 +478,25 @@ async function updateAppointment(req, res, next) {
     if (rows[0].status !== statusBefore) {
       publishAppointmentStatusChanged(spa_id, { id: rows[0].id, status: rows[0].status, spa_id })
         .catch((err) => console.error('Ably publish failed:', err.message));
+
+      // live-spa-bookings-feed's upsert replaces the whole list item for an
+      // id on every event (same as live-dining-orders-feed) -- a bare
+      // {id, status} patch would blank out treatment/therapist/price/etc.
+      // on every status change, so re-fetch the joined shape first.
+      const { rows: full } = await pool.query(
+        `SELECT sa.*, ss.slot_date, ss.slot_time,
+                st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
+         FROM spa_appointment sa
+         JOIN spa_slot ss ON ss.id = sa.slot_id
+         JOIN spa_therapist st ON st.id = ss.therapist_id
+         JOIN spa_treatment tr ON tr.id = ss.treatment_id
+         WHERE sa.id = $1`,
+        [rows[0].id]
+      );
+      if (full.length) {
+        publishSpaBookingStatusChangedForProperty(req.property_id, toLiveSpaBooking(full[0]))
+          .catch((err) => console.error('Ably publish failed:', err.message));
+      }
     }
 
     res.json(rows[0]);
@@ -409,4 +509,5 @@ module.exports = {
   listTherapists, createTherapist, updateTherapist,
   listSlots, bulkCreateSlots, searchSlots, updateSlot,
   listAppointments, getAppointment, createAppointment, updateAppointment,
+  listAppointmentsForProperty,
 };
