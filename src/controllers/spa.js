@@ -1,5 +1,6 @@
 const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
+const { publishNewAppointment, publishAppointmentStatusChanged } = require('../lib/ably');
 
 // Steps a 'YYYY-MM-DD' string forward by whole days via UTC epoch math --
 // `new Date(str); d.setDate(d.getDate() + 1)` looks equivalent but
@@ -351,6 +352,9 @@ async function createAppointment(req, res, next) {
     );
 
     await client.query('COMMIT');
+
+    publishNewAppointment(spa_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
+
     res.status(201).json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -364,6 +368,17 @@ async function updateAppointment(req, res, next) {
   try {
     const { spa_id, id } = req.params;
     const { status, notes } = req.body;
+
+    const beforeRes = await pool.query(
+      `SELECT sa.status FROM spa_appointment sa
+       JOIN spa_slot ss ON ss.id = sa.slot_id
+       JOIN spa_therapist st ON st.id = ss.therapist_id
+       WHERE sa.id = $1 AND st.spa_id = $2 AND sa.property_id = $3`,
+      [id, spa_id, req.property_id]
+    );
+    if (!beforeRes.rows.length) return res.status(404).json({ error: 'Appointment not found' });
+    const statusBefore = beforeRes.rows[0].status;
+
     const { rows } = await pool.query(
       `UPDATE spa_appointment sa SET
          status = COALESCE($1, sa.status),
@@ -378,6 +393,12 @@ async function updateAppointment(req, res, next) {
       [status, notes, id, spa_id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Appointment not found' });
+
+    if (rows[0].status !== statusBefore) {
+      publishAppointmentStatusChanged(spa_id, { id: rows[0].id, status: rows[0].status, spa_id })
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    }
+
     res.json(rows[0]);
   } catch (err) { next(err); }
 }

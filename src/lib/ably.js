@@ -79,6 +79,18 @@ async function publishBookingStatusChanged(propertyId, payload) {
   await channel.publish('booking-status-changed', payload);
 }
 
+async function publishNewAppointment(spaId, appointment) {
+  if (!client) return;
+  const channel = client.channels.get(`spa:${spaId}:appointments`);
+  await channel.publish('new-appointment', appointment);
+}
+
+async function publishAppointmentStatusChanged(spaId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`spa:${spaId}:appointments`);
+  await channel.publish('appointment-status-changed', payload);
+}
+
 module.exports = {
   publishNewInquiry,
   publishNewOrder,
@@ -90,5 +102,7 @@ module.exports = {
   publishInquiryUpdated,
   publishNewBooking,
   publishBookingStatusChanged,
+  publishNewAppointment,
+  publishAppointmentStatusChanged,
   client,
 };
