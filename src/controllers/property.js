@@ -371,9 +371,45 @@ async function clearVercelPat(req, res, next) {
   }
 }
 
+// Same shape as the Vercel PAT above -- a property-supplied secret, admin-
+// only read/write, and the key itself never comes back to the client, only
+// a "configured" boolean. Lets the restaurant reservation flow create
+// payment intents / holds under this property's own Stripe account.
+async function getStripeStatus(req, res, next) {
+  try {
+    const { rows } = await pool.query('SELECT stripe_secret_key FROM property WHERE id = $1', [req.property_id]);
+    res.json({ stripeKeyConfigured: !!rows[0]?.stripe_secret_key });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function setStripeKey(req, res, next) {
+  try {
+    const { stripe_secret_key } = req.body;
+    if (!stripe_secret_key || typeof stripe_secret_key !== 'string') {
+      return res.status(400).json({ error: 'stripe_secret_key is required' });
+    }
+    await pool.query('UPDATE property SET stripe_secret_key = $1 WHERE id = $2', [stripe_secret_key, req.property_id]);
+    res.json({ stripeKeyConfigured: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function clearStripeKey(req, res, next) {
+  try {
+    await pool.query('UPDATE property SET stripe_secret_key = NULL WHERE id = $1', [req.property_id]);
+    res.json({ stripeKeyConfigured: false });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,
   setVercelPat, clearVercelPat,
+  getStripeStatus, setStripeKey, clearStripeKey,
 };

@@ -19,6 +19,10 @@ router.post('/vercel/disconnect', authenticate, ctrl.disconnectVercel);
 router.put('/vercel/pat', authenticate, requireRole('admin'), ctrl.setVercelPat);
 router.post('/vercel/pat/clear', authenticate, requireRole('admin'), ctrl.clearVercelPat);
 
+router.get('/stripe/status', authenticate, ctrl.getStripeStatus);
+router.put('/stripe/key', authenticate, requireRole('admin'), ctrl.setStripeKey);
+router.post('/stripe/key/clear', authenticate, requireRole('admin'), ctrl.clearStripeKey);
+
 router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
 router.post('/websites', authenticate, ctrl.createWebsite);
 router.put('/websites/:id', authenticate, ctrl.updateWebsite);

@@ -383,6 +383,44 @@ async function getReservation(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Fetches the live status/amount of the reservation's linked Stripe
+// PaymentIntent (a deposit/hold), using the property's own stored secret
+// key -- never the client's. 404s distinctly for "no PaymentIntent linked"
+// vs "property has no Stripe key configured" vs "reservation not found",
+// since the host UI needs to tell those apart (e.g. to know whether to
+// offer setting one up).
+async function getReservationPaymentIntent(req, res, next) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT rr.stripe_payment_intent_id, p.stripe_secret_key
+       FROM restaurant_reservation rr
+       JOIN property p ON p.id = rr.property_id
+       WHERE rr.id = $1 AND rr.property_id = $2`,
+      [req.params.id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Reservation not found' });
+    const { stripe_payment_intent_id, stripe_secret_key } = rows[0];
+    if (!stripe_payment_intent_id) return res.status(404).json({ error: 'No payment intent linked to this reservation' });
+    if (!stripe_secret_key) return res.status(409).json({ error: 'No Stripe secret key configured for this property' });
+
+    const stripe = require('stripe')(stripe_secret_key);
+    const intent = await stripe.paymentIntents.retrieve(stripe_payment_intent_id);
+    res.json({
+      id: intent.id,
+      status: intent.status,
+      amount: intent.amount,
+      currency: intent.currency,
+      capture_method: intent.capture_method,
+      created: intent.created,
+    });
+  } catch (err) {
+    if (err.type?.startsWith('Stripe')) {
+      return res.status(502).json({ error: `Stripe error: ${err.message}` });
+    }
+    next(err);
+  }
+}
+
 async function createReservation(req, res, next) {
   const { restaurant_id } = req.params;
   const { reservation_date, start_time, location, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata, stripe_payment_intent_id } = req.body;
@@ -644,4 +682,5 @@ module.exports = {
   searchAvailability,
   listAllReservations,
   listReservations, getReservation, createReservation, updateReservation, seatReservation,
+  getReservationPaymentIntent,
 };

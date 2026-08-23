@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS property (
   vercel_connected_at  TIMESTAMPTZ,
   vercel_access_token  TEXT, -- "Projects: Read" scope only -- confirmed can't read Web Analytics
   vercel_pat           TEXT, -- Personal Access Token, optionally set per-property so Web Analytics works
+  stripe_secret_key    TEXT, -- optionally set per-property so reservation deposits/holds can be created under the property's own Stripe account
   created_at       TIMESTAMPTZ  DEFAULT now()
 );
 
