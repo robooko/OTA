@@ -203,7 +203,7 @@ async function getOrder(req, res, next) {
 
 async function createOrder(req, res, next) {
   try {
-    const { restaurant_id, booking_id, table_id, guest_id, items, notes, scheduled_for } = req.body;
+    const { restaurant_id, booking_id, table_id, guest_id, items, notes, scheduled_for, force } = req.body;
     if (!restaurant_id || (!booking_id && !table_id) || !Array.isArray(items) || !items.length) {
       return res.status(400).json({ error: 'restaurant_id, either booking_id or table_id, and an items array, are required' });
     }
@@ -233,6 +233,48 @@ async function createOrder(req, res, next) {
           [table_id, req.property_id]
         );
         if (!tables.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Table not found' }); }
+
+        // A walk-in must not quietly take a table whose booked party is due.
+        // Only guards the *opening* of a session -- adding a round to a tab
+        // that's already open is always fine (and a session opened via
+        // seatReservation is the reservation's own), hence the NOT EXISTS.
+        // Conflict = a confirmed, not-yet-seated reservation on this table
+        // whose window overlaps the next default_duration_minutes, measured
+        // in the restaurant's local time (restaurant.timezone, else
+        // property.timezone). Includes a reservation whose start_time has
+        // already passed but hasn't ended -- a late party is still expected.
+        // `force: true` lets the waiter override when they've decided the
+        // table is theirs to give away.
+        if (!force) {
+          const { rows: conflicts } = await client.query(
+            `SELECT rr.id, rr.contact_name, rr.party_size, rr.reservation_date, rr.start_time, rr.end_time
+             FROM restaurant_reservation rr
+             JOIN restaurant r ON r.id = $2
+             JOIN property p   ON p.id = r.property_id
+             WHERE rr.table_id = $1
+               AND rr.status = 'confirmed'
+               AND NOT EXISTS (
+                 SELECT 1 FROM restaurant_table_session s
+                 WHERE s.table_id = rr.table_id AND s.status = 'open'
+               )
+               AND (rr.reservation_date + rr.start_time)
+                   < (now() AT TIME ZONE COALESCE(r.timezone, p.timezone))
+                     + make_interval(mins => r.default_duration_minutes)
+               AND (rr.reservation_date + rr.end_time)
+                   > (now() AT TIME ZONE COALESCE(r.timezone, p.timezone))
+             ORDER BY rr.reservation_date, rr.start_time
+             LIMIT 1`,
+            [table_id, restaurant_id]
+          );
+          if (conflicts.length) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'Table has an upcoming reservation',
+              details: 'Seat the reservation first, or pass force: true to open a walk-in session anyway',
+              reservation: conflicts[0],
+            });
+          }
+        }
 
         // Attach to the table's open session, creating one if none exists yet.
         // ON CONFLICT + re-SELECT (rather than a plain SELECT-then-INSERT)
