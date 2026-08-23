@@ -220,6 +220,27 @@ CREATE TABLE IF NOT EXISTS restaurant_table (
   UNIQUE (restaurant_id, table_number)
 );
 
+-- Groups a table's rounds (drinks, then mains, then dessert) into one tab.
+-- At most one open session per table (unique partial index below) --
+-- restaurant_order.table_session_id attaches new orders to whichever
+-- session is currently open, or a new one if none is.
+CREATE TABLE IF NOT EXISTS restaurant_table_session (
+  id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID         NOT NULL REFERENCES property(id),
+  restaurant_id UUID         NOT NULL REFERENCES restaurant(id),
+  table_id      UUID         NOT NULL REFERENCES restaurant_table(id),
+  status        VARCHAR(20)  NOT NULL DEFAULT 'open',
+  opened_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  closed_at     TIMESTAMPTZ,
+  CONSTRAINT restaurant_table_session_status CHECK (status IN ('open', 'closed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_restaurant_table_session_table
+  ON restaurant_table_session(table_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_restaurant_table_session_one_open
+  ON restaurant_table_session(table_id) WHERE status = 'open';
+
 CREATE TABLE IF NOT EXISTS service_period (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id   UUID NOT NULL REFERENCES property(id),
@@ -514,6 +535,7 @@ CREATE TABLE IF NOT EXISTS restaurant_order (
   restaurant_id UUID         NOT NULL REFERENCES restaurant(id),
   booking_id  UUID         REFERENCES booking(id),
   table_id    UUID         REFERENCES restaurant_table(id),
+  table_session_id UUID    REFERENCES restaurant_table_session(id),
   guest_id    UUID         REFERENCES guest(id),
   status         VARCHAR(20)  DEFAULT 'pending',
   notes          TEXT,
@@ -533,9 +555,10 @@ CREATE TABLE IF NOT EXISTS restaurant_order_item (
   variant     VARCHAR(100)
 );
 
-CREATE INDEX IF NOT EXISTS idx_restaurant_order_booking    ON restaurant_order(booking_id);
-CREATE INDEX IF NOT EXISTS idx_restaurant_order_guest      ON restaurant_order(guest_id);
-CREATE INDEX IF NOT EXISTS idx_restaurant_order_restaurant ON restaurant_order(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_order_booking       ON restaurant_order(booking_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_order_guest         ON restaurant_order(guest_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_order_restaurant    ON restaurant_order(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_restaurant_order_table_session ON restaurant_order(table_session_id);
 
 -- ── Pro Shop ──────────────────────────────────────────────────────────────────
 

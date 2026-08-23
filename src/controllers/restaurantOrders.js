@@ -133,7 +133,7 @@ async function listOrders(req, res, next) {
   try {
     const { restaurant_id, booking_id, table_id, guest_id, status, skip, take } = req.query;
     let query = `
-      SELECT o.*,
+      SELECT o.*, rm.room_number,
              json_agg(json_build_object(
                'id', oi.id,
                'item_id', oi.item_id,
@@ -145,6 +145,8 @@ async function listOrders(req, res, next) {
              )) AS items
       FROM restaurant_order o
       LEFT JOIN restaurant_order_item oi ON oi.order_id = o.id
+      LEFT JOIN booking bk ON bk.id = o.booking_id
+      LEFT JOIN room rm ON rm.id = bk.room_id
       WHERE o.property_id = $1
     `;
     const params = [req.property_id];
@@ -153,7 +155,7 @@ async function listOrders(req, res, next) {
     if (table_id)   { params.push(table_id);   query += ` AND o.table_id = $${params.length}`; }
     if (guest_id)   { params.push(guest_id);   query += ` AND o.guest_id = $${params.length}`; }
     if (status)     { params.push(status);     query += ` AND o.status = $${params.length}`; }
-    query += ' GROUP BY o.id ORDER BY o.created_at DESC';
+    query += ' GROUP BY o.id, rm.room_number ORDER BY o.created_at DESC';
 
     const countParams = [req.property_id, restaurant_id, booking_id, table_id, guest_id, status].filter(Boolean);
     const [{ rows: countRows }] = await Promise.all([
@@ -176,7 +178,7 @@ async function listOrders(req, res, next) {
 async function getOrder(req, res, next) {
   try {
     const { rows } = await pool.query(
-      `SELECT o.*,
+      `SELECT o.*, rm.room_number,
               json_agg(json_build_object(
                 'id', oi.id,
                 'item_id', oi.item_id,
@@ -188,8 +190,10 @@ async function getOrder(req, res, next) {
               )) AS items
        FROM restaurant_order o
        LEFT JOIN restaurant_order_item oi ON oi.order_id = o.id
+       LEFT JOIN booking bk ON bk.id = o.booking_id
+       LEFT JOIN room rm ON rm.id = bk.room_id
        WHERE o.id = $1 AND o.property_id = $2
-       GROUP BY o.id`,
+       GROUP BY o.id, rm.room_number`,
       [req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
@@ -222,12 +226,36 @@ async function createOrder(req, res, next) {
         if (!bookings.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Booking not found or cancelled' }); }
       }
 
+      let table_session_id = null;
       if (table_id) {
         const { rows: tables } = await client.query(
           `SELECT id FROM restaurant_table WHERE id = $1 AND property_id = $2 AND status = 'active'`,
           [table_id, req.property_id]
         );
         if (!tables.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Table not found' }); }
+
+        // Attach to the table's open session, creating one if none exists yet.
+        // ON CONFLICT + re-SELECT (rather than a plain SELECT-then-INSERT)
+        // handles two requests for the same table racing to open a session:
+        // the unique partial index (one open session per table) rejects the
+        // loser's insert instead of raising, and the re-SELECT picks up
+        // whichever session actually won.
+        const { rows: inserted } = await client.query(
+          `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (table_id) WHERE status = 'open' DO NOTHING
+           RETURNING id`,
+          [req.property_id, restaurant_id, table_id]
+        );
+        if (inserted.length) {
+          table_session_id = inserted[0].id;
+        } else {
+          const { rows: existing } = await client.query(
+            `SELECT id FROM restaurant_table_session WHERE table_id = $1 AND status = 'open'`,
+            [table_id]
+          );
+          table_session_id = existing[0].id;
+        }
       }
 
       // Lock in item prices from DB
@@ -250,9 +278,9 @@ async function createOrder(req, res, next) {
 
       // Create order
       const { rows: order } = await client.query(
-        `INSERT INTO restaurant_order (property_id, restaurant_id, booking_id, table_id, guest_id, notes, scheduled_for, total_price)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-        [req.property_id, restaurant_id, booking_id || null, table_id || null, guest_id || null, notes || null, scheduled_for || null, total]
+        `INSERT INTO restaurant_order (property_id, restaurant_id, booking_id, table_id, table_session_id, guest_id, notes, scheduled_for, total_price)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+        [req.property_id, restaurant_id, booking_id || null, table_id || null, table_session_id, guest_id || null, notes || null, scheduled_for || null, total]
       );
 
       // Insert line items
@@ -298,7 +326,7 @@ async function updateOrderStatus(req, res, next) {
     // booking-scoped channel keeps the narrow payload since its consumer
     // (peter-island) isn't verified to expect the fuller shape.
     const { rows: full } = await pool.query(
-      `SELECT o.*,
+      `SELECT o.*, rm.room_number,
               json_agg(json_build_object(
                 'id', oi.id,
                 'item_id', oi.item_id,
@@ -310,8 +338,10 @@ async function updateOrderStatus(req, res, next) {
               )) AS items
        FROM restaurant_order o
        LEFT JOIN restaurant_order_item oi ON oi.order_id = o.id
+       LEFT JOIN booking bk ON bk.id = o.booking_id
+       LEFT JOIN room rm ON rm.id = bk.room_id
        WHERE o.id = $1
-       GROUP BY o.id`,
+       GROUP BY o.id, rm.room_number`,
       [rows[0].id]
     );
     const orderFull = full[0] ?? rows[0];
