@@ -55,6 +55,27 @@ async function publishOrderStatusChangedForBooking(bookingId, payload) {
   await channel.publish('order-status-changed', payload);
 }
 
+// Restaurant reservations had no Ably publishing at all before this --
+// property:{id}:reservations already has a subscriber (the main dashboard's
+// <live-reservations-feed> via reservations/ably-auth.ts) that's been
+// wired up but silently dead since nothing ever published to it; this
+// fixes that as well as adding the new restaurant-scoped channel below.
+async function publishNewReservation(restaurantId, propertyId, reservation) {
+  if (!client) return;
+  await Promise.all([
+    client.channels.get(`restaurant:${restaurantId}:reservations`).publish('new-reservation', reservation),
+    client.channels.get(`property:${propertyId}:reservations`).publish('new-reservation', reservation),
+  ]);
+}
+
+async function publishReservationStatusChanged(restaurantId, propertyId, payload) {
+  if (!client) return;
+  await Promise.all([
+    client.channels.get(`restaurant:${restaurantId}:reservations`).publish('reservation-status-changed', payload),
+    client.channels.get(`property:${propertyId}:reservations`).publish('reservation-status-changed', payload),
+  ]);
+}
+
 async function publishNewReply(propertyId, payload) {
   if (!client) return;
   const channel = client.channels.get(`property:${propertyId}:inquiries`);
@@ -149,6 +170,8 @@ module.exports = {
   publishNewOrderForProperty,
   publishOrderStatusChangedForProperty,
   publishOrderStatusChangedForBooking,
+  publishNewReservation,
+  publishReservationStatusChanged,
   publishNewReply,
   publishInquiryUpdated,
   publishNewBooking,

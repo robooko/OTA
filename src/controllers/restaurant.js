@@ -1,5 +1,6 @@
 const pool = require('../db');
 const { isValidDate, isValidTime, isValidCurrencyCode, isValidTimezone } = require('../middleware/validate');
+const { publishNewReservation, publishReservationStatusChanged } = require('../lib/ably');
 
 function addMinutesToTime(timeStr, minutesToAdd) {
   const [h, m] = timeStr.split(':').map(Number);
@@ -486,6 +487,21 @@ async function createReservation(req, res, next) {
     );
 
     await client.query('COMMIT');
+
+    // LiveReservation (hotal-ui) needs table_number/location, which only
+    // exist via the restaurant_table join, not on the bare INSERT...RETURNING
+    // row above.
+    const { rows: full } = await pool.query(
+      `SELECT rr.*, rt.table_number, rt.seats, rt.location, rt.restaurant_id
+       FROM restaurant_reservation rr
+       JOIN restaurant_table rt ON rt.id = rr.table_id
+       WHERE rr.id = $1`,
+      [rows[0].id]
+    );
+    if (full.length) {
+      publishNewReservation(restaurant_id, req.property_id, full[0]).catch((err) => console.error('Ably publish failed:', err.message));
+    }
+
     res.status(201).json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -513,6 +529,25 @@ async function updateReservation(req, res, next) {
       [status, notes, contact_name, contact_email, contact_phone, metadata ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Reservation not found' });
+
+    if (status !== undefined) {
+      // live-reservations-feed's upsert replaces the whole list item for an
+      // id on every event (same as every other hotal-ui feed) -- re-fetch
+      // the joined shape so status-changed doesn't blank out table_number/
+      // location on an otherwise-unrelated field.
+      const { rows: full } = await pool.query(
+        `SELECT rr.*, rt.table_number, rt.seats, rt.location, rt.restaurant_id
+         FROM restaurant_reservation rr
+         JOIN restaurant_table rt ON rt.id = rr.table_id
+         WHERE rr.id = $1`,
+        [rows[0].id]
+      );
+      if (full.length) {
+        publishReservationStatusChanged(full[0].restaurant_id, req.property_id, full[0])
+          .catch((err) => console.error('Ably publish failed:', err.message));
+      }
+    }
+
     res.json(rows[0]);
   } catch (err) { next(err); }
 }
