@@ -345,7 +345,7 @@ async function listAllReservations(req, res, next) {
 async function listReservations(req, res, next) {
   try {
     const { restaurant_id } = req.params;
-    const { date, status, guest_id, clerk_user_id } = req.query;
+    const { date, status, guest_id, clerk_user_id, cursor, limit } = req.query;
     let query = `
       SELECT rr.*, rt.table_number, rt.seats, rt.location
       FROM restaurant_reservation rr
@@ -357,7 +357,13 @@ async function listReservations(req, res, next) {
     if (status) { params.push(status); query += ` AND rr.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND rr.guest_id = $${params.length}`; }
     if (clerk_user_id) { params.push(clerk_user_id); query += ` AND rr.clerk_user_id = $${params.length}`; }
-    query += ' ORDER BY rr.reservation_date, rr.start_time';
+    // cursor/limit are the restaurant dashboard's live-reservations-feed
+    // paginating by recency (hotal-ui passes the created_at of the oldest
+    // loaded reservation as cursor) -- the admin /reservations page never
+    // sends these, so its date-ordered listing above is untouched.
+    if (cursor) { params.push(cursor); query += ` AND rr.created_at < $${params.length}`; }
+    query += cursor ? ' ORDER BY rr.created_at DESC' : ' ORDER BY rr.reservation_date, rr.start_time';
+    if (limit) { params.push(parseInt(limit, 10)); query += ` LIMIT $${params.length}`; }
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) { next(err); }
