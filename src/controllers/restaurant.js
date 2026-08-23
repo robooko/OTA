@@ -23,6 +23,12 @@ function isValidMetadata(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+const PAYMENT_PROTECTION_MODES = ['none', 'hold', 'deposit'];
+
+function isValidPaymentProtection(v) {
+  return PAYMENT_PROTECTION_MODES.includes(v);
+}
+
 // ── Restaurants ───────────────────────────────────────────────────────────────
 
 async function listRestaurants(req, res, next) {
@@ -48,7 +54,7 @@ async function getRestaurant(req, res, next) {
 
 async function createRestaurant(req, res, next) {
   try {
-    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone, payment_protection, payment_protection_amount } = req.body;
     if (!name || !default_duration_minutes) {
       return res.status(400).json({ error: 'name and default_duration_minutes are required' });
     }
@@ -61,10 +67,16 @@ async function createRestaurant(req, res, next) {
     if (timezone !== undefined && !isValidTimezone(timezone)) {
       return res.status(400).json({ error: 'timezone must be a valid IANA timezone name (e.g. Europe/London)' });
     }
+    if (payment_protection !== undefined && !isValidPaymentProtection(payment_protection)) {
+      return res.status(400).json({ error: `payment_protection must be one of: ${PAYMENT_PROTECTION_MODES.join(', ')}` });
+    }
+    if (payment_protection_amount != null && (typeof payment_protection_amount !== 'number' || payment_protection_amount < 0)) {
+      return res.status(400).json({ error: 'payment_protection_amount must be a non-negative number' });
+    }
     const { rows } = await pool.query(
-      `INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? [], currency ?? null, timezone ?? null]
+      `INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone, payment_protection, payment_protection_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? [], currency ?? null, timezone ?? null, payment_protection ?? 'none', payment_protection_amount ?? null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -72,7 +84,7 @@ async function createRestaurant(req, res, next) {
 
 async function updateRestaurant(req, res, next) {
   try {
-    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan, payment_protection, payment_protection_amount } = req.body;
     if (closed_days !== undefined && !isValidClosedDays(closed_days)) {
       return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
     }
@@ -85,20 +97,36 @@ async function updateRestaurant(req, res, next) {
     if (floor_plan !== undefined && !isValidMetadata(floor_plan)) {
       return res.status(400).json({ error: 'floor_plan must be a JSON object' });
     }
+    if (payment_protection !== undefined && !isValidPaymentProtection(payment_protection)) {
+      return res.status(400).json({ error: `payment_protection must be one of: ${PAYMENT_PROTECTION_MODES.join(', ')}` });
+    }
+    // == null (not falsy) -- 0 is a legitimate amount and must not be
+    // rejected the way a bare `if (!payment_protection_amount)` would.
+    if (payment_protection_amount !== undefined && payment_protection_amount != null &&
+        (typeof payment_protection_amount !== 'number' || payment_protection_amount < 0)) {
+      return res.status(400).json({ error: 'payment_protection_amount must be a non-negative number' });
+    }
     const { rows } = await pool.query(
       `UPDATE restaurant SET
-         name                     = COALESCE($1, name),
-         description              = COALESCE($2, description),
-         phone                    = COALESCE($3, phone),
-         slot_interval_minutes    = COALESCE($4, slot_interval_minutes),
-         default_duration_minutes = COALESCE($5, default_duration_minutes),
-         closed_days              = COALESCE($6, closed_days),
-         status                   = COALESCE($7, status),
-         currency                 = COALESCE($8, currency),
-         timezone                 = COALESCE($9, timezone),
-         floor_plan               = COALESCE($10::jsonb, floor_plan)
-       WHERE id = $11 AND property_id = $12 RETURNING *`,
-      [name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan ?? null, req.params.id, req.property_id]
+         name                       = COALESCE($1, name),
+         description                = COALESCE($2, description),
+         phone                      = COALESCE($3, phone),
+         slot_interval_minutes      = COALESCE($4, slot_interval_minutes),
+         default_duration_minutes   = COALESCE($5, default_duration_minutes),
+         closed_days                = COALESCE($6, closed_days),
+         status                     = COALESCE($7, status),
+         currency                   = COALESCE($8, currency),
+         timezone                   = COALESCE($9, timezone),
+         floor_plan                 = COALESCE($10::jsonb, floor_plan),
+         payment_protection         = COALESCE($11, payment_protection),
+         payment_protection_amount  = CASE WHEN $12::boolean THEN $13::numeric ELSE payment_protection_amount END
+       WHERE id = $14 AND property_id = $15 RETURNING *`,
+      [
+        name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan ?? null,
+        payment_protection,
+        payment_protection_amount !== undefined, payment_protection_amount ?? null,
+        req.params.id, req.property_id,
+      ]
     );
     if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
     res.json(rows[0]);
@@ -643,26 +671,37 @@ async function seatReservation(req, res, next) {
     );
     if (!tables.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Table not found' }); }
 
-    // Same get-or-create-open-session pattern as createOrder in
-    // restaurantOrders.js -- ON CONFLICT handles two requests racing to open
-    // a session for the same table.
-    const { rows: inserted } = await client.query(
-      `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id, reservation_id)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (table_id) WHERE status = 'open' DO NOTHING
-       RETURNING id`,
-      [req.property_id, restaurant_id, table_id, reservation.id]
+    // Unlike createOrder's get-or-create (any open session is a valid target
+    // for adding a round), seating must not attach to a table's EXISTING
+    // open session unless it's already this reservation's own -- that
+    // session could belong to an unrelated walk-in or another party
+    // entirely, and silently relinking it would misattribute their tab.
+    // Only a genuinely free table (no open session) can be freshly seated.
+    const { rows: openSessions } = await client.query(
+      `SELECT id, reservation_id FROM restaurant_table_session WHERE table_id = $1 AND status = 'open'`,
+      [table_id]
     );
     let session_id;
-    if (inserted.length) {
-      session_id = inserted[0].id;
+    if (openSessions.length && openSessions[0].reservation_id !== reservation.id) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Table already has an active session' });
+    } else if (openSessions.length) {
+      session_id = openSessions[0].id; // idempotent -- already seated here
     } else {
-      const { rows: existing } = await client.query(
-        `UPDATE restaurant_table_session SET reservation_id = $1
-         WHERE table_id = $2 AND status = 'open' RETURNING id`,
-        [reservation.id, table_id]
+      const { rows: inserted } = await client.query(
+        `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id, reservation_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (table_id) WHERE status = 'open' DO NOTHING
+         RETURNING id`,
+        [req.property_id, restaurant_id, table_id, reservation.id]
       );
-      session_id = existing[0].id;
+      if (!inserted.length) {
+        // Lost a race against a concurrent open (createOrder or another
+        // seat call) between the SELECT above and this INSERT.
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Table already has an active session' });
+      }
+      session_id = inserted[0].id;
     }
 
     const { rows: updatedReservation } = await client.query(
@@ -671,6 +710,21 @@ async function seatReservation(req, res, next) {
     );
 
     await client.query('COMMIT');
+
+    // Full joined shape for the live feed -- upsert replaces the whole list
+    // item, same as every other hotal-ui feed (see updateReservation).
+    const { rows: full } = await pool.query(
+      `SELECT rr.*, rt.table_number, rt.seats, rt.location, rt.restaurant_id
+       FROM restaurant_reservation rr
+       JOIN restaurant_table rt ON rt.id = rr.table_id
+       WHERE rr.id = $1`,
+      [reservation.id]
+    );
+    if (full.length) {
+      publishReservationStatusChanged(full[0].restaurant_id, req.property_id, full[0])
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    }
+
     res.json({ reservation: updatedReservation[0], session_id, table_id });
   } catch (err) {
     await client.query('ROLLBACK');

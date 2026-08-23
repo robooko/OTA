@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS property (
   vercel_access_token  TEXT, -- "Projects: Read" scope only -- confirmed can't read Web Analytics
   vercel_pat           TEXT, -- Personal Access Token, optionally set per-property so Web Analytics works
   stripe_secret_key    TEXT, -- optionally set per-property so reservation deposits/holds can be created under the property's own Stripe account
+  stripe_terminal_location_id VARCHAR(255), -- lazily created on first Tap to Pay connection-token request
   created_at       TIMESTAMPTZ  DEFAULT now()
 );
 
@@ -207,7 +208,10 @@ CREATE TABLE IF NOT EXISTS restaurant (
   status                    VARCHAR(20)  DEFAULT 'active',
   currency                  VARCHAR(3),  -- NULL = inherit property.currency
   timezone                  VARCHAR(50), -- NULL = inherit property.timezone
-  created_at                TIMESTAMPTZ DEFAULT now()
+  payment_protection        VARCHAR(20)  NOT NULL DEFAULT 'none', -- 'none' | 'hold' | 'deposit'
+  payment_protection_amount NUMERIC(10,2),
+  created_at                TIMESTAMPTZ DEFAULT now(),
+  CONSTRAINT restaurant_payment_protection_check CHECK (payment_protection IN ('none', 'hold', 'deposit'))
 );
 
 CREATE TABLE IF NOT EXISTS restaurant_table (
@@ -233,7 +237,11 @@ CREATE TABLE IF NOT EXISTS restaurant_table_session (
   status        VARCHAR(20)  NOT NULL DEFAULT 'open',
   opened_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   closed_at     TIMESTAMPTZ,
-  CONSTRAINT restaurant_table_session_status CHECK (status IN ('open', 'closed'))
+  payment_status            VARCHAR(20) NOT NULL DEFAULT 'unpaid',
+  paid_at                   TIMESTAMPTZ,
+  stripe_payment_intent_id  VARCHAR(255),
+  CONSTRAINT restaurant_table_session_status CHECK (status IN ('open', 'closed')),
+  CONSTRAINT restaurant_table_session_payment_status CHECK (payment_status IN ('unpaid', 'paid'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_restaurant_table_session_table
