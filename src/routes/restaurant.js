@@ -32,5 +32,6 @@ router.get('/:restaurant_id/reservations/:id/payment-intent', authenticateOrApiK
 router.post('/:restaurant_id/reservations', authenticateOrApiKey, ctrl.createReservation);
 router.put('/:restaurant_id/reservations/:id', authenticateOrApiKey, ctrl.updateReservation);
 router.post('/:restaurant_id/reservations/:id/seat', authenticateOrApiKey, ctrl.seatReservation);
+router.post('/:restaurant_id/reservations/:id/cancel', authenticateOrApiKey, ctrl.cancelReservation);
 
 module.exports = router;

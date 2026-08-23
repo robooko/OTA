@@ -404,10 +404,15 @@ async function getReservationPaymentIntent(req, res, next) {
     if (!stripe_secret_key) return res.status(409).json({ error: 'No Stripe secret key configured for this property' });
 
     const stripe = require('stripe')(stripe_secret_key);
-    const intent = await stripe.paymentIntents.retrieve(stripe_payment_intent_id);
+    // A refunded intent still retrieves as 'succeeded' -- refunds live on
+    // the charge, not the intent -- so expand it and report a synthetic
+    // 'refunded' status, otherwise a cancelled-and-refunded reservation
+    // reads as if the money was kept.
+    const intent = await stripe.paymentIntents.retrieve(stripe_payment_intent_id, { expand: ['latest_charge'] });
+    const refunded = typeof intent.latest_charge === 'object' && intent.latest_charge?.refunded;
     res.json({
       id: intent.id,
-      status: intent.status,
+      status: refunded ? 'refunded' : intent.status,
       amount: intent.amount,
       currency: intent.currency,
       capture_method: intent.capture_method,
@@ -675,6 +680,94 @@ async function seatReservation(req, res, next) {
   }
 }
 
+// Cancels a reservation and settles its linked Stripe hold in the same
+// request. The Stripe side runs BEFORE the status flip: if releasing or
+// refunding fails, the reservation stays as-is instead of ending up
+// cancelled with a live hold nobody remembers to deal with.
+// body.refund === false keeps the deposit (a cancellation fee) -- which
+// for an uncaptured hold means capturing it now, since an unclaimed hold
+// just expires on its own after ~7 days.
+async function cancelReservation(req, res, next) {
+  const { restaurant_id, id } = req.params;
+  const refund = req.body?.refund !== false;
+  try {
+    const { rows } = await pool.query(
+      `SELECT rr.*, rt.restaurant_id, p.stripe_secret_key
+       FROM restaurant_reservation rr
+       JOIN restaurant_table rt ON rt.id = rr.table_id
+       JOIN property p ON p.id = rr.property_id
+       WHERE rr.id = $1 AND rr.property_id = $2`,
+      [id, req.property_id]
+    );
+    if (!rows.length || rows[0].restaurant_id !== restaurant_id) {
+      return res.status(404).json({ error: 'Reservation not found' });
+    }
+    const reservation = rows[0];
+    if (reservation.status === 'cancelled') {
+      return res.status(409).json({ error: 'Reservation already cancelled' });
+    }
+
+    // 'unavailable' (intent linked but no key configured) still cancels the
+    // reservation -- without a key nothing can ever be done about the hold
+    // from here, and blocking cancellation forever would be worse.
+    let payment = 'none';
+    if (reservation.stripe_payment_intent_id) {
+      if (!reservation.stripe_secret_key) {
+        payment = 'unavailable';
+      } else {
+        const stripe = require('stripe')(reservation.stripe_secret_key);
+        try {
+          const intent = await stripe.paymentIntents.retrieve(reservation.stripe_payment_intent_id);
+          if (refund) {
+            if (intent.status === 'requires_capture') {
+              await stripe.paymentIntents.cancel(intent.id);
+              payment = 'released';
+            } else if (intent.status === 'succeeded') {
+              await stripe.refunds.create({ payment_intent: intent.id });
+              payment = 'refunded';
+            } else if (intent.status === 'canceled') {
+              payment = 'released'; // already released -- idempotent
+            }
+          } else {
+            if (intent.status === 'requires_capture') {
+              await stripe.paymentIntents.capture(intent.id);
+              payment = 'captured';
+            } else if (intent.status === 'succeeded') {
+              payment = 'kept';
+            }
+          }
+        } catch (err) {
+          if (err.type?.startsWith('Stripe')) {
+            return res.status(502).json({ error: `Stripe error: ${err.message}` });
+          }
+          throw err;
+        }
+      }
+    }
+
+    const { rows: updated } = await pool.query(
+      `UPDATE restaurant_reservation SET status = 'cancelled' WHERE id = $1 RETURNING *`,
+      [id]
+    );
+
+    // Full joined shape for the live feed -- upsert replaces the whole list
+    // item, same as every other hotal-ui feed (see updateReservation).
+    const { rows: full } = await pool.query(
+      `SELECT rr.*, rt.table_number, rt.seats, rt.location, rt.restaurant_id
+       FROM restaurant_reservation rr
+       JOIN restaurant_table rt ON rt.id = rr.table_id
+       WHERE rr.id = $1`,
+      [id]
+    );
+    if (full.length) {
+      publishReservationStatusChanged(restaurant_id, req.property_id, full[0])
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    }
+
+    res.json({ reservation: updated[0], payment });
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   listRestaurants, getRestaurant, createRestaurant, updateRestaurant,
   listTables, createTable, updateTable,
@@ -682,5 +775,6 @@ module.exports = {
   searchAvailability,
   listAllReservations,
   listReservations, getReservation, createReservation, updateReservation, seatReservation,
+  cancelReservation,
   getReservationPaymentIntent,
 };
