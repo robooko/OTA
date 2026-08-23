@@ -211,6 +211,7 @@ function createTools(apiRequest) {
       contact_email: z.string().optional(),
       contact_phone: z.string().optional(),
       metadata: z.record(z.any()).optional(),
+      stripe_payment_intent_id: z.string().optional().describe('Deposit/prepayment charge this reservation is linked to, if any'),
     },
     run: ({ restaurant_id, id, ...body }) => apiRequest('PUT', `/api/restaurant/${restaurant_id}/reservations/${id}`, { body }),
   },

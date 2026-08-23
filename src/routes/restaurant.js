@@ -30,5 +30,6 @@ router.get('/:restaurant_id/reservations', authenticateOrApiKey, ctrl.listReserv
 router.get('/:restaurant_id/reservations/:id', authenticateOrApiKey, ctrl.getReservation);
 router.post('/:restaurant_id/reservations', authenticateOrApiKey, ctrl.createReservation);
 router.put('/:restaurant_id/reservations/:id', authenticateOrApiKey, ctrl.updateReservation);
+router.post('/:restaurant_id/reservations/:id/seat', authenticateOrApiKey, ctrl.seatReservation);
 
 module.exports = router;

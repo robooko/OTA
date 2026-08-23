@@ -267,8 +267,22 @@ CREATE TABLE IF NOT EXISTS restaurant_reservation (
   status           VARCHAR(20)  DEFAULT 'confirmed',
   notes            TEXT,
   metadata         JSONB        NOT NULL DEFAULT '{}',
+  stripe_payment_intent_id VARCHAR(255),
   created_at       TIMESTAMPTZ  DEFAULT now()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_restaurant_reservation_payment_intent
+  ON restaurant_reservation(stripe_payment_intent_id) WHERE stripe_payment_intent_id IS NOT NULL;
+
+-- Added via ALTER, not baked into restaurant_table_session's CREATE TABLE
+-- above, since that table is declared earlier in this file (restaurant_order
+-- also references it) and restaurant_reservation didn't exist yet at that
+-- point. Nullable -- most sessions are walk-ins with no reservation.
+ALTER TABLE restaurant_table_session
+  ADD COLUMN IF NOT EXISTS reservation_id UUID REFERENCES restaurant_reservation(id);
+
+CREATE INDEX IF NOT EXISTS idx_restaurant_table_session_reservation
+  ON restaurant_table_session(reservation_id);
 
 CREATE TABLE IF NOT EXISTS restaurant_seasonal_closure (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

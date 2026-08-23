@@ -33,7 +33,16 @@ async function getOpenSession(req, res, next) {
       [session.id]
     );
 
-    res.json({ ...session, orders });
+    let reservation = null;
+    if (session.reservation_id) {
+      const { rows: reservations } = await pool.query(
+        `SELECT id, contact_name, party_size, notes FROM restaurant_reservation WHERE id = $1`,
+        [session.reservation_id]
+      );
+      reservation = reservations[0] ?? null;
+    }
+
+    res.json({ ...session, orders, reservation });
   } catch (err) { next(err); }
 }
 

@@ -385,7 +385,7 @@ async function getReservation(req, res, next) {
 
 async function createReservation(req, res, next) {
   const { restaurant_id } = req.params;
-  const { reservation_date, start_time, location, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata } = req.body;
+  const { reservation_date, start_time, location, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata, stripe_payment_intent_id } = req.body;
 
   if (!reservation_date || !start_time || !contact_name || !party_size) {
     return res.status(400).json({ error: 'reservation_date, start_time, contact_name, and party_size are required' });
@@ -487,9 +487,9 @@ async function createReservation(req, res, next) {
 
     const { rows } = await client.query(
       `INSERT INTO restaurant_reservation
-         (property_id, table_id, reservation_date, start_time, end_time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
-      [req.property_id, assignedTableId, reservation_date, start_time, end_time, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null, metadata ?? {}]
+         (property_id, table_id, reservation_date, start_time, end_time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata, stripe_payment_intent_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+      [req.property_id, assignedTableId, reservation_date, start_time, end_time, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null, metadata ?? {}, stripe_payment_intent_id ?? null]
     );
 
     await client.query('COMMIT');
@@ -519,20 +519,21 @@ async function createReservation(req, res, next) {
 
 async function updateReservation(req, res, next) {
   try {
-    const { status, notes, contact_name, contact_email, contact_phone, metadata } = req.body;
+    const { status, notes, contact_name, contact_email, contact_phone, metadata, stripe_payment_intent_id } = req.body;
     if (metadata !== undefined && !isValidMetadata(metadata)) {
       return res.status(400).json({ error: 'metadata must be a JSON object' });
     }
     const { rows } = await pool.query(
       `UPDATE restaurant_reservation SET
-         status        = COALESCE($1, status),
-         notes         = COALESCE($2, notes),
-         contact_name  = COALESCE($3, contact_name),
-         contact_email = COALESCE($4, contact_email),
-         contact_phone = COALESCE($5, contact_phone),
-         metadata      = COALESCE($6::jsonb, metadata)
-       WHERE id = $7 AND property_id = $8 RETURNING *`,
-      [status, notes, contact_name, contact_email, contact_phone, metadata ?? null, req.params.id, req.property_id]
+         status                   = COALESCE($1, status),
+         notes                    = COALESCE($2, notes),
+         contact_name             = COALESCE($3, contact_name),
+         contact_email            = COALESCE($4, contact_email),
+         contact_phone            = COALESCE($5, contact_phone),
+         metadata                 = COALESCE($6::jsonb, metadata),
+         stripe_payment_intent_id = COALESCE($7, stripe_payment_intent_id)
+       WHERE id = $8 AND property_id = $9 RETURNING *`,
+      [status, notes, contact_name, contact_email, contact_phone, metadata ?? null, stripe_payment_intent_id ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Reservation not found' });
 
@@ -558,11 +559,89 @@ async function updateReservation(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function seatReservation(req, res, next) {
+  const { restaurant_id, id } = req.params;
+  const { table_id: overrideTableId } = req.body;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: reservations } = await client.query(
+      `SELECT rr.*, rt.restaurant_id
+       FROM restaurant_reservation rr
+       JOIN restaurant_table rt ON rt.id = rr.table_id
+       WHERE rr.id = $1 AND rr.property_id = $2`,
+      [id, req.property_id]
+    );
+    if (!reservations.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Reservation not found' }); }
+    const reservation = reservations[0];
+    if (reservation.restaurant_id !== restaurant_id) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Reservation not found' });
+    }
+    if (reservation.status === 'cancelled') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Cannot seat a cancelled reservation' });
+    }
+    if (reservation.status === 'seated') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Reservation already seated' });
+    }
+
+    // Defaults to the reservation's own table, but a different one can be
+    // passed -- e.g. the booked table isn't actually free, or a larger
+    // party needs a different spot. This is the whole table-change support:
+    // seating just targets whichever table_id the waitress picks.
+    const table_id = overrideTableId || reservation.table_id;
+    const { rows: tables } = await client.query(
+      `SELECT id FROM restaurant_table WHERE id = $1 AND restaurant_id = $2 AND status = 'active'`,
+      [table_id, restaurant_id]
+    );
+    if (!tables.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Table not found' }); }
+
+    // Same get-or-create-open-session pattern as createOrder in
+    // restaurantOrders.js -- ON CONFLICT handles two requests racing to open
+    // a session for the same table.
+    const { rows: inserted } = await client.query(
+      `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id, reservation_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (table_id) WHERE status = 'open' DO NOTHING
+       RETURNING id`,
+      [req.property_id, restaurant_id, table_id, reservation.id]
+    );
+    let session_id;
+    if (inserted.length) {
+      session_id = inserted[0].id;
+    } else {
+      const { rows: existing } = await client.query(
+        `UPDATE restaurant_table_session SET reservation_id = $1
+         WHERE table_id = $2 AND status = 'open' RETURNING id`,
+        [reservation.id, table_id]
+      );
+      session_id = existing[0].id;
+    }
+
+    const { rows: updatedReservation } = await client.query(
+      `UPDATE restaurant_reservation SET status = 'seated' WHERE id = $1 RETURNING *`,
+      [reservation.id]
+    );
+
+    await client.query('COMMIT');
+    res.json({ reservation: updatedReservation[0], session_id, table_id });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   listRestaurants, getRestaurant, createRestaurant, updateRestaurant,
   listTables, createTable, updateTable,
   listServicePeriods, setServicePeriods,
   searchAvailability,
   listAllReservations,
-  listReservations, getReservation, createReservation, updateReservation,
+  listReservations, getReservation, createReservation, updateReservation, seatReservation,
 };
