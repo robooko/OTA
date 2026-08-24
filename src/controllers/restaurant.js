@@ -373,7 +373,7 @@ async function listAllReservations(req, res, next) {
 async function listReservations(req, res, next) {
   try {
     const { restaurant_id } = req.params;
-    const { date, status, guest_id, clerk_user_id, cursor, limit } = req.query;
+    const { date, date_from, date_to, status, guest_id, clerk_user_id, cursor, limit } = req.query;
     let query = `
       SELECT rr.*, rt.table_number, rt.seats, rt.location
       FROM restaurant_reservation rr
@@ -382,6 +382,12 @@ async function listReservations(req, res, next) {
     `;
     const params = [restaurant_id, req.property_id];
     if (date) { params.push(date); query += ` AND rr.reservation_date = $${params.length}`; }
+    // date_from/date_to are the restaurant dashboard's live-reservations-feed
+    // built-in range picker (hotal-ui >= 0.23.3, showDateFilter) -- an
+    // inclusive range, independent of the single-day `date` param above
+    // (still used by the admin /reservations page's day picker).
+    if (date_from) { params.push(date_from); query += ` AND rr.reservation_date >= $${params.length}`; }
+    if (date_to) { params.push(date_to); query += ` AND rr.reservation_date <= $${params.length}`; }
     if (status) { params.push(status); query += ` AND rr.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND rr.guest_id = $${params.length}`; }
     if (clerk_user_id) { params.push(clerk_user_id); query += ` AND rr.clerk_user_id = $${params.length}`; }

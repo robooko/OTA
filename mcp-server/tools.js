@@ -190,7 +190,9 @@ function createTools(apiRequest) {
     description: 'List reservations for a restaurant, optionally filtered by date, status, or guest',
     inputSchema: {
       restaurant_id: z.string(),
-      date: z.string().optional(),
+      date: z.string().optional().describe('Exact reservation_date match'),
+      date_from: z.string().optional().describe('Inclusive range start, independent of date'),
+      date_to: z.string().optional().describe('Inclusive range end, independent of date'),
       status: z.string().optional(),
       guest_id: z.string().optional(),
       clerk_user_id: z.string().optional(),
