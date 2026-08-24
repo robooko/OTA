@@ -133,7 +133,7 @@ async function listOrders(req, res, next) {
   try {
     const { restaurant_id, booking_id, table_id, guest_id, status, skip, take } = req.query;
     let query = `
-      SELECT o.*, rm.room_number,
+      SELECT o.*, rm.room_number, rt.table_number,
              json_agg(json_build_object(
                'id', oi.id,
                'item_id', oi.item_id,
@@ -147,6 +147,7 @@ async function listOrders(req, res, next) {
       LEFT JOIN restaurant_order_item oi ON oi.order_id = o.id
       LEFT JOIN booking bk ON bk.id = o.booking_id
       LEFT JOIN room rm ON rm.id = bk.room_id
+      LEFT JOIN restaurant_table rt ON rt.id = o.table_id
       WHERE o.property_id = $1
     `;
     const params = [req.property_id];
@@ -155,7 +156,7 @@ async function listOrders(req, res, next) {
     if (table_id)   { params.push(table_id);   query += ` AND o.table_id = $${params.length}`; }
     if (guest_id)   { params.push(guest_id);   query += ` AND o.guest_id = $${params.length}`; }
     if (status)     { params.push(status);     query += ` AND o.status = $${params.length}`; }
-    query += ' GROUP BY o.id, rm.room_number ORDER BY o.created_at DESC';
+    query += ' GROUP BY o.id, rm.room_number, rt.table_number ORDER BY o.created_at DESC';
 
     const countParams = [req.property_id, restaurant_id, booking_id, table_id, guest_id, status].filter(Boolean);
     const [{ rows: countRows }] = await Promise.all([
@@ -178,7 +179,7 @@ async function listOrders(req, res, next) {
 async function getOrder(req, res, next) {
   try {
     const { rows } = await pool.query(
-      `SELECT o.*, rm.room_number,
+      `SELECT o.*, rm.room_number, rt.table_number,
               json_agg(json_build_object(
                 'id', oi.id,
                 'item_id', oi.item_id,
@@ -192,8 +193,9 @@ async function getOrder(req, res, next) {
        LEFT JOIN restaurant_order_item oi ON oi.order_id = o.id
        LEFT JOIN booking bk ON bk.id = o.booking_id
        LEFT JOIN room rm ON rm.id = bk.room_id
+       LEFT JOIN restaurant_table rt ON rt.id = o.table_id
        WHERE o.id = $1 AND o.property_id = $2
-       GROUP BY o.id, rm.room_number`,
+       GROUP BY o.id, rm.room_number, rt.table_number`,
       [req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
@@ -335,9 +337,18 @@ async function createOrder(req, res, next) {
       }
 
       await client.query('COMMIT');
-      publishNewOrder(restaurant_id, { ...order[0], items: resolvedItems }).catch((err) => console.error('Ably publish failed:', err.message));
-      publishNewOrderForProperty(req.property_id, { ...order[0], items: resolvedItems }).catch((err) => console.error('Ably publish failed:', err.message));
-      res.status(201).json({ ...order[0], items: resolvedItems });
+
+      // Same joined shape as listOrders/getOrder, so feeds can label the
+      // order by table without a lookup of their own.
+      let table_number = null;
+      if (table_id) {
+        const { rows: tables } = await pool.query('SELECT table_number FROM restaurant_table WHERE id = $1', [table_id]);
+        table_number = tables[0]?.table_number ?? null;
+      }
+      const created = { ...order[0], table_number, items: resolvedItems };
+      publishNewOrder(restaurant_id, created).catch((err) => console.error('Ably publish failed:', err.message));
+      publishNewOrderForProperty(req.property_id, created).catch((err) => console.error('Ably publish failed:', err.message));
+      res.status(201).json(created);
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;
@@ -368,7 +379,7 @@ async function updateOrderStatus(req, res, next) {
     // booking-scoped channel keeps the narrow payload since its consumer
     // (peter-island) isn't verified to expect the fuller shape.
     const { rows: full } = await pool.query(
-      `SELECT o.*, rm.room_number,
+      `SELECT o.*, rm.room_number, rt.table_number,
               json_agg(json_build_object(
                 'id', oi.id,
                 'item_id', oi.item_id,
@@ -382,8 +393,9 @@ async function updateOrderStatus(req, res, next) {
        LEFT JOIN restaurant_order_item oi ON oi.order_id = o.id
        LEFT JOIN booking bk ON bk.id = o.booking_id
        LEFT JOIN room rm ON rm.id = bk.room_id
+       LEFT JOIN restaurant_table rt ON rt.id = o.table_id
        WHERE o.id = $1
-       GROUP BY o.id, rm.room_number`,
+       GROUP BY o.id, rm.room_number, rt.table_number`,
       [rows[0].id]
     );
     const orderFull = full[0] ?? rows[0];
