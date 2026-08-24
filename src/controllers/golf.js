@@ -1,6 +1,32 @@
 const pool = require('../db');
-const { isValidDate } = require('../middleware/validate');
+const { isValidDate, isValidTime } = require('../middleware/validate');
+const { seedCourseTeeTimes } = require('../lib/teeTimeSeeder');
 const { publishNewGolfBookingForProperty, publishGolfBookingStatusChangedForProperty } = require('../lib/ably');
+
+// 400-message for any invalid schedule field, null when all are acceptable.
+// Fields are optional (undefined/null passes) -- the schedule is opt-in and
+// may arrive piecemeal; the seeder only runs once all three are set.
+function scheduleValidationError({ first_tee, last_tee, tee_interval_minutes, default_max_players }) {
+  if (first_tee != null && !isValidTime(first_tee)) return 'Invalid first_tee format, use HH:MM';
+  if (last_tee != null && !isValidTime(last_tee)) return 'Invalid last_tee format, use HH:MM';
+  if (first_tee != null && last_tee != null && first_tee >= last_tee) return 'first_tee must be before last_tee';
+  if (tee_interval_minutes != null && (!Number.isInteger(tee_interval_minutes) || tee_interval_minutes <= 0)) {
+    return 'tee_interval_minutes must be a positive integer';
+  }
+  if (default_max_players != null && (!Number.isInteger(default_max_players) || default_max_players <= 0)) {
+    return 'default_max_players must be a positive integer';
+  }
+  return null;
+}
+
+// Extend the course's tee sheet out to the horizon right away (the daily
+// sweep would catch it anyway) -- fire-and-forget like room availability
+// seeding: a seed hiccup shouldn't fail the create/update.
+function seedIfScheduled(course) {
+  if (course.status === 'active' && course.first_tee && course.last_tee && course.tee_interval_minutes) {
+    seedCourseTeeTimes(course.id).catch((err) => console.error('Tee-sheet seed failed:', err.message));
+  }
+}
 
 // Steps a 'YYYY-MM-DD' string forward by whole days via UTC epoch math --
 // `new Date(str); d.setDate(d.getDate() + 1)` looks equivalent but
@@ -26,32 +52,61 @@ async function listCourses(req, res, next) {
 
 async function createCourse(req, res, next) {
   try {
-    const { name, description, holes, price_per_player } = req.body;
+    const { name, description, holes, price_per_player, first_tee, last_tee, tee_interval_minutes, default_max_players } = req.body;
     if (!name || !holes || price_per_player == null) {
       return res.status(400).json({ error: 'name, holes, and price_per_player are required' });
     }
+    const scheduleError = scheduleValidationError(req.body);
+    if (scheduleError) return res.status(400).json({ error: scheduleError });
     const { rows } = await pool.query(
-      `INSERT INTO golf_course (property_id, name, description, holes, price_per_player) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [req.property_id, name, description ?? null, holes, price_per_player]
+      `INSERT INTO golf_course (property_id, name, description, holes, price_per_player, first_tee, last_tee, tee_interval_minutes, default_max_players)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 4)) RETURNING *`,
+      [req.property_id, name, description ?? null, holes, price_per_player, first_tee ?? null, last_tee ?? null, tee_interval_minutes ?? null, default_max_players ?? null]
     );
+    seedIfScheduled(rows[0]);
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
 }
 
 async function updateCourse(req, res, next) {
   try {
-    const { name, description, holes, price_per_player, status } = req.body;
+    const { name, description, holes, price_per_player, status, first_tee, last_tee, tee_interval_minutes, default_max_players } = req.body;
+    const scheduleError = scheduleValidationError(req.body);
+    if (scheduleError) return res.status(400).json({ error: scheduleError });
+    // Providing only one end of the window must not invert it against the
+    // stored other end (an inverted schedule seeds nothing, silently) --
+    // merge with current values and check the pair that will actually land.
+    // slice(0,5): stored TIMEs read back as 'HH:MM:SS', requests send 'HH:MM'.
+    if (first_tee != null || last_tee != null) {
+      const { rows: existing } = await pool.query(
+        'SELECT first_tee, last_tee FROM golf_course WHERE id = $1 AND property_id = $2',
+        [req.params.id, req.property_id]
+      );
+      if (!existing.length) return res.status(404).json({ error: 'Course not found' });
+      const ft = first_tee ?? existing[0].first_tee;
+      const lt = last_tee ?? existing[0].last_tee;
+      if (ft != null && lt != null && String(ft).slice(0, 5) >= String(lt).slice(0, 5)) {
+        return res.status(400).json({ error: 'first_tee must be before last_tee' });
+      }
+    }
     const { rows } = await pool.query(
       `UPDATE golf_course SET
-         name             = COALESCE($1, name),
-         description      = COALESCE($2, description),
-         holes            = COALESCE($3, holes),
-         price_per_player = COALESCE($4, price_per_player),
-         status           = COALESCE($5, status)
-       WHERE id = $6 AND property_id = $7 RETURNING *`,
-      [name, description, holes, price_per_player, status, req.params.id, req.property_id]
+         name                 = COALESCE($1, name),
+         description          = COALESCE($2, description),
+         holes                = COALESCE($3, holes),
+         price_per_player     = COALESCE($4, price_per_player),
+         status               = COALESCE($5, status),
+         first_tee            = COALESCE($6, first_tee),
+         last_tee             = COALESCE($7, last_tee),
+         tee_interval_minutes = COALESCE($8, tee_interval_minutes),
+         default_max_players  = COALESCE($9, default_max_players)
+       WHERE id = $10 AND property_id = $11 RETURNING *`,
+      [name, description, holes, price_per_player, status, first_tee, last_tee, tee_interval_minutes, default_max_players, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Course not found' });
+    // Existing tee_time rows are inventory staff may have edited -- a
+    // schedule change only shapes slots not yet materialised.
+    seedIfScheduled(rows[0]);
     res.json(rows[0]);
   } catch (err) { next(err); }
 }

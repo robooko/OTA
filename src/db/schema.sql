@@ -462,7 +462,17 @@ CREATE TABLE IF NOT EXISTS golf_course (
   description      TEXT,
   holes            INT           NOT NULL,
   price_per_player NUMERIC(10,2) NOT NULL,
-  status           VARCHAR(20)   DEFAULT 'active'
+  status           VARCHAR(20)   DEFAULT 'active',
+  -- Tee-sheet schedule: when first_tee, last_tee, and tee_interval_minutes
+  -- are all set, the boot/daily seeder (src/lib/teeTimeSeeder.js)
+  -- materialises tee_time rows out to a rolling horizon and staff only
+  -- manage exceptions -- same open-by-default philosophy as
+  -- room_availability. All three NULL = manual tee sheet via
+  -- POST /api/golf/tee-times/bulk.
+  first_tee            TIME,
+  last_tee             TIME,
+  tee_interval_minutes INT,
+  default_max_players  INT NOT NULL DEFAULT 4
 );
 
 CREATE TABLE IF NOT EXISTS tee_time (
