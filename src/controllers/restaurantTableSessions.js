@@ -69,6 +69,37 @@ async function createSessionPaymentIntent(req, res, next) {
       if (['requires_payment_method', 'requires_confirmation', 'requires_capture', 'requires_action'].includes(existing.status)) {
         return res.json({ client_secret: existing.client_secret, payment_intent_id: existing.id });
       }
+      // Crash-window recovery: the tap succeeded but the app died before
+      // calling close, so the charge exists while the session still reads
+      // unpaid. Creating a fresh intent here would charge the customer
+      // twice -- instead, settle the session with the charge that already
+      // landed, applying the same checks close-with-payment would.
+      if (existing.status === 'succeeded') {
+        const expected = await sessionTotalCents(session.id);
+        if (existing.amount !== expected) {
+          return res.status(409).json({
+            error: 'A payment already succeeded for a different amount',
+            payment_intent_id: existing.id,
+          });
+        }
+        const { rows: active } = await pool.query(
+          `SELECT COUNT(*) FROM restaurant_order WHERE table_session_id = $1 AND status IN ('pending', 'confirmed', 'preparing')`,
+          [session.id]
+        );
+        if (parseInt(active[0].count, 10) > 0) {
+          return res.status(409).json({
+            error: 'A payment already succeeded but the session has active orders',
+            payment_intent_id: existing.id,
+          });
+        }
+        await pool.query(
+          `UPDATE restaurant_table_session SET status = 'closed', closed_at = now(), payment_status = 'paid', paid_at = now()
+           WHERE id = $1`,
+          [session.id]
+        );
+        return res.json({ already_paid: true, payment_intent_id: existing.id });
+      }
+      // canceled -> fall through and mint a fresh intent
     }
 
     const amount = await sessionTotalCents(session.id);
