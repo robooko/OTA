@@ -515,6 +515,9 @@ const swaggerSpec = {
     '/api/restaurant-table-sessions': {
       get: { tags: ['Restaurant Table Sessions'], summary: "Get a table's session (with its orders)", description: 'Used to decide "Add to order" vs "New order" before placing an order for a table.', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'table_id', in: 'query', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'status', in: 'query', schema: { type: 'string', enum: ['open', 'closed'] } }], responses: { 200: { description: 'Session plus its orders (with line items)' }, 400: { description: 'table_id missing' }, 404: { description: 'Not found' } } },
     },
+    '/api/restaurant-table-sessions/{id}': {
+      get: { tags: ['Restaurant Table Sessions'], summary: 'Get a session by id (with its orders and reservation)', description: "Same shape as the table_id lookup, but addresses a specific session -- e.g. the one an order's table_session_id points at, which may no longer be the table's latest.", security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Session plus table_number, its orders (with line items), and reservation (null for walk-ins)' }, 404: { description: 'Not found' } } },
+    },
     '/api/restaurant-table-sessions/{id}/close': {
       put: { tags: ['Restaurant Table Sessions'], summary: 'Close a table session', description: "Payment-agnostic -- marks the tab done. Rejects if any order under the session is still pending/confirmed/preparing.", security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Closed session' }, 404: { description: 'Not found' }, 409: { description: 'Active orders still open under this session' } } },
     },

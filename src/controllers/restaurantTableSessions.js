@@ -121,49 +121,72 @@ async function createSessionPaymentIntent(req, res, next) {
   }
 }
 
+// Session row plus everything a "what's on this tab" view needs: the
+// table's number, every order under the session (with line items), and
+// the reservation it was seated from (null for walk-ins).
+async function loadSessionDetails(session) {
+  const { rows: orders } = await pool.query(
+    `SELECT o.*,
+            json_agg(json_build_object(
+              'id', oi.id,
+              'item_id', oi.item_id,
+              'item_name', oi.item_name,
+              'quantity', oi.quantity,
+              'unit_price', oi.unit_price,
+              'variant', oi.variant,
+              'total', (oi.quantity * oi.unit_price)
+            )) AS items
+     FROM restaurant_order o
+     LEFT JOIN restaurant_order_item oi ON oi.order_id = o.id
+     WHERE o.table_session_id = $1
+     GROUP BY o.id
+     ORDER BY o.created_at`,
+    [session.id]
+  );
+
+  let reservation = null;
+  if (session.reservation_id) {
+    const { rows: reservations } = await pool.query(
+      `SELECT id, contact_name, contact_email, contact_phone, party_size, reservation_date, start_time, end_time, status, notes
+       FROM restaurant_reservation WHERE id = $1`,
+      [session.reservation_id]
+    );
+    reservation = reservations[0] ?? null;
+  }
+
+  return { ...session, orders, reservation };
+}
+
+const SESSION_SELECT = `SELECT rts.*, t.table_number
+  FROM restaurant_table_session rts
+  JOIN restaurant_table t ON t.id = rts.table_id`;
+
 async function getOpenSession(req, res, next) {
   try {
     const { table_id, status } = req.query;
     if (!table_id) return res.status(400).json({ error: 'table_id is required' });
 
-    let query = `SELECT * FROM restaurant_table_session WHERE table_id = $1 AND property_id = $2`;
+    let query = `${SESSION_SELECT} WHERE rts.table_id = $1 AND rts.property_id = $2`;
     const params = [table_id, req.property_id];
-    if (status) { params.push(status); query += ` AND status = $${params.length}`; }
-    query += ' ORDER BY opened_at DESC LIMIT 1';
+    if (status) { params.push(status); query += ` AND rts.status = $${params.length}`; }
+    query += ' ORDER BY rts.opened_at DESC LIMIT 1';
 
     const { rows: sessions } = await pool.query(query, params);
     if (!sessions.length) return res.status(404).json({ error: 'Session not found' });
-    const session = sessions[0];
 
-    const { rows: orders } = await pool.query(
-      `SELECT o.*,
-              json_agg(json_build_object(
-                'id', oi.id,
-                'item_id', oi.item_id,
-                'item_name', oi.item_name,
-                'quantity', oi.quantity,
-                'unit_price', oi.unit_price,
-                'variant', oi.variant,
-                'total', (oi.quantity * oi.unit_price)
-              )) AS items
-       FROM restaurant_order o
-       LEFT JOIN restaurant_order_item oi ON oi.order_id = o.id
-       WHERE o.table_session_id = $1
-       GROUP BY o.id
-       ORDER BY o.created_at`,
-      [session.id]
+    res.json(await loadSessionDetails(sessions[0]));
+  } catch (err) { next(err); }
+}
+
+async function getSession(req, res, next) {
+  try {
+    const { rows: sessions } = await pool.query(
+      `${SESSION_SELECT} WHERE rts.id = $1 AND rts.property_id = $2`,
+      [req.params.id, req.property_id]
     );
+    if (!sessions.length) return res.status(404).json({ error: 'Session not found' });
 
-    let reservation = null;
-    if (session.reservation_id) {
-      const { rows: reservations } = await pool.query(
-        `SELECT id, contact_name, party_size, notes FROM restaurant_reservation WHERE id = $1`,
-        [session.reservation_id]
-      );
-      reservation = reservations[0] ?? null;
-    }
-
-    res.json({ ...session, orders, reservation });
+    res.json(await loadSessionDetails(sessions[0]));
   } catch (err) { next(err); }
 }
 
@@ -229,4 +252,4 @@ async function closeSession(req, res, next) {
   }
 }
 
-module.exports = { getOpenSession, closeSession, createConnectionToken, createSessionPaymentIntent };
+module.exports = { getOpenSession, getSession, closeSession, createConnectionToken, createSessionPaymentIntent };
