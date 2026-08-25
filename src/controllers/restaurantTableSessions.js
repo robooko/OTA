@@ -2,7 +2,8 @@ const pool = require('../db');
 
 async function sessionTotalCents(sessionId) {
   const { rows } = await pool.query(
-    `SELECT COALESCE(SUM(total_price), 0) AS total FROM restaurant_order WHERE table_session_id = $1`,
+    // A voided round must not be charged for.
+    `SELECT COALESCE(SUM(total_price), 0) AS total FROM restaurant_order WHERE table_session_id = $1 AND status <> 'cancelled'`,
     [sessionId]
   );
   return Math.round(parseFloat(rows[0].total) * 100);
@@ -61,13 +62,35 @@ async function createSessionPaymentIntent(req, res, next) {
 
     const stripe = require('stripe')(session.stripe_secret_key);
 
+    // Which rail the tab is being settled on. 'terminal' (default) is the
+    // waiter's card reader -- a card_present intent that only Stripe Terminal
+    // can complete. 'online' is the guest paying on their own phone (the
+    // website's scan-to-order page) via Stripe Elements, which cannot render
+    // a card_present intent, so it needs a regular automatic-methods intent.
+    const channel = req.body?.channel === 'online' ? 'online' : 'terminal';
+    const isTerminalIntent = (intent) => (intent.payment_method_types || []).includes('card_present');
+
     // Idempotency: a retry (e.g. a failed tap) shouldn't create a second
     // charge against the same tab. Reuse the existing intent unless it's
     // already reached a terminal state.
     if (session.stripe_payment_intent_id) {
       const existing = await stripe.paymentIntents.retrieve(session.stripe_payment_intent_id);
       if (['requires_payment_method', 'requires_confirmation', 'requires_capture', 'requires_action'].includes(existing.status)) {
-        return res.json({ client_secret: existing.client_secret, payment_intent_id: existing.id });
+        const sameChannel = (channel === 'terminal') === isTerminalIntent(existing);
+        if (sameChannel) {
+          return res.json({ client_secret: existing.client_secret, payment_intent_id: existing.id, amount: existing.amount, channel });
+        }
+        // The other rail already started on this tab. If nothing has been
+        // attached yet, hand the tab over: cancel and mint on the new rail.
+        // If a payment is mid-flight (confirming / 3DS), don't yank it.
+        if (existing.status !== 'requires_payment_method') {
+          return res.status(409).json({
+            error: `A ${isTerminalIntent(existing) ? 'card reader' : 'online'} payment is already in progress on this tab`,
+            payment_intent_id: existing.id,
+          });
+        }
+        await stripe.paymentIntents.cancel(existing.id);
+        // fall through and mint a fresh intent on the requested channel
       }
       // Crash-window recovery: the tap succeeded but the app died before
       // calling close, so the charge exists while the session still reads
@@ -103,16 +126,19 @@ async function createSessionPaymentIntent(req, res, next) {
     }
 
     const amount = await sessionTotalCents(session.id);
+    if (amount <= 0) return res.status(409).json({ error: 'Nothing to pay on this session' });
     const intent = await stripe.paymentIntents.create({
       amount,
       currency: session.currency.toLowerCase(),
-      payment_method_types: ['card_present'],
+      ...(channel === 'online'
+        ? { automatic_payment_methods: { enabled: true } }
+        : { payment_method_types: ['card_present'] }),
       capture_method: 'automatic',
-      metadata: { table_session_id: session.id, restaurant_id: session.restaurant_id },
+      metadata: { table_session_id: session.id, restaurant_id: session.restaurant_id, channel },
     });
 
     await pool.query(`UPDATE restaurant_table_session SET stripe_payment_intent_id = $1 WHERE id = $2`, [intent.id, session.id]);
-    res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id });
+    res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount, channel });
   } catch (err) {
     if (err.type?.startsWith('Stripe')) {
       return res.status(502).json({ error: `Stripe error: ${err.message}` });
