@@ -75,6 +75,13 @@ async function publishTableSessionClosed(restaurantId, propertyId, session) {
   await Promise.all([
     client.channels.get(`restaurant:${restaurantId}:orders`).publish('table-session-closed', session),
     client.channels.get(`property:${propertyId}:orders`).publish('table-session-closed', session),
+    // Session-scoped mirror for guest-facing pages (table-pay): the orders
+    // channels above are staff surface -- restaurant-wide and mintable only
+    // with an org-scoped Clerk session -- so a guest device subscribes to
+    // just its own tab via GET /restaurant-table-sessions/:id/ably-token
+    // (same pattern as room-service:{bookingId}). No opened mirror: a
+    // subscriber to this channel already has the session.
+    client.channels.get(`table-session:${session.id}`).publish('table-session-closed', session),
   ]);
 }
 

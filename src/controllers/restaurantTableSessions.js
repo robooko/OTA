@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { publishTableSessionClosed } = require('../lib/ably');
+const { publishTableSessionClosed, client: ablyClient } = require('../lib/ably');
 
 // Realtime close notification for the order-channel subscribers. Built from
 // the UPDATE's RETURNING row (bare session columns only) -- never from the
@@ -304,4 +304,27 @@ async function closeSession(req, res, next) {
   }
 }
 
-module.exports = { getOpenSession, getSession, closeSession, createConnectionToken, createSessionPaymentIntent };
+// Subscribe token for ONE session's channel -- the guest-safe realtime
+// surface. The restaurant-wide orders channel carries every table's orders
+// and payment states and its token endpoint is staff-only (org-scoped Clerk
+// session); a guest device gets this instead, scoped to just its own tab.
+// The guest site's backend proxies the mint with its property API key, same
+// as it already does for the payment-intent call.
+async function getSessionAblyToken(req, res, next) {
+  try {
+    if (!ablyClient) return res.status(503).json({ error: 'Realtime notifications are not configured' });
+    const { rows } = await pool.query(
+      'SELECT id FROM restaurant_table_session WHERE id = $1 AND property_id = $2',
+      [req.params.id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Session not found' });
+
+    const channel = `table-session:${rows[0].id}`;
+    const tokenRequest = await ablyClient.auth.createTokenRequest({
+      capability: { [channel]: ['subscribe'] },
+    });
+    res.json({ tokenRequest, channel });
+  } catch (err) { next(err); }
+}
+
+module.exports = { getOpenSession, getSession, closeSession, createConnectionToken, createSessionPaymentIntent, getSessionAblyToken };
