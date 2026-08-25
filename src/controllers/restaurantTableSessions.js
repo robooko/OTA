@@ -158,6 +158,56 @@ async function createSessionPaymentIntent(req, res, next) {
   }
 }
 
+async function openSession(req, res, next) {
+  try {
+    const { table_id } = req.body ?? {};
+    if (!table_id) return res.status(400).json({ error: 'table_id is required' });
+
+    const { rows: tableRows } = await pool.query(
+      `SELECT id, restaurant_id, table_number FROM restaurant_table WHERE id = $1 AND property_id = $2`,
+      [table_id, req.property_id]
+    );
+    if (!tableRows.length) return res.status(404).json({ error: 'Table not found' });
+    const table = tableRows[0];
+
+    // Idempotent, same pattern createOrder already uses to open a session
+    // implicitly: reuse an existing open session for this table instead of
+    // erroring, whether this is a repeat tap or an order already opened it.
+    const { rows: inserted } = await pool.query(
+      `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (table_id) WHERE status = 'open' DO NOTHING
+       RETURNING *`,
+      [req.property_id, table.restaurant_id, table_id]
+    );
+
+    let session = inserted[0];
+    if (!session) {
+      const { rows: existing } = await pool.query(
+        `SELECT * FROM restaurant_table_session WHERE table_id = $1 AND status = 'open'`,
+        [table_id]
+      );
+      session = existing[0];
+    }
+
+    // Warn, don't block -- a walk-in open here doesn't know about a
+    // same-day reservation on this table, so flag it for the waiter to
+    // judge rather than refusing the open outright.
+    const { rows: reservationRows } = await pool.query(
+      `SELECT contact_name, party_size, start_time FROM restaurant_reservation
+       WHERE table_id = $1 AND status = 'confirmed' AND reservation_date = CURRENT_DATE
+         AND id IS DISTINCT FROM $2
+       ORDER BY start_time LIMIT 1`,
+      [table_id, session.reservation_id]
+    );
+    const reservation_warning = reservationRows[0]
+      ? `This table has a confirmed reservation today at ${reservationRows[0].start_time} for ${reservationRows[0].contact_name} (party of ${reservationRows[0].party_size}).`
+      : null;
+
+    res.status(inserted.length ? 201 : 200).json({ ...session, table_number: table.table_number, reservation_warning });
+  } catch (err) { next(err); }
+}
+
 // Session row plus everything a "what's on this tab" view needs: the
 // table's number, every order under the session (with line items), and
 // the reservation it was seated from (null for walk-ins).
@@ -327,4 +377,12 @@ async function getSessionAblyToken(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { getOpenSession, getSession, closeSession, createConnectionToken, createSessionPaymentIntent, getSessionAblyToken };
+module.exports = {
+  openSession,
+  getOpenSession,
+  getSession,
+  closeSession,
+  createConnectionToken,
+  createSessionPaymentIntent,
+  getSessionAblyToken,
+};

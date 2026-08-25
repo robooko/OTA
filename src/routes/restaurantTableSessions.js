@@ -3,6 +3,7 @@ const ctrl = require('../controllers/restaurantTableSessions');
 const { authenticateOrApiKey } = require('../middleware/auth');
 
 router.get('/', authenticateOrApiKey, ctrl.getOpenSession);
+router.post('/', authenticateOrApiKey, ctrl.openSession);
 router.post('/connection-token', authenticateOrApiKey, ctrl.createConnectionToken);
 router.get('/:id', authenticateOrApiKey, ctrl.getSession);
 router.get('/:id/ably-token', authenticateOrApiKey, ctrl.getSessionAblyToken);
