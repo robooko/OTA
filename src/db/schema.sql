@@ -210,6 +210,7 @@ CREATE TABLE IF NOT EXISTS restaurant (
   timezone                  VARCHAR(50), -- NULL = inherit property.timezone
   payment_protection        VARCHAR(20)  NOT NULL DEFAULT 'none', -- 'none' | 'hold' | 'deposit'
   payment_protection_amount NUMERIC(10,2),
+  website_id                UUID REFERENCES property_website(id), -- NULL = no guest website; table QR codes then carry only the table id
   created_at                TIMESTAMPTZ DEFAULT now(),
   CONSTRAINT restaurant_payment_protection_check CHECK (payment_protection IN ('none', 'hold', 'deposit'))
 );

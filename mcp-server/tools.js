@@ -182,6 +182,7 @@ function createTools(apiRequest) {
       floor_plan: z.record(z.any()).optional().describe('{ tables: [{otaId, number, seats, x, y, shape}], w, h }'),
       payment_protection: z.enum(['none', 'hold', 'deposit']).optional().describe('Whether a reservation requires a card hold or upfront deposit'),
       payment_protection_amount: z.number().min(0).optional().describe('Amount for the hold/deposit, in the restaurant\'s currency'),
+      website_id: z.string().uuid().nullable().optional().describe('One of the property\'s websites (GET /api/property/websites) that table QR codes link to; null to clear'),
     },
     run: ({ id, ...body }) => apiRequest('PUT', `/api/restaurant/${id}`, { body }),
   },

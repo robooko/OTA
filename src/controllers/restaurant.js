@@ -84,7 +84,16 @@ async function createRestaurant(req, res, next) {
 
 async function updateRestaurant(req, res, next) {
   try {
-    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan, payment_protection, payment_protection_amount } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan, payment_protection, payment_protection_amount, website_id } = req.body;
+    // null clears it (restaurant no longer tied to a website); a non-null
+    // value must be one of this property's own websites.
+    if (website_id !== undefined && website_id !== null) {
+      const { rows: sites } = await pool.query(
+        `SELECT id FROM property_website WHERE id = $1 AND property_id = $2 AND status = 'active'`,
+        [website_id, req.property_id]
+      );
+      if (!sites.length) return res.status(400).json({ error: 'website_id must be one of this property\'s websites' });
+    }
     if (closed_days !== undefined && !isValidClosedDays(closed_days)) {
       return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
     }
@@ -119,12 +128,14 @@ async function updateRestaurant(req, res, next) {
          timezone                   = COALESCE($9, timezone),
          floor_plan                 = COALESCE($10::jsonb, floor_plan),
          payment_protection         = COALESCE($11, payment_protection),
-         payment_protection_amount  = CASE WHEN $12::boolean THEN $13::numeric ELSE payment_protection_amount END
-       WHERE id = $14 AND property_id = $15 RETURNING *`,
+         payment_protection_amount  = CASE WHEN $12::boolean THEN $13::numeric ELSE payment_protection_amount END,
+         website_id                 = CASE WHEN $14::boolean THEN $15::uuid ELSE website_id END
+       WHERE id = $16 AND property_id = $17 RETURNING *`,
       [
         name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan ?? null,
         payment_protection,
         payment_protection_amount !== undefined, payment_protection_amount ?? null,
+        website_id !== undefined, website_id ?? null,
         req.params.id, req.property_id,
       ]
     );
