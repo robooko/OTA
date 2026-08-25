@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { publishTableSessionClosed, client: ablyClient } = require('../lib/ably');
+const { publishTableSessionOpened, publishTableSessionClosed, client: ablyClient } = require('../lib/ably');
 
 // Realtime close notification for the order-channel subscribers. Built from
 // the UPDATE's RETURNING row (bare session columns only) -- never from the
@@ -182,7 +182,10 @@ async function openSession(req, res, next) {
     );
 
     let session = inserted[0];
-    if (!session) {
+    if (session) {
+      publishTableSessionOpened(table.restaurant_id, req.property_id, { ...session, table_number: table.table_number })
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    } else {
       const { rows: existing } = await pool.query(
         `SELECT * FROM restaurant_table_session WHERE table_id = $1 AND status = 'open'`,
         [table_id]
