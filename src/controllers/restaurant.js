@@ -1,6 +1,6 @@
 const pool = require('../db');
 const { isValidDate, isValidTime, isValidCurrencyCode, isValidTimezone } = require('../middleware/validate');
-const { publishNewReservation, publishReservationStatusChanged } = require('../lib/ably');
+const { publishNewReservation, publishReservationStatusChanged, publishTableSessionOpened } = require('../lib/ably');
 
 function addMinutesToTime(timeStr, minutesToAdd) {
   const [h, m] = timeStr.split(':').map(Number);
@@ -683,7 +683,7 @@ async function seatReservation(req, res, next) {
     // seating just targets whichever table_id the waitress picks.
     const table_id = overrideTableId || reservation.table_id;
     const { rows: tables } = await client.query(
-      `SELECT id FROM restaurant_table WHERE id = $1 AND restaurant_id = $2 AND status = 'active'`,
+      `SELECT id, table_number FROM restaurant_table WHERE id = $1 AND restaurant_id = $2 AND status = 'active'`,
       [table_id, restaurant_id]
     );
     if (!tables.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Table not found' }); }
@@ -699,6 +699,7 @@ async function seatReservation(req, res, next) {
       [table_id]
     );
     let session_id;
+    let openedSession = null; // set only when this seat call creates the session
     if (openSessions.length && openSessions[0].reservation_id !== reservation.id) {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Table already has an active session' });
@@ -709,7 +710,7 @@ async function seatReservation(req, res, next) {
         `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id, reservation_id)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (table_id) WHERE status = 'open' DO NOTHING
-         RETURNING id`,
+         RETURNING *`,
         [req.property_id, restaurant_id, table_id, reservation.id]
       );
       if (!inserted.length) {
@@ -719,6 +720,7 @@ async function seatReservation(req, res, next) {
         return res.status(409).json({ error: 'Table already has an active session' });
       }
       session_id = inserted[0].id;
+      openedSession = inserted[0];
     }
 
     const { rows: updatedReservation } = await client.query(
@@ -739,6 +741,13 @@ async function seatReservation(req, res, next) {
     );
     if (full.length) {
       publishReservationStatusChanged(full[0].restaurant_id, req.property_id, full[0])
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    }
+    if (openedSession) {
+      // tables[0].table_number is the session's actual table (the override
+      // when one was passed) -- full[0].table_number would be the originally
+      // booked table, which can differ.
+      publishTableSessionOpened(restaurant_id, req.property_id, { ...openedSession, table_number: tables[0].table_number })
         .catch((err) => console.error('Ably publish failed:', err.message));
     }
 

@@ -5,6 +5,7 @@ const {
   publishNewOrderForProperty,
   publishOrderStatusChangedForProperty,
   publishOrderStatusChangedForBooking,
+  publishTableSessionOpened,
   client: ablyClient,
 } = require('../lib/ably');
 
@@ -229,6 +230,7 @@ async function createOrder(req, res, next) {
       }
 
       let table_session_id = null;
+      let openedSession = null; // set only when this request creates the session
       if (table_id) {
         const { rows: tables } = await client.query(
           `SELECT id FROM restaurant_table WHERE id = $1 AND property_id = $2 AND status = 'active'`,
@@ -288,11 +290,12 @@ async function createOrder(req, res, next) {
           `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id)
            VALUES ($1, $2, $3)
            ON CONFLICT (table_id) WHERE status = 'open' DO NOTHING
-           RETURNING id`,
+           RETURNING *`,
           [req.property_id, restaurant_id, table_id]
         );
         if (inserted.length) {
           table_session_id = inserted[0].id;
+          openedSession = inserted[0];
         } else {
           const { rows: existing } = await client.query(
             `SELECT id FROM restaurant_table_session WHERE table_id = $1 AND status = 'open'`,
@@ -346,6 +349,10 @@ async function createOrder(req, res, next) {
         table_number = tables[0]?.table_number ?? null;
       }
       const created = { ...order[0], table_number, items: resolvedItems };
+      if (openedSession) {
+        publishTableSessionOpened(restaurant_id, req.property_id, { ...openedSession, table_number })
+          .catch((err) => console.error('Ably publish failed:', err.message));
+      }
       publishNewOrder(restaurant_id, created).catch((err) => console.error('Ably publish failed:', err.message));
       publishNewOrderForProperty(req.property_id, created).catch((err) => console.error('Ably publish failed:', err.message));
       res.status(201).json(created);

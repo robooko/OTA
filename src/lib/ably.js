@@ -55,6 +55,29 @@ async function publishOrderStatusChangedForBooking(bookingId, payload) {
   await channel.publish('order-status-changed', payload);
 }
 
+// Table-session lifecycle, on the same channels as orders -- existing
+// order-feed tokens (restaurant- and property-scoped) receive these with no
+// new capability. Opened fires only when a session is genuinely created
+// (adding a round to an open tab is not an event); closed carries
+// payment_status/paid_at so payment UIs learn the tab settled without
+// polling. Payloads are the bare session row + table_number -- never the
+// property join, which would leak stripe_secret_key to subscribers.
+async function publishTableSessionOpened(restaurantId, propertyId, session) {
+  if (!client) return;
+  await Promise.all([
+    client.channels.get(`restaurant:${restaurantId}:orders`).publish('table-session-opened', session),
+    client.channels.get(`property:${propertyId}:orders`).publish('table-session-opened', session),
+  ]);
+}
+
+async function publishTableSessionClosed(restaurantId, propertyId, session) {
+  if (!client) return;
+  await Promise.all([
+    client.channels.get(`restaurant:${restaurantId}:orders`).publish('table-session-closed', session),
+    client.channels.get(`property:${propertyId}:orders`).publish('table-session-closed', session),
+  ]);
+}
+
 // Restaurant reservations had no Ably publishing at all before this --
 // property:{id}:reservations already has a subscriber (the main dashboard's
 // <live-reservations-feed> via reservations/ably-auth.ts) that's been
@@ -170,6 +193,8 @@ module.exports = {
   publishNewOrderForProperty,
   publishOrderStatusChangedForProperty,
   publishOrderStatusChangedForBooking,
+  publishTableSessionOpened,
+  publishTableSessionClosed,
   publishNewReservation,
   publishReservationStatusChanged,
   publishNewReply,

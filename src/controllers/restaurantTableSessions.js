@@ -1,4 +1,13 @@
 const pool = require('../db');
+const { publishTableSessionClosed } = require('../lib/ably');
+
+// Realtime close notification for the order-channel subscribers. Built from
+// the UPDATE's RETURNING row (bare session columns only) -- never from the
+// SELECT rows here, which carry the property's stripe_secret_key.
+function announceClosed(session, tableNumber) {
+  publishTableSessionClosed(session.restaurant_id, session.property_id, { ...session, table_number: tableNumber ?? null })
+    .catch((err) => console.error('Ably publish failed:', err.message));
+}
 
 async function sessionTotalCents(sessionId) {
   const { rows } = await pool.query(
@@ -48,9 +57,10 @@ async function createConnectionToken(req, res, next) {
 async function createSessionPaymentIntent(req, res, next) {
   try {
     const { rows: propRows } = await pool.query(
-      `SELECT rts.*, p.stripe_secret_key, p.currency
+      `SELECT rts.*, p.stripe_secret_key, p.currency, rt.table_number
        FROM restaurant_table_session rts
        JOIN property p ON p.id = rts.property_id
+       JOIN restaurant_table rt ON rt.id = rts.table_id
        WHERE rts.id = $1 AND rts.property_id = $2`,
       [req.params.id, req.property_id]
     );
@@ -115,11 +125,12 @@ async function createSessionPaymentIntent(req, res, next) {
             payment_intent_id: existing.id,
           });
         }
-        await pool.query(
+        const { rows: settled } = await pool.query(
           `UPDATE restaurant_table_session SET status = 'closed', closed_at = now(), payment_status = 'paid', paid_at = now()
-           WHERE id = $1`,
+           WHERE id = $1 RETURNING *`,
           [session.id]
         );
+        announceClosed(settled[0], session.table_number);
         return res.json({ already_paid: true, payment_intent_id: existing.id });
       }
       // canceled -> fall through and mint a fresh intent
@@ -189,8 +200,21 @@ const SESSION_SELECT = `SELECT rts.*, t.table_number
 
 async function getOpenSession(req, res, next) {
   try {
-    const { table_id, status } = req.query;
-    if (!table_id) return res.status(400).json({ error: 'table_id is required' });
+    const { table_id, restaurant_id, status } = req.query;
+    if (!table_id && !restaurant_id) return res.status(400).json({ error: 'table_id or restaurant_id is required' });
+
+    // Bulk mode (restaurant_id, no table_id): the Tables grid needs to know
+    // which tables are occupied, not the full "what's on this tab" detail
+    // loadSessionDetails builds for a single table -- a lightweight row per
+    // open session is enough and avoids an orders+reservation join per table.
+    if (!table_id) {
+      const { rows } = await pool.query(
+        `SELECT id, table_id, status, opened_at FROM restaurant_table_session
+         WHERE restaurant_id = $1 AND property_id = $2 AND status = $3`,
+        [restaurant_id, req.property_id, status || 'open']
+      );
+      return res.json(rows);
+    }
 
     let query = `${SESSION_SELECT} WHERE rts.table_id = $1 AND rts.property_id = $2`;
     const params = [table_id, req.property_id];
@@ -221,9 +245,10 @@ async function closeSession(req, res, next) {
     const { stripe_payment_intent_id } = req.body ?? {};
 
     const { rows: sessions } = await pool.query(
-      `SELECT rts.*, p.stripe_secret_key
+      `SELECT rts.*, p.stripe_secret_key, rt.table_number
        FROM restaurant_table_session rts
        JOIN property p ON p.id = rts.property_id
+       JOIN restaurant_table rt ON rt.id = rts.table_id
        WHERE rts.id = $1 AND rts.property_id = $2`,
       [req.params.id, req.property_id]
     );
@@ -269,6 +294,7 @@ async function closeSession(req, res, next) {
        WHERE id = $1 AND property_id = $2 RETURNING *`,
       params
     );
+    announceClosed(rows[0], session.table_number);
     res.json(rows[0]);
   } catch (err) {
     if (err.type?.startsWith('Stripe')) {
