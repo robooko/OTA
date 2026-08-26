@@ -211,6 +211,7 @@ CREATE TABLE IF NOT EXISTS restaurant (
   payment_protection        VARCHAR(20)  NOT NULL DEFAULT 'none', -- 'none' | 'hold' | 'deposit'
   payment_protection_amount NUMERIC(10,2),
   website_id                UUID REFERENCES property_website(id), -- NULL = no guest website; table QR codes then carry only the table id
+  require_join_code         BOOLEAN      NOT NULL DEFAULT false, -- opt-in: newly opened table sessions get a 4-digit join code that api-key (guest-rail) callers must present
   created_at                TIMESTAMPTZ DEFAULT now(),
   CONSTRAINT restaurant_payment_protection_check CHECK (payment_protection IN ('none', 'hold', 'deposit'))
 );
@@ -241,8 +242,14 @@ CREATE TABLE IF NOT EXISTS restaurant_table_session (
   payment_status            VARCHAR(20) NOT NULL DEFAULT 'unpaid',
   paid_at                   TIMESTAMPTZ,
   stripe_payment_intent_id  VARCHAR(255),
+  -- Scan-to-order join code (see migrate-2026-08-26-table-session-join-code):
+  -- plaintext by design -- 4 digits gain nothing from hashing; protection is
+  -- the attempt lockout. NULL = uncoded session, no enforcement.
+  join_code                 VARCHAR(4),
+  join_code_attempts        INT NOT NULL DEFAULT 0,
   CONSTRAINT restaurant_table_session_status CHECK (status IN ('open', 'closed')),
-  CONSTRAINT restaurant_table_session_payment_status CHECK (payment_status IN ('unpaid', 'paid'))
+  CONSTRAINT restaurant_table_session_payment_status CHECK (payment_status IN ('unpaid', 'paid')),
+  CONSTRAINT restaurant_table_session_join_code_format CHECK (join_code ~ '^[0-9]{4}$')
 );
 
 CREATE INDEX IF NOT EXISTS idx_restaurant_table_session_table

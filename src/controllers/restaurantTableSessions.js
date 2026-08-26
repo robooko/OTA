@@ -1,5 +1,14 @@
 const pool = require('../db');
 const { publishTableSessionOpened, publishTableSessionClosed, client: ablyClient } = require('../lib/ably');
+const { generateJoinCode, sanitizeSession, verifyJoinCode } = require('../lib/joinCode');
+
+// join_code appears in exactly one api-key response: the 201 that genuinely
+// opened the session (the first device's issuing moment). Every other
+// api-key body is stripped; bearer (staff) keeps the code visible so a
+// waiter can read it to the table.
+function sessionBody(req, row) {
+  return req.auth_method === 'api_key' ? sanitizeSession(row) : row;
+}
 
 // Realtime close notification for the order-channel subscribers. Built from
 // the UPDATE's RETURNING row (bare session columns only) -- never from the
@@ -66,6 +75,11 @@ async function createSessionPaymentIntent(req, res, next) {
     );
     if (!propRows.length) return res.status(404).json({ error: 'Session not found' });
     const session = propRows[0];
+    // Gate before any Stripe interaction -- this is what stops a non-holder
+    // cancelling the waiter's in-flight card_present intent via the
+    // channel-switch path below.
+    const denied = await verifyJoinCode(session, req);
+    if (denied) return res.status(denied.status).json(denied.body);
     if (!session.stripe_secret_key) return res.status(409).json({ error: 'No Stripe secret key configured for this property' });
     if (session.status !== 'open') return res.status(409).json({ error: 'Session is not open' });
     if (session.payment_status === 'paid') return res.status(409).json({ error: 'Session already paid' });
@@ -164,7 +178,10 @@ async function openSession(req, res, next) {
     if (!table_id) return res.status(400).json({ error: 'table_id is required' });
 
     const { rows: tableRows } = await pool.query(
-      `SELECT id, restaurant_id, table_number FROM restaurant_table WHERE id = $1 AND property_id = $2`,
+      `SELECT rt.id, rt.restaurant_id, rt.table_number, r.require_join_code
+       FROM restaurant_table rt
+       JOIN restaurant r ON r.id = rt.restaurant_id
+       WHERE rt.id = $1 AND rt.property_id = $2`,
       [table_id, req.property_id]
     );
     if (!tableRows.length) return res.status(404).json({ error: 'Table not found' });
@@ -174,11 +191,11 @@ async function openSession(req, res, next) {
     // implicitly: reuse an existing open session for this table instead of
     // erroring, whether this is a repeat tap or an order already opened it.
     const { rows: inserted } = await pool.query(
-      `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id)
-       VALUES ($1, $2, $3)
+      `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id, join_code)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (table_id) WHERE status = 'open' DO NOTHING
        RETURNING *`,
-      [req.property_id, table.restaurant_id, table_id]
+      [req.property_id, table.restaurant_id, table_id, table.require_join_code ? generateJoinCode() : null]
     );
 
     let session = inserted[0];
@@ -191,6 +208,11 @@ async function openSession(req, res, next) {
         [table_id]
       );
       session = existing[0];
+      // The idempotent path is the JOIN operation: gate before building the
+      // response (or running the reservation lookup below) -- otherwise a
+      // repeat POST is a join-code bypass handing the tab to any URL holder.
+      const denied = await verifyJoinCode(session, req);
+      if (denied) return res.status(denied.status).json(denied.body);
     }
 
     // Warn, don't block -- a walk-in open here doesn't know about a
@@ -207,7 +229,14 @@ async function openSession(req, res, next) {
       ? `This table has a confirmed reservation today at ${reservationRows[0].start_time} for ${reservationRows[0].contact_name} (party of ${reservationRows[0].party_size}).`
       : null;
 
-    res.status(inserted.length ? 201 : 200).json({ ...session, table_number: table.table_number, reservation_warning });
+    // Genuine open (201) keeps join_code even for api-key -- the one-and-only
+    // guest issuing moment; the idempotent 200 is stripped for api-key. The
+    // attempts counter (and a null code on uncoded restaurants) never
+    // surfaces on the api-key rail at all.
+    const base = inserted.length
+      ? { ...sessionBody(req, session), ...(session.join_code ? { join_code: session.join_code } : {}) }
+      : sessionBody(req, session);
+    res.status(inserted.length ? 201 : 200).json({ ...base, table_number: table.table_number, reservation_warning });
   } catch (err) { next(err); }
 }
 
@@ -276,8 +305,10 @@ async function getOpenSession(req, res, next) {
 
     const { rows: sessions } = await pool.query(query, params);
     if (!sessions.length) return res.status(404).json({ error: 'Session not found' });
+    const denied = await verifyJoinCode(sessions[0], req);
+    if (denied) return res.status(denied.status).json(denied.body);
 
-    res.json(await loadSessionDetails(sessions[0]));
+    res.json(sessionBody(req, await loadSessionDetails(sessions[0])));
   } catch (err) { next(err); }
 }
 
@@ -288,8 +319,10 @@ async function getSession(req, res, next) {
       [req.params.id, req.property_id]
     );
     if (!sessions.length) return res.status(404).json({ error: 'Session not found' });
+    const denied = await verifyJoinCode(sessions[0], req);
+    if (denied) return res.status(denied.status).json(denied.body);
 
-    res.json(await loadSessionDetails(sessions[0]));
+    res.json(sessionBody(req, await loadSessionDetails(sessions[0])));
   } catch (err) { next(err); }
 }
 
@@ -307,6 +340,10 @@ async function closeSession(req, res, next) {
     );
     if (!sessions.length) return res.status(404).json({ error: 'Session not found' });
     const session = sessions[0];
+    // Gate before the active-orders check -- a non-holder mustn't learn
+    // anything about the tab, order counts included.
+    const denied = await verifyJoinCode(session, req);
+    if (denied) return res.status(denied.status).json(denied.body);
 
     const { rows: active } = await pool.query(
       `SELECT COUNT(*) FROM restaurant_order WHERE table_session_id = $1 AND status IN ('pending', 'confirmed', 'preparing')`,
@@ -348,7 +385,7 @@ async function closeSession(req, res, next) {
       params
     );
     announceClosed(rows[0], session.table_number);
-    res.json(rows[0]);
+    res.json(sessionBody(req, rows[0]));
   } catch (err) {
     if (err.type?.startsWith('Stripe')) {
       return res.status(502).json({ error: `Stripe error: ${err.message}` });
@@ -367,16 +404,49 @@ async function getSessionAblyToken(req, res, next) {
   try {
     if (!ablyClient) return res.status(503).json({ error: 'Realtime notifications are not configured' });
     const { rows } = await pool.query(
-      'SELECT id FROM restaurant_table_session WHERE id = $1 AND property_id = $2',
+      'SELECT id, join_code, join_code_attempts FROM restaurant_table_session WHERE id = $1 AND property_id = $2',
       [req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Session not found' });
+    const denied = await verifyJoinCode(rows[0], req);
+    if (denied) return res.status(denied.status).json(denied.body);
 
     const channel = `table-session:${rows[0].id}`;
     const tokenRequest = await ablyClient.auth.createTokenRequest({
       capability: { [channel]: ['subscribe'] },
     });
     res.json({ tokenRequest, channel });
+  } catch (err) { next(err); }
+}
+
+// Staff-only (bearer route): rotate a session's join code and clear the
+// attempt counter. One action covers both recoveries -- unlock after
+// lockout, and rotating away from a hijacked/leaked code -- and can also
+// ADD a code to a grandfathered open session at a restaurant that has since
+// flipped require_join_code on. The waiter reads the new code to the table.
+// Deliberately no Ably publish: nothing lifecycle-relevant changed, and the
+// code must never hit a channel.
+async function rotateJoinCode(req, res, next) {
+  try {
+    const { rows: sessions } = await pool.query(
+      `SELECT rts.id, rts.status, rts.join_code, r.require_join_code
+       FROM restaurant_table_session rts
+       JOIN restaurant r ON r.id = rts.restaurant_id
+       WHERE rts.id = $1 AND rts.property_id = $2`,
+      [req.params.id, req.property_id]
+    );
+    if (!sessions.length) return res.status(404).json({ error: 'Session not found' });
+    const session = sessions[0];
+    if (session.status !== 'open') return res.status(409).json({ error: 'Session is not open' });
+    if (!session.join_code && !session.require_join_code) {
+      return res.status(409).json({ error: 'Join codes are not enabled for this restaurant' });
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE restaurant_table_session SET join_code = $1, join_code_attempts = 0 WHERE id = $2 RETURNING id, join_code`,
+      [generateJoinCode(), session.id]
+    );
+    res.json(rows[0]);
   } catch (err) { next(err); }
 }
 
@@ -388,4 +458,5 @@ module.exports = {
   createConnectionToken,
   createSessionPaymentIntent,
   getSessionAblyToken,
+  rotateJoinCode,
 };

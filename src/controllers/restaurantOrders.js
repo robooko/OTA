@@ -8,6 +8,7 @@ const {
   publishTableSessionOpened,
   client: ablyClient,
 } = require('../lib/ably');
+const { generateJoinCode, verifyJoinCode } = require('../lib/joinCode');
 
 function isValidTranslations(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -133,6 +134,22 @@ async function renameMenuCategory(req, res, next) {
 async function listOrders(req, res, next) {
   try {
     const { restaurant_id, booking_id, table_id, guest_id, status, skip, take } = req.query;
+
+    // A table_id listing is the full tab (items, totals, notes) -- without
+    // this gate it would be a trivial read bypass of the join code. Wider
+    // listings (restaurant-wide etc.) are pre-existing integration surface
+    // and stay ungated.
+    if (table_id && req.auth_method === 'api_key') {
+      const { rows: openSessions } = await pool.query(
+        `SELECT id, join_code, join_code_attempts FROM restaurant_table_session WHERE table_id = $1 AND status = 'open'`,
+        [table_id]
+      );
+      if (openSessions.length) {
+        const denied = await verifyJoinCode(openSessions[0], req);
+        if (denied) return res.status(denied.status).json(denied.body);
+      }
+    }
+
     let query = `
       SELECT o.*, rm.room_number, rt.table_number,
              json_agg(json_build_object(
@@ -216,7 +233,7 @@ async function createOrder(req, res, next) {
       await client.query('BEGIN');
 
       const { rows: restaurants } = await client.query(
-        'SELECT id FROM restaurant WHERE id = $1 AND property_id = $2',
+        'SELECT id, require_join_code FROM restaurant WHERE id = $1 AND property_id = $2',
         [restaurant_id, req.property_id]
       );
       if (!restaurants.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Restaurant not found' }); }
@@ -287,20 +304,26 @@ async function createOrder(req, res, next) {
         // loser's insert instead of raising, and the re-SELECT picks up
         // whichever session actually won.
         const { rows: inserted } = await client.query(
-          `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id)
-           VALUES ($1, $2, $3)
+          `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id, join_code)
+           VALUES ($1, $2, $3, $4)
            ON CONFLICT (table_id) WHERE status = 'open' DO NOTHING
            RETURNING *`,
-          [req.property_id, restaurant_id, table_id]
+          [req.property_id, restaurant_id, table_id, restaurants[0].require_join_code ? generateJoinCode() : null]
         );
         if (inserted.length) {
           table_session_id = inserted[0].id;
           openedSession = inserted[0];
         } else {
           const { rows: existing } = await client.query(
-            `SELECT id FROM restaurant_table_session WHERE table_id = $1 AND status = 'open'`,
+            `SELECT id, status, join_code, join_code_attempts FROM restaurant_table_session WHERE table_id = $1 AND status = 'open'`,
             [table_id]
           );
+          // Attaching a round to an existing session is a JOIN: gate it.
+          // force:true bypasses only the reservation guard above, never the
+          // code. verifyJoinCode writes its attempt counter via the shared
+          // pool, so the penalty survives this transaction's rollback.
+          const denied = await verifyJoinCode(existing[0], req);
+          if (denied) { await client.query('ROLLBACK'); return res.status(denied.status).json(denied.body); }
           table_session_id = existing[0].id;
         }
       }
@@ -349,6 +372,10 @@ async function createOrder(req, res, next) {
         table_number = tables[0]?.table_number ?? null;
       }
       const created = { ...order[0], table_number, items: resolvedItems };
+      // Issuing moment when the first device's first action is an order
+      // rather than an explicit open: this response genuinely opened a coded
+      // session, so it carries the code -- the only order response that does.
+      if (openedSession?.join_code) created.join_code = openedSession.join_code;
       if (openedSession) {
         publishTableSessionOpened(restaurant_id, req.property_id, { ...openedSession, table_number })
           .catch((err) => console.error('Ably publish failed:', err.message));
@@ -371,6 +398,21 @@ async function updateOrderStatus(req, res, next) {
     const valid = ['pending', 'confirmed', 'preparing', 'delivered', 'cancelled'];
     if (!valid.includes(status)) {
       return res.status(400).json({ error: `status must be one of: ${valid.join(', ')}` });
+    }
+    // A status change on an order in a coded OPEN session is a tab mutation
+    // (a cancel changes what close charges) -- gate it. Closed-session
+    // history stays ungated so admin fixes don't need codes.
+    const { rows: orderRows } = await pool.query(
+      `SELECT o.id, s.id AS session_id, s.status AS session_status, s.join_code, s.join_code_attempts
+       FROM restaurant_order o
+       LEFT JOIN restaurant_table_session s ON s.id = o.table_session_id
+       WHERE o.id = $1 AND o.property_id = $2`,
+      [req.params.id, req.property_id]
+    );
+    if (!orderRows.length) return res.status(404).json({ error: 'Order not found' });
+    if (orderRows[0].session_status === 'open') {
+      const denied = await verifyJoinCode({ id: orderRows[0].session_id, join_code: orderRows[0].join_code, join_code_attempts: orderRows[0].join_code_attempts }, req);
+      if (denied) return res.status(denied.status).json(denied.body);
     }
     const { rows } = await pool.query(
       `UPDATE restaurant_order SET status = $1 WHERE id = $2 AND property_id = $3 RETURNING *`,

@@ -50,6 +50,7 @@ async function authenticate(req, res, next) {
 
     req.property_id = propertyId;
     req.user = { id: claims.sub, role: mapClerkRole(claims.o.rol) };
+    req.auth_method = 'bearer'; // staff rail -- bypasses session join codes
     next();
   } catch (err) {
     next(err);
@@ -71,6 +72,7 @@ async function authenticateOrApiKey(req, res, next) {
     const { rows } = await pool.query('SELECT id FROM property WHERE api_key = $1 AND api_key_enabled = true', [key]);
     if (!rows.length) return res.status(401).json({ error: 'Missing or invalid Authorization header or X-Api-Key' });
     req.property_id = rows[0].id;
+    req.auth_method = 'api_key'; // untrusted guest-proxy rail -- join codes enforced
     next();
   } catch (err) {
     next(err);

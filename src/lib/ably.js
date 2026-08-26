@@ -62,26 +62,35 @@ async function publishOrderStatusChangedForBooking(bookingId, payload) {
 // payment_status/paid_at so payment UIs learn the tab settled without
 // polling. Payloads are the bare session row + table_number -- never the
 // property join, which would leak stripe_secret_key to subscribers.
+// join_code is stripped HERE, in the publishers, so no present or future
+// call site can leak the session secret onto a channel.
+function stripJoinCode(session) {
+  const { join_code, join_code_attempts, ...safe } = session;
+  return safe;
+}
+
 async function publishTableSessionOpened(restaurantId, propertyId, session) {
   if (!client) return;
+  const safe = stripJoinCode(session);
   await Promise.all([
-    client.channels.get(`restaurant:${restaurantId}:orders`).publish('table-session-opened', session),
-    client.channels.get(`property:${propertyId}:orders`).publish('table-session-opened', session),
+    client.channels.get(`restaurant:${restaurantId}:orders`).publish('table-session-opened', safe),
+    client.channels.get(`property:${propertyId}:orders`).publish('table-session-opened', safe),
   ]);
 }
 
 async function publishTableSessionClosed(restaurantId, propertyId, session) {
   if (!client) return;
+  const safe = stripJoinCode(session);
   await Promise.all([
-    client.channels.get(`restaurant:${restaurantId}:orders`).publish('table-session-closed', session),
-    client.channels.get(`property:${propertyId}:orders`).publish('table-session-closed', session),
+    client.channels.get(`restaurant:${restaurantId}:orders`).publish('table-session-closed', safe),
+    client.channels.get(`property:${propertyId}:orders`).publish('table-session-closed', safe),
     // Session-scoped mirror for guest-facing pages (table-pay): the orders
     // channels above are staff surface -- restaurant-wide and mintable only
     // with an org-scoped Clerk session -- so a guest device subscribes to
     // just its own tab via GET /restaurant-table-sessions/:id/ably-token
     // (same pattern as room-service:{bookingId}). No opened mirror: a
     // subscriber to this channel already has the session.
-    client.channels.get(`table-session:${session.id}`).publish('table-session-closed', session),
+    client.channels.get(`table-session:${session.id}`).publish('table-session-closed', safe),
   ]);
 }
 

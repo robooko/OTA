@@ -1,6 +1,7 @@
 const pool = require('../db');
 const { isValidDate, isValidTime, isValidCurrencyCode, isValidTimezone } = require('../middleware/validate');
 const { publishNewReservation, publishReservationStatusChanged, publishTableSessionOpened } = require('../lib/ably');
+const { generateJoinCode } = require('../lib/joinCode');
 
 function addMinutesToTime(timeStr, minutesToAdd) {
   const [h, m] = timeStr.split(':').map(Number);
@@ -54,7 +55,7 @@ async function getRestaurant(req, res, next) {
 
 async function createRestaurant(req, res, next) {
   try {
-    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone, payment_protection, payment_protection_amount } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone, payment_protection, payment_protection_amount, require_join_code } = req.body;
     if (!name || !default_duration_minutes) {
       return res.status(400).json({ error: 'name and default_duration_minutes are required' });
     }
@@ -73,10 +74,13 @@ async function createRestaurant(req, res, next) {
     if (payment_protection_amount != null && (typeof payment_protection_amount !== 'number' || payment_protection_amount < 0)) {
       return res.status(400).json({ error: 'payment_protection_amount must be a non-negative number' });
     }
+    if (require_join_code !== undefined && typeof require_join_code !== 'boolean') {
+      return res.status(400).json({ error: 'require_join_code must be a boolean' });
+    }
     const { rows } = await pool.query(
-      `INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone, payment_protection, payment_protection_amount)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? [], currency ?? null, timezone ?? null, payment_protection ?? 'none', payment_protection_amount ?? null]
+      `INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone, payment_protection, payment_protection_amount, require_join_code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? [], currency ?? null, timezone ?? null, payment_protection ?? 'none', payment_protection_amount ?? null, require_join_code ?? false]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -84,7 +88,10 @@ async function createRestaurant(req, res, next) {
 
 async function updateRestaurant(req, res, next) {
   try {
-    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan, payment_protection, payment_protection_amount, website_id } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan, payment_protection, payment_protection_amount, website_id, require_join_code } = req.body;
+    if (require_join_code !== undefined && typeof require_join_code !== 'boolean') {
+      return res.status(400).json({ error: 'require_join_code must be a boolean' });
+    }
     // null clears it (restaurant no longer tied to a website); a non-null
     // value must be one of this property's own websites.
     if (website_id !== undefined && website_id !== null) {
@@ -129,13 +136,15 @@ async function updateRestaurant(req, res, next) {
          floor_plan                 = COALESCE($10::jsonb, floor_plan),
          payment_protection         = COALESCE($11, payment_protection),
          payment_protection_amount  = CASE WHEN $12::boolean THEN $13::numeric ELSE payment_protection_amount END,
-         website_id                 = CASE WHEN $14::boolean THEN $15::uuid ELSE website_id END
-       WHERE id = $16 AND property_id = $17 RETURNING *`,
+         website_id                 = CASE WHEN $14::boolean THEN $15::uuid ELSE website_id END,
+         require_join_code          = COALESCE($16, require_join_code)
+       WHERE id = $17 AND property_id = $18 RETURNING *`,
       [
         name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan ?? null,
         payment_protection,
         payment_protection_amount !== undefined, payment_protection_amount ?? null,
         website_id !== undefined, website_id ?? null,
+        require_join_code ?? null,
         req.params.id, req.property_id,
       ]
     );
@@ -683,7 +692,10 @@ async function seatReservation(req, res, next) {
     // seating just targets whichever table_id the waitress picks.
     const table_id = overrideTableId || reservation.table_id;
     const { rows: tables } = await client.query(
-      `SELECT id, table_number FROM restaurant_table WHERE id = $1 AND restaurant_id = $2 AND status = 'active'`,
+      `SELECT rt.id, rt.table_number, r.require_join_code
+       FROM restaurant_table rt
+       JOIN restaurant r ON r.id = rt.restaurant_id
+       WHERE rt.id = $1 AND rt.restaurant_id = $2 AND rt.status = 'active'`,
       [table_id, restaurant_id]
     );
     if (!tables.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Table not found' }); }
@@ -706,12 +718,16 @@ async function seatReservation(req, res, next) {
     } else if (openSessions.length) {
       session_id = openSessions[0].id; // idempotent -- already seated here
     } else {
+      // Reservation-seated sessions get codes too: the table QR is just as
+      // scannable by bystanders during a reserved party's meal. The known
+      // identity changes who RECEIVES the code (the waiter, via this bearer
+      // response), not whether one exists.
       const { rows: inserted } = await client.query(
-        `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id, reservation_id)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO restaurant_table_session (property_id, restaurant_id, table_id, reservation_id, join_code)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (table_id) WHERE status = 'open' DO NOTHING
          RETURNING *`,
-        [req.property_id, restaurant_id, table_id, reservation.id]
+        [req.property_id, restaurant_id, table_id, reservation.id, tables[0].require_join_code ? generateJoinCode() : null]
       );
       if (!inserted.length) {
         // Lost a race against a concurrent open (createOrder or another
@@ -751,7 +767,14 @@ async function seatReservation(req, res, next) {
         .catch((err) => console.error('Ably publish failed:', err.message));
     }
 
-    res.json({ reservation: updatedReservation[0], session_id, table_id });
+    res.json({
+      reservation: updatedReservation[0],
+      session_id,
+      table_id,
+      // Only when this seat call genuinely created a coded session; the
+      // idempotent re-seat returns none (staff can GET the session).
+      ...(openedSession?.join_code ? { join_code: openedSession.join_code } : {}),
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
