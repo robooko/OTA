@@ -104,11 +104,13 @@ async function updateRestaurant(req, res, next) {
     if (closed_days !== undefined && !isValidClosedDays(closed_days)) {
       return res.status(400).json({ error: 'closed_days must contain integers between 1 and 7' });
     }
-    if (currency !== undefined && !isValidCurrencyCode(currency)) {
-      return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP)' });
+    // null clears it back to inheriting the property's currency.
+    if (currency !== undefined && currency !== null && !isValidCurrencyCode(currency)) {
+      return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP), or null to inherit the property\'s' });
     }
-    if (timezone !== undefined && !isValidTimezone(timezone)) {
-      return res.status(400).json({ error: 'timezone must be a valid IANA timezone name (e.g. Europe/London)' });
+    // null clears it back to inheriting the property's timezone.
+    if (timezone !== undefined && timezone !== null && !isValidTimezone(timezone)) {
+      return res.status(400).json({ error: 'timezone must be a valid IANA timezone name (e.g. Europe/London), or null to inherit the property\'s' });
     }
     if (floor_plan !== undefined && !isValidMetadata(floor_plan)) {
       return res.status(400).json({ error: 'floor_plan must be a JSON object' });
@@ -131,8 +133,8 @@ async function updateRestaurant(req, res, next) {
          default_duration_minutes   = COALESCE($5, default_duration_minutes),
          closed_days                = COALESCE($6, closed_days),
          status                     = COALESCE($7, status),
-         currency                   = COALESCE($8, currency),
-         timezone                   = COALESCE($9, timezone),
+         currency                   = CASE WHEN $19::boolean THEN $8::varchar ELSE currency END,
+         timezone                   = CASE WHEN $20::boolean THEN $9::varchar ELSE timezone END,
          floor_plan                 = COALESCE($10::jsonb, floor_plan),
          payment_protection         = COALESCE($11, payment_protection),
          payment_protection_amount  = CASE WHEN $12::boolean THEN $13::numeric ELSE payment_protection_amount END,
@@ -146,6 +148,8 @@ async function updateRestaurant(req, res, next) {
         website_id !== undefined, website_id ?? null,
         require_join_code ?? null,
         req.params.id, req.property_id,
+        currency !== undefined,
+        timezone !== undefined,
       ]
     );
     if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
