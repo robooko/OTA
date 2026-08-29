@@ -21,7 +21,15 @@ CREATE TABLE IF NOT EXISTS property (
   vercel_pat           TEXT, -- Personal Access Token, optionally set per-property so Web Analytics works
   stripe_secret_key    TEXT, -- optionally set per-property so reservation deposits/holds can be created under the property's own Stripe account
   stripe_terminal_location_id VARCHAR(255), -- lazily created on first Tap to Pay connection-token request
-  created_at       TIMESTAMPTZ  DEFAULT now()
+  -- AI-drafted event-inquiry replies -- see migrate-2026-08-29-event-inquiry-ai-replies.sql.
+  -- 'off' = no automation, 'draft' = every AI reply needs individual approval,
+  -- 'auto' = send unreviewed when score >= ai_reply_auto_send_min_score and not requires_human.
+  ai_reply_mode                VARCHAR(10) NOT NULL DEFAULT 'off',
+  ai_reply_instructions        TEXT, -- venue knowledge/tone/limits; the ONLY facts the model may state
+  ai_reply_auto_send_min_score INT NOT NULL DEFAULT 80,
+  created_at       TIMESTAMPTZ  DEFAULT now(),
+  CONSTRAINT property_ai_reply_mode_check CHECK (ai_reply_mode IN ('off', 'draft', 'auto')),
+  CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100)
 );
 
 CREATE TABLE IF NOT EXISTS property_website (
@@ -648,6 +656,7 @@ CREATE TABLE IF NOT EXISTS event_inquiry (
   email         VARCHAR(255) NOT NULL,
   phone         VARCHAR(30),
   event_date    DATE         NOT NULL,
+  event_time    TIME, -- see migrate-2026-08-18-event-inquiry-time.sql
   guests        INT,
   event_type    VARCHAR(50),
   format        VARCHAR(50),
@@ -665,8 +674,67 @@ CREATE TABLE IF NOT EXISTS event_inquiry_message (
   direction         VARCHAR(10) NOT NULL CHECK (direction IN ('outbound', 'inbound')),
   body              TEXT NOT NULL,
   resend_email_id   TEXT,
+  -- Staff attribution on outbound rows, captured at send time -- see
+  -- migrate-2026-08-18-event-inquiry-message-sender.sql. NULL on inbound rows
+  -- and on outbound rows sent before that migration.
+  sent_by_user_id    VARCHAR(255),
+  sent_by_name       VARCHAR(255),
+  sent_by_avatar_url TEXT,
   created_at        TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_event_inquiry_message_inquiry ON event_inquiry_message(event_inquiry_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_event_inquiry_message_resend_id
   ON event_inquiry_message(resend_email_id) WHERE resend_email_id IS NOT NULL;
+
+-- ── Event Inquiry AI Drafts ─────────────────────────────────────────────────
+-- One row per Claude generation attempt for an inquiry (new inquiry, inbound
+-- guest reply, or manual staff request) -- see
+-- migrate-2026-08-29-event-inquiry-ai-replies.sql. Lifecycle:
+--   pending -> sending -> sent      (approved by staff, or auto-sent)
+--   pending -> rejected | superseded (a newer draft or a human reply replaced it)
+--   failed                           (generation error; stored so the queue shows it)
+-- 'sending' is claimed atomically before Resend is called so the same draft
+-- can never email the guest twice.
+
+CREATE TABLE IF NOT EXISTS event_inquiry_ai_draft (
+  id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id             UUID NOT NULL REFERENCES property(id),
+  event_inquiry_id        UUID NOT NULL REFERENCES event_inquiry(id),
+  trigger_type            VARCHAR(20) NOT NULL, -- 'trigger' alone is a Postgres keyword
+  trigger_message_id      UUID REFERENCES event_inquiry_message(id), -- the inbound message that prompted it, if any
+  body                    TEXT NOT NULL, -- '' on failed rows
+  quality_score           INT NOT NULL, -- model's self-assessed 0-100; forced <= 40 when requires_human
+  requires_human          BOOLEAN NOT NULL,
+  requires_human_reason   TEXT,
+  summary                 TEXT,
+  status                  VARCHAR(20) NOT NULL DEFAULT 'pending',
+  auto_sent               BOOLEAN NOT NULL DEFAULT false,
+  sent_message_id         UUID REFERENCES event_inquiry_message(id),
+  sent_body               TEXT, -- only set when the approver edited the text before sending
+  reviewed_by_user_id     VARCHAR(255),
+  reviewed_by_name        VARCHAR(255),
+  reviewed_at             TIMESTAMPTZ,
+  reject_reason           TEXT,
+  model                   VARCHAR(50),
+  input_tokens            INT,
+  output_tokens           INT,
+  cache_read_input_tokens INT,
+  error                   TEXT,
+  created_at              TIMESTAMPTZ DEFAULT now(),
+  CONSTRAINT event_inquiry_ai_draft_trigger_type_check
+    CHECK (trigger_type IN ('new_inquiry', 'inbound_reply', 'manual')),
+  CONSTRAINT event_inquiry_ai_draft_status_check
+    CHECK (status IN ('pending', 'sending', 'sent', 'rejected', 'superseded', 'failed')),
+  CONSTRAINT event_inquiry_ai_draft_quality_score_check
+    CHECK (quality_score BETWEEN 0 AND 100)
+);
+CREATE INDEX IF NOT EXISTS idx_event_inquiry_ai_draft_inquiry ON event_inquiry_ai_draft(event_inquiry_id);
+CREATE INDEX IF NOT EXISTS idx_event_inquiry_ai_draft_property_pending
+  ON event_inquiry_ai_draft(property_id) WHERE status = 'pending';
+
+-- Added via ALTER, not baked into event_inquiry_message's CREATE TABLE above,
+-- since the draft table references event_inquiry_message and didn't exist yet
+-- at that point (same shape as restaurant_table_session.reservation_id).
+-- Nullable -- human-written replies have no draft.
+ALTER TABLE event_inquiry_message
+  ADD COLUMN IF NOT EXISTS ai_draft_id UUID REFERENCES event_inquiry_ai_draft(id);
