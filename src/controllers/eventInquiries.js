@@ -2,10 +2,13 @@ const { createClerkClient } = require('@clerk/backend');
 const EmailReplyParser = require('email-reply-parser').default;
 const pool = require('../db');
 const { isValidDate, isValidUuid, isValidTime } = require('../middleware/validate');
-const { publishNewInquiry, publishNewReply, publishInquiryUpdated } = require('../lib/ably');
+const { publishNewInquiry, publishNewReply, publishInquiryUpdated, publishAiDraftUpdated } = require('../lib/ably');
 const { verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
 const { loadInquiryWithProperty, sendOutboundReply } = require('../lib/inquiryReplies');
-const { runAiReply, supersedePendingDrafts } = require('../lib/aiReplyPipeline');
+const { isConfigured: aiConfigured } = require('../lib/aiReplies');
+const { runAiReply, supersedePendingDrafts, generateDraft, sendDraft, DraftNotPendingError } = require('../lib/aiReplyPipeline');
+
+const AI_DRAFT_STATUSES = ['pending', 'sending', 'sent', 'rejected', 'superseded', 'failed'];
 
 const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
@@ -18,9 +21,12 @@ async function listInquiries(req, res, next) {
     // captured at send time (see migrate-2026-08-18-event-inquiry-message-sender.sql);
     // they're null on outbound rows sent before that migration, since there's
     // no way to know who actually sent those.
+    // pending_ai_draft_id lets the feed badge rows with an AI draft awaiting
+    // approval without a second request; null when nothing is waiting.
     const { rows } = await pool.query(
       `SELECT ei.*, r.name AS restaurant_name, lrm.direction AS last_reply_direction,
-              lrm.sent_by_name AS last_reply_by_name, lrm.sent_by_avatar_url AS last_reply_avatar_url
+              lrm.sent_by_name AS last_reply_by_name, lrm.sent_by_avatar_url AS last_reply_avatar_url,
+              pad.id AS pending_ai_draft_id
        FROM event_inquiry ei
        LEFT JOIN restaurant r ON r.id = ei.restaurant_id
        LEFT JOIN LATERAL (
@@ -28,6 +34,11 @@ async function listInquiries(req, res, next) {
          WHERE m.event_inquiry_id = ei.id
          ORDER BY m.created_at DESC LIMIT 1
        ) lrm ON true
+       LEFT JOIN LATERAL (
+         SELECT id FROM event_inquiry_ai_draft d
+         WHERE d.event_inquiry_id = ei.id AND d.status = 'pending'
+         ORDER BY d.created_at DESC LIMIT 1
+       ) pad ON true
        WHERE ei.property_id = $1 ORDER BY ei.created_at DESC`,
       [req.property_id]
     );
@@ -246,4 +257,137 @@ async function handleResendInboundWebhook(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listInquiries, createInquiry, updateInquiry, listReplies, createReply, handleResendInboundWebhook };
+// ── AI drafts ───────────────────────────────────────────────────────────────
+
+// Approval queue across the property. Defaults to pending (what staff act
+// on); ?status= any other lifecycle state for history/debugging.
+async function listAiDrafts(req, res, next) {
+  try {
+    const status = req.query.status ?? 'pending';
+    if (!AI_DRAFT_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `status must be one of ${AI_DRAFT_STATUSES.join(', ')}` });
+    }
+    const { rows } = await pool.query(
+      `SELECT d.*, ei.name AS inquiry_name, ei.email AS inquiry_email, ei.event_date AS inquiry_event_date,
+              ei.status AS inquiry_status
+       FROM event_inquiry_ai_draft d
+       JOIN event_inquiry ei ON ei.id = d.event_inquiry_id
+       WHERE d.property_id = $1 AND d.status = $2
+       ORDER BY d.created_at DESC`,
+      [req.property_id, status]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+}
+
+async function listInquiryAiDrafts(req, res, next) {
+  try {
+    const { rows: inquiryRows } = await pool.query(
+      'SELECT id FROM event_inquiry WHERE id = $1 AND property_id = $2',
+      [req.params.id, req.property_id]
+    );
+    if (!inquiryRows.length) return res.status(404).json({ error: 'Inquiry not found' });
+
+    const { rows } = await pool.query(
+      'SELECT * FROM event_inquiry_ai_draft WHERE event_inquiry_id = $1 ORDER BY created_at DESC',
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+}
+
+// On-demand draft. Synchronous (tens of seconds) since the caller is waiting
+// to read it. Never sends, whatever the property's mode -- a staff member
+// asking for a draft is not automation -- and works even when the mode is
+// 'off', which only governs the automatic triggers. Still 201 when the row
+// comes back 'failed': the row is the answer ("needs a human, here's why").
+async function generateAiDraft(req, res, next) {
+  try {
+    if (!aiConfigured()) return res.status(503).json({ error: 'AI replies are not configured on this server' });
+
+    const inquiry = await loadInquiryWithProperty(req.params.id, req.property_id);
+    if (!inquiry) return res.status(404).json({ error: 'Inquiry not found' });
+
+    const draft = await generateDraft({ inquiry, triggerType: 'manual' });
+    res.status(201).json(draft);
+  } catch (err) { next(err); }
+}
+
+async function loadScopedDraft(draftId, inquiryId, propertyId) {
+  const { rows } = await pool.query(
+    'SELECT * FROM event_inquiry_ai_draft WHERE id = $1 AND event_inquiry_id = $2 AND property_id = $3',
+    [draftId, inquiryId, propertyId]
+  );
+  return rows[0] ?? null;
+}
+
+// Sends a pending draft, optionally with an edited body. 409 if the draft
+// has already moved on (sent, rejected, superseded) -- including the case
+// where two staff approve at once and this request lost the claim.
+async function approveAiDraft(req, res, next) {
+  try {
+    if (!isValidUuid(req.params.draftId)) return res.status(400).json({ error: 'Invalid draft id' });
+    const { body } = req.body ?? {};
+    if (body !== undefined && (typeof body !== 'string' || !body.trim())) {
+      return res.status(400).json({ error: 'body, if provided, must be a non-empty string' });
+    }
+
+    const inquiry = await loadInquiryWithProperty(req.params.id, req.property_id);
+    if (!inquiry) return res.status(404).json({ error: 'Inquiry not found' });
+    const draft = await loadScopedDraft(req.params.draftId, inquiry.id, req.property_id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    if (draft.status !== 'pending') return res.status(409).json({ error: 'Draft is not pending' });
+
+    const sender = await resolveSender(req);
+    let result;
+    try {
+      result = await sendDraft({ draft, inquiry, body: body?.trim() ?? draft.body, sender, auto: false });
+    } catch (err) {
+      if (err instanceof DraftNotPendingError) return res.status(409).json({ error: 'Draft is not pending' });
+      throw err;
+    }
+    res.json(result);
+  } catch (err) { next(err); }
+}
+
+async function rejectAiDraft(req, res, next) {
+  try {
+    if (!isValidUuid(req.params.draftId)) return res.status(400).json({ error: 'Invalid draft id' });
+    const { reason } = req.body ?? {};
+    if (reason !== undefined && reason !== null && typeof reason !== 'string') {
+      return res.status(400).json({ error: 'reason must be a string' });
+    }
+
+    const { rows: inquiryRows } = await pool.query(
+      'SELECT id FROM event_inquiry WHERE id = $1 AND property_id = $2',
+      [req.params.id, req.property_id]
+    );
+    if (!inquiryRows.length) return res.status(404).json({ error: 'Inquiry not found' });
+
+    const sender = await resolveSender(req);
+    const { rows } = await pool.query(
+      `UPDATE event_inquiry_ai_draft SET
+         status = 'rejected', reject_reason = $1,
+         reviewed_by_user_id = $2, reviewed_by_name = $3, reviewed_at = now()
+       WHERE id = $4 AND event_inquiry_id = $5 AND property_id = $6 AND status = 'pending'
+       RETURNING *`,
+      [reason?.trim() || null, sender?.user_id ?? null, sender?.name ?? null, req.params.draftId, req.params.id, req.property_id]
+    );
+    if (!rows.length) {
+      // Distinguish "no such draft" from "exists but already handled".
+      const existing = await loadScopedDraft(req.params.draftId, req.params.id, req.property_id);
+      if (!existing) return res.status(404).json({ error: 'Draft not found' });
+      return res.status(409).json({ error: 'Draft is not pending' });
+    }
+
+    publishAiDraftUpdated(req.property_id, { inquiry_id: req.params.id, draft: rows[0] })
+      .catch((err) => console.error('Ably publish failed:', err.message));
+
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
+module.exports = {
+  listInquiries, createInquiry, updateInquiry, listReplies, createReply, handleResendInboundWebhook,
+  listAiDrafts, listInquiryAiDrafts, generateAiDraft, approveAiDraft, rejectAiDraft,
+};

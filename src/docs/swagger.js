@@ -29,6 +29,7 @@ const swaggerSpec = {
     { name: 'Room Service' },
     { name: 'Pro Shop' },
     { name: 'Event Inquiries' },
+    { name: 'AI Replies' },
   ],
   components: {
     securitySchemes: {
@@ -505,6 +506,30 @@ const swaggerSpec = {
     '/api/event-inquiries/{id}/replies': {
       get: { tags: ['Event Inquiries'], summary: 'List an inquiry\'s reply thread', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of messages, oldest first' }, 404: { description: 'Not found' } } },
       post: { tags: ['Event Inquiries'], summary: 'Send a reply email to the guest', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['body'], properties: { body: { type: 'string' } } } } } }, responses: { 201: { description: 'Sent' }, 400: { description: 'Missing body' }, 404: { description: 'Not found' } } },
+    },
+
+    // ── AI Replies ──────────────────────────────────────────────────────────
+    // Claude-drafted replies on event inquiries. Drafts are generated
+    // automatically on new inquiries and inbound guest replies when the
+    // property's ai_reply_mode is 'draft' or 'auto' (see /api/property/ai-replies),
+    // or on demand via POST /{id}/ai-drafts. Lifecycle: pending -> sending -> sent;
+    // pending -> rejected | superseded; failed (generation error, needs a human).
+    '/api/event-inquiries/ai-drafts': {
+      get: { tags: ['AI Replies'], summary: 'List AI drafts across the property (approval queue)', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'status', in: 'query', schema: { type: 'string', enum: ['pending', 'sending', 'sent', 'rejected', 'superseded', 'failed'], default: 'pending' } }], responses: { 200: { description: 'Array of drafts, newest first, each with inquiry_name, inquiry_email, inquiry_event_date and inquiry_status joined in. A draft carries the model\'s quality_score (0-100), requires_human + requires_human_reason, summary, model and token usage; failed rows have an empty body and an error.' }, 400: { description: 'Unknown status' } } },
+    },
+    '/api/event-inquiries/{id}/ai-drafts': {
+      get: { tags: ['AI Replies'], summary: 'List AI drafts for one inquiry', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of drafts, newest first' }, 404: { description: 'Not found' } } },
+      post: { tags: ['AI Replies'], summary: 'Generate an AI draft now (does not send)', description: 'Synchronous -- typically 10-40 seconds. Works regardless of ai_reply_mode (the mode only governs automatic triggers) and never auto-sends. Any pending draft on the inquiry is marked superseded. Returns 201 even when generation fails: the row then has status \'failed\', requires_human true and the error text.', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 201: { description: 'Draft row (status pending or failed)' }, 404: { description: 'Not found' }, 503: { description: 'ANTHROPIC_API_KEY is not configured on this server' } } },
+    },
+    '/api/event-inquiries/{id}/ai-drafts/{draftId}/approve': {
+      post: { tags: ['AI Replies'], summary: 'Approve a pending draft and email it to the guest', description: 'Optionally pass an edited body; when it differs from the draft, the draft\'s sent_body records what actually went out. Sends through the same path as POST /{id}/replies (status flips new -> contacted, new-reply is published, the message row carries ai_draft_id). 409 if the draft is no longer pending -- including when two staff approve at once and this request lost.', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'draftId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: false, content: { 'application/json': { schema: { type: 'object', properties: { body: { type: 'string', description: 'Edited reply text; defaults to the draft body' } } } } } }, responses: { 200: { description: '{ draft, message, inquiry }' }, 400: { description: 'Empty body or invalid draft id' }, 404: { description: 'Inquiry or draft not found' }, 409: { description: 'Draft is not pending' } } },
+    },
+    '/api/event-inquiries/{id}/ai-drafts/{draftId}/reject': {
+      post: { tags: ['AI Replies'], summary: 'Reject a pending draft', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'draftId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: false, content: { 'application/json': { schema: { type: 'object', properties: { reason: { type: 'string' } } } } } }, responses: { 200: { description: 'Rejected draft row' }, 404: { description: 'Inquiry or draft not found' }, 409: { description: 'Draft is not pending' } } },
+    },
+    '/api/property/ai-replies': {
+      get: { tags: ['AI Replies'], summary: 'Get this property\'s AI reply settings', responses: { 200: { description: '{ configured, model, mode, instructions, auto_send_min_score }. configured is false when the server has no ANTHROPIC_API_KEY.' } } },
+      put: { tags: ['AI Replies'], summary: 'Update AI reply settings (admin only)', description: "mode: 'off' (no automation), 'draft' (every AI reply waits for individual approval), 'auto' (send without review when the model did not flag requires_human and its quality_score >= auto_send_min_score; capped at 3 unreviewed sends per inquiry). instructions is the venue knowledge the model may state facts from -- capacities, packages, pricing, policies, tone; null clears it.", requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { mode: { type: 'string', enum: ['off', 'draft', 'auto'] }, instructions: { type: 'string', nullable: true, maxLength: 8000 }, auto_send_min_score: { type: 'integer', minimum: 0, maximum: 100 } } } } } }, responses: { 200: { description: 'Updated settings, same shape as GET' }, 400: { description: 'Invalid mode, score or instructions' }, 403: { description: 'Admin role required' } } },
     },
 
     // ── Golf ─────────────────────────────────────────────────────────────────

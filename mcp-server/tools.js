@@ -459,6 +459,36 @@ function createTools(apiRequest) {
     run: ({ id, body }) => apiRequest('POST', `/api/event-inquiries/${id}/replies`, { body: { body } }),
   },
   {
+    name: 'list_ai_drafts',
+    description: 'List AI-drafted event inquiry replies across the property (approval queue). Defaults to pending; each draft carries a 0-100 quality_score, requires_human + reason, and a summary',
+    inputSchema: { status: z.enum(['pending', 'sending', 'sent', 'rejected', 'superseded', 'failed']).optional() },
+    run: ({ status }) => apiRequest('GET', `/api/event-inquiries/ai-drafts${status ? `?status=${status}` : ''}`),
+  },
+  {
+    name: 'list_inquiry_ai_drafts',
+    description: 'List AI drafts for one event inquiry, newest first',
+    inputSchema: { id: z.string() },
+    run: ({ id }) => apiRequest('GET', `/api/event-inquiries/${id}/ai-drafts`),
+  },
+  {
+    name: 'generate_ai_draft',
+    description: 'Ask Claude to draft the next reply on an event inquiry now (does not send; supersedes any pending draft; can take up to ~40 seconds)',
+    inputSchema: { id: z.string() },
+    run: ({ id }) => apiRequest('POST', `/api/event-inquiries/${id}/ai-drafts`),
+  },
+  {
+    name: 'approve_ai_draft',
+    description: 'Approve a pending AI draft and email it to the guest, optionally with an edited body (moves status to "contacted" if it was "new")',
+    inputSchema: { id: z.string(), draft_id: z.string(), body: z.string().optional() },
+    run: ({ id, draft_id, body }) => apiRequest('POST', `/api/event-inquiries/${id}/ai-drafts/${draft_id}/approve`, { body: body ? { body } : {} }),
+  },
+  {
+    name: 'reject_ai_draft',
+    description: 'Reject a pending AI draft so it is never sent',
+    inputSchema: { id: z.string(), draft_id: z.string(), reason: z.string().optional() },
+    run: ({ id, draft_id, reason }) => apiRequest('POST', `/api/event-inquiries/${id}/ai-drafts/${draft_id}/reject`, { body: reason ? { reason } : {} }),
+  },
+  {
     name: 'list_spas',
     description: 'List spas for this property',
     inputSchema: {},
