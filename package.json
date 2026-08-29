@@ -8,6 +8,7 @@
     "dev": "nodemon src/server.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.122.0",
     "@clerk/backend": "^3.16.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ably": "^2.27.0",
