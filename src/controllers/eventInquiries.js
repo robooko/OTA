@@ -5,6 +5,7 @@ const { isValidDate, isValidUuid, isValidTime } = require('../middleware/validat
 const { publishNewInquiry, publishNewReply, publishInquiryUpdated } = require('../lib/ably');
 const { verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
 const { loadInquiryWithProperty, sendOutboundReply } = require('../lib/inquiryReplies');
+const { runAiReply, supersedePendingDrafts } = require('../lib/aiReplyPipeline');
 
 const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
@@ -61,6 +62,12 @@ async function createInquiry(req, res, next) {
     );
 
     publishNewInquiry(req.property_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
+    // Fire-and-forget like the Ably publish: drafting takes tens of seconds
+    // and the inquiry is already safely stored, so the caller (usually the
+    // property's public website) gets its 201 immediately. The pipeline
+    // no-ops unless the property has opted in (ai_reply_mode != 'off').
+    runAiReply({ inquiryId: rows[0].id, triggerType: 'new_inquiry' })
+      .catch((err) => console.error('AI reply pipeline failed:', err.message));
 
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -134,6 +141,11 @@ async function createReply(req, res, next) {
 
     const sender = await resolveSender(req);
     const { message, inquiry: updatedInquiry } = await sendOutboundReply({ inquiry, body, sender });
+
+    // A human just replied, so any AI draft still waiting for approval is
+    // answering a moment that has passed -- retire it rather than leave a
+    // stale draft in the queue.
+    supersedePendingDrafts(inquiry.id).catch((err) => console.error('Failed to supersede AI drafts:', err.message));
 
     res.status(201).json({ message, inquiry: updatedInquiry });
   } catch (err) { next(err); }
@@ -222,6 +234,13 @@ async function handleResendInboundWebhook(req, res, next) {
 
     publishNewReply(inquiry.property_id, { inquiry_id: inquiry.id, name: inquiry.name, message: rows[0] })
       .catch((err) => console.error('Ably publish failed:', err.message));
+    // Fire-and-forget: Resend retries deliveries that don't get a prompt
+    // 200, and a retry would re-enter this handler -- the 23505 guard above
+    // dedupes the row, but the model call must never sit on the webhook's
+    // clock. Drafts trigger on the guest's reply; the pipeline decides
+    // whether to auto-send or queue for approval.
+    runAiReply({ inquiryId: inquiry.id, triggerType: 'inbound_reply', triggerMessageId: rows[0].id })
+      .catch((err) => console.error('AI reply pipeline failed:', err.message));
 
     res.status(200).end();
   } catch (err) { next(err); }

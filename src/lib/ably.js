@@ -127,6 +127,23 @@ async function publishInquiryUpdated(propertyId, inquiry) {
   await channel.publish('inquiry-updated', inquiry);
 }
 
+// AI-drafted replies share the inquiries channel -- same audience (staff
+// watching this property's inquiries). 'ai-draft-ready' fires when a new
+// draft lands (pending, or failed = needs a human); 'ai-draft-updated' on
+// every later transition (sent, rejected, superseded). Payload carries the
+// full draft row; nothing in it is secret.
+async function publishAiDraftReady(propertyId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:inquiries`);
+  await channel.publish('ai-draft-ready', payload);
+}
+
+async function publishAiDraftUpdated(propertyId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:inquiries`);
+  await channel.publish('ai-draft-updated', payload);
+}
+
 async function publishNewBooking(propertyId, booking) {
   if (!client) return;
   const channel = client.channels.get(`property:${propertyId}:bookings`);
@@ -215,6 +232,8 @@ module.exports = {
   publishReservationStatusChanged,
   publishNewReply,
   publishInquiryUpdated,
+  publishAiDraftReady,
+  publishAiDraftUpdated,
   publishNewBooking,
   publishBookingStatusChanged,
   publishNewAppointment,
