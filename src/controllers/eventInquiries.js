@@ -3,7 +3,8 @@ const EmailReplyParser = require('email-reply-parser').default;
 const pool = require('../db');
 const { isValidDate, isValidUuid, isValidTime } = require('../middleware/validate');
 const { publishNewInquiry, publishNewReply, publishInquiryUpdated } = require('../lib/ably');
-const { sendReply, verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
+const { verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
+const { loadInquiryWithProperty, sendOutboundReply } = require('../lib/inquiryReplies');
 
 const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
@@ -128,65 +129,35 @@ async function createReply(req, res, next) {
     const { body } = req.body;
     if (!body) return res.status(400).json({ error: 'body is required' });
 
-    const { rows: inquiryRows } = await pool.query(
-      `SELECT ei.*, p.name AS property_name FROM event_inquiry ei
-       JOIN property p ON p.id = ei.property_id
-       WHERE ei.id = $1 AND ei.property_id = $2`,
-      [req.params.id, req.property_id]
-    );
-    if (!inquiryRows.length) return res.status(404).json({ error: 'Inquiry not found' });
-    const inquiry = inquiryRows[0];
+    const inquiry = await loadInquiryWithProperty(req.params.id, req.property_id);
+    if (!inquiry) return res.status(404).json({ error: 'Inquiry not found' });
 
-    const { rows: priorMessages } = await pool.query(
-      'SELECT direction, body, sent_by_name, created_at FROM event_inquiry_message WHERE event_inquiry_id = $1 ORDER BY created_at ASC',
-      [inquiry.id]
-    );
+    const sender = await resolveSender(req);
+    const { message, inquiry: updatedInquiry } = await sendOutboundReply({ inquiry, body, sender });
 
-    const emailId = await sendReply(inquiry, inquiry.property_name, body, priorMessages);
-
-    // Best-effort: the email has already gone out at this point, so a Clerk
-    // hiccup here shouldn't fail the whole reply and leave the sent email
-    // with no saved message row -- it just means this row won't carry a
-    // sender (same as replies sent before sender attribution existed).
-    // req.user is only set for Clerk-authenticated staff -- an API-key/MCP
-    // caller has no Clerk identity to look up, so the reply is stored
-    // unattributed rather than attempted against a missing user id.
-    let senderName = null;
-    let senderAvatarUrl = null;
-    if (req.user) {
-      try {
-        const sender = await clerkClient.users.getUser(req.user.id);
-        senderName = [sender.firstName, sender.lastName].filter(Boolean).join(' ') || sender.username || 'Staff';
-        senderAvatarUrl = sender.imageUrl;
-      } catch (err) {
-        console.error('Failed to look up sender for reply attribution:', err.message);
-      }
-    }
-
-    const { rows } = await pool.query(
-      `INSERT INTO event_inquiry_message (event_inquiry_id, direction, body, resend_email_id, sent_by_user_id, sent_by_name, sent_by_avatar_url)
-       VALUES ($1, 'outbound', $2, $3, $4, $5, $6) RETURNING *`,
-      [inquiry.id, body, emailId, req.user?.id ?? null, senderName, senderAvatarUrl]
-    );
-
-    let updatedInquiry = inquiry;
-    if (inquiry.status === 'new') {
-      const { rows: statusRows } = await pool.query(
-        `UPDATE event_inquiry SET status = 'contacted' WHERE id = $1 RETURNING *`,
-        [inquiry.id]
-      );
-      updatedInquiry = statusRows[0];
-      publishInquiryUpdated(req.property_id, updatedInquiry).catch((err) => console.error('Ably publish failed:', err.message));
-    }
-
-    // Same payload shape as the inbound-webhook publish below, so feed
-    // clients handle staff and guest replies identically -- the message row
-    // carries direction and sender attribution for the item's avatar.
-    publishNewReply(req.property_id, { inquiry_id: inquiry.id, name: inquiry.name, message: rows[0] })
-      .catch((err) => console.error('Ably publish failed:', err.message));
-
-    res.status(201).json({ message: rows[0], inquiry: updatedInquiry });
+    res.status(201).json({ message, inquiry: updatedInquiry });
   } catch (err) { next(err); }
+}
+
+// Who is sending, for message attribution. req.user is only set for
+// Clerk-authenticated staff -- an API-key/MCP caller has no Clerk identity to
+// look up, so their replies are stored unattributed rather than attempted
+// against a missing user id. Best-effort: a Clerk hiccup shouldn't block a
+// reply, it just means this row won't carry a sender (same as replies sent
+// before sender attribution existed).
+async function resolveSender(req) {
+  if (!req.user) return null;
+  try {
+    const user = await clerkClient.users.getUser(req.user.id);
+    return {
+      user_id: req.user.id,
+      name: [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || 'Staff',
+      avatar_url: user.imageUrl,
+    };
+  } catch (err) {
+    console.error('Failed to look up sender for reply attribution:', err.message);
+    return { user_id: req.user.id, name: null, avatar_url: null };
+  }
 }
 
 function stripHtml(html) {
