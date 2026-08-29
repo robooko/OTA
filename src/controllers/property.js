@@ -1,6 +1,13 @@
 const crypto = require('crypto');
 const pool = require('../db');
 const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate } = require('../middleware/validate');
+const { isConfigured: aiConfigured, MODEL: AI_MODEL } = require('../lib/aiReplies');
+
+const AI_REPLY_MODES = ['off', 'draft', 'auto'];
+// ~2k tokens. Keeps the cached per-property prompt prefix small and bounds
+// the per-draft cost; a venue brief longer than this belongs in a document,
+// not a settings field.
+const AI_INSTRUCTIONS_MAX_LENGTH = 8000;
 
 const VERCEL_API_BASE = 'https://api.vercel.com';
 const VERCEL_INSTALL_URL = 'https://vercel.com/integrations/forge-build/new';
@@ -406,10 +413,71 @@ async function clearStripeKey(req, res, next) {
   }
 }
 
+// AI-drafted event-inquiry replies. Readable by any staff member (the
+// dashboard needs the mode to render draft badges), writable by admins only,
+// same split as /stripe/status vs /stripe/key. `configured` reports whether
+// the server has an Anthropic key at all -- a property can't turn the
+// feature on if the deployment doesn't have one.
+function aiReplySettingsResponse(row) {
+  return {
+    configured: aiConfigured(),
+    model: AI_MODEL,
+    mode: row.ai_reply_mode,
+    instructions: row.ai_reply_instructions,
+    auto_send_min_score: row.ai_reply_auto_send_min_score,
+  };
+}
+
+async function getAiReplySettings(req, res, next) {
+  try {
+    const { rows } = await pool.query(
+      'SELECT ai_reply_mode, ai_reply_instructions, ai_reply_auto_send_min_score FROM property WHERE id = $1',
+      [req.property_id]
+    );
+    res.json(aiReplySettingsResponse(rows[0]));
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateAiReplySettings(req, res, next) {
+  try {
+    const { mode, instructions, auto_send_min_score } = req.body ?? {};
+    if (mode !== undefined && !AI_REPLY_MODES.includes(mode)) {
+      return res.status(400).json({ error: `mode must be one of ${AI_REPLY_MODES.join(', ')}` });
+    }
+    if (auto_send_min_score !== undefined && (!Number.isInteger(auto_send_min_score) || auto_send_min_score < 0 || auto_send_min_score > 100)) {
+      return res.status(400).json({ error: 'auto_send_min_score must be an integer from 0 to 100' });
+    }
+    if (instructions !== undefined && instructions !== null) {
+      if (typeof instructions !== 'string') return res.status(400).json({ error: 'instructions must be a string or null' });
+      if (instructions.length > AI_INSTRUCTIONS_MAX_LENGTH) {
+        return res.status(400).json({ error: `instructions must be at most ${AI_INSTRUCTIONS_MAX_LENGTH} characters` });
+      }
+    }
+    // mode/score: omit = unchanged (COALESCE). instructions: omit = unchanged,
+    // null = clear -- the CASE-on-provided pattern restaurant currency uses,
+    // since COALESCE can't tell "clear it" from "leave it".
+    const { rows } = await pool.query(
+      `UPDATE property SET
+         ai_reply_mode                = COALESCE($1, ai_reply_mode),
+         ai_reply_auto_send_min_score = COALESCE($2, ai_reply_auto_send_min_score),
+         ai_reply_instructions        = CASE WHEN $3::boolean THEN $4::text ELSE ai_reply_instructions END
+       WHERE id = $5
+       RETURNING ai_reply_mode, ai_reply_instructions, ai_reply_auto_send_min_score`,
+      [mode ?? null, auto_send_min_score ?? null, instructions !== undefined, instructions?.trim() || null, req.property_id]
+    );
+    res.json(aiReplySettingsResponse(rows[0]));
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,
   setVercelPat, clearVercelPat,
   getStripeStatus, setStripeKey, clearStripeKey,
+  getAiReplySettings, updateAiReplySettings,
 };

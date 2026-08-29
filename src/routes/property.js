@@ -23,6 +23,9 @@ router.get('/stripe/status', authenticate, ctrl.getStripeStatus);
 router.put('/stripe/key', authenticate, requireRole('admin'), ctrl.setStripeKey);
 router.post('/stripe/key/clear', authenticate, requireRole('admin'), ctrl.clearStripeKey);
 
+router.get('/ai-replies', authenticate, ctrl.getAiReplySettings);
+router.put('/ai-replies', authenticate, requireRole('admin'), ctrl.updateAiReplySettings);
+
 router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
 router.post('/websites', authenticate, ctrl.createWebsite);
 router.put('/websites/:id', authenticate, ctrl.updateWebsite);
