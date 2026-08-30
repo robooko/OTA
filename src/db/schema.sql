@@ -655,7 +655,7 @@ CREATE TABLE IF NOT EXISTS event_inquiry (
   name          VARCHAR(100) NOT NULL,
   email         VARCHAR(255) NOT NULL,
   phone         VARCHAR(30),
-  event_date    DATE         NOT NULL,
+  event_date    DATE, -- nullable since migrate-2026-08-30-event-inquiry-optional-date.sql: general enquiries need no date
   event_time    TIME, -- see migrate-2026-08-18-event-inquiry-time.sql
   guests        INT,
   event_type    VARCHAR(50),

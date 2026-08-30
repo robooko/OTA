@@ -416,12 +416,12 @@ function createTools(apiRequest) {
   },
   {
     name: 'create_event_inquiry',
-    description: 'Create an event inquiry',
+    description: 'Create an event or general inquiry (event_date is optional)',
     inputSchema: {
       name: z.string(),
       email: z.string(),
       phone: z.string().optional(),
-      event_date: z.string().describe('YYYY-MM-DD'),
+      event_date: z.string().optional().describe('YYYY-MM-DD; omit for a general enquiry with no date'),
       guests: z.number().int().optional(),
       event_type: z.string().optional(),
       format: z.string().optional(),

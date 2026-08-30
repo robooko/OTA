@@ -58,10 +58,12 @@ async function validateRestaurantId(restaurant_id, property_id) {
 async function createInquiry(req, res, next) {
   try {
     const { name, email, phone, event_date, guests, event_type, format, message, restaurant_id } = req.body;
-    if (!name || !email || !event_date) {
-      return res.status(400).json({ error: 'name, email, and event_date are required' });
+    if (!name || !email) {
+      return res.status(400).json({ error: 'name and email are required' });
     }
-    if (!isValidDate(event_date)) return res.status(400).json({ error: 'Invalid date format' });
+    // event_date is optional -- a general enquiry ("do you do X?") has no
+    // date. When given it must still be a real date.
+    if (event_date != null && !isValidDate(event_date)) return res.status(400).json({ error: 'Invalid date format' });
     if (!(await validateRestaurantId(restaurant_id, req.property_id))) {
       return res.status(400).json({ error: 'restaurant_id must belong to this property' });
     }
@@ -69,7 +71,7 @@ async function createInquiry(req, res, next) {
     const { rows } = await pool.query(
       `INSERT INTO event_inquiry (property_id, restaurant_id, name, email, phone, event_date, guests, event_type, format, message)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [req.property_id, restaurant_id || null, name, email, phone || null, event_date, guests || null, event_type || null, format || null, message || null]
+      [req.property_id, restaurant_id || null, name, email, phone || null, event_date ?? null, guests || null, event_type || null, format || null, message || null]
     );
 
     publishNewInquiry(req.property_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
@@ -90,7 +92,7 @@ async function updateInquiry(req, res, next) {
     if (restaurant_id !== undefined && !(await validateRestaurantId(restaurant_id, req.property_id))) {
       return res.status(400).json({ error: 'restaurant_id must belong to this property' });
     }
-    if (event_date !== undefined && !isValidDate(event_date)) {
+    if (event_date !== undefined && event_date !== null && !isValidDate(event_date)) {
       return res.status(400).json({ error: 'Invalid event_date format' });
     }
     if (event_time !== undefined && event_time !== null && !isValidTime(event_time)) {
