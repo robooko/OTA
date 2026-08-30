@@ -186,6 +186,22 @@ async function publishSpaBookingStatusChangedForProperty(propertyId, payload) {
   await channel.publish('booking-status-changed', payload);
 }
 
+// Same booking shape/event names as the property-wide pair above, but onto
+// the existing spa:{id}:appointments channel (already granted by
+// getSpaAblyToken) -- for a single spa's own dashboard feed, which shouldn't
+// show every other spa's bookings.
+async function publishNewSpaBookingForSpa(spaId, booking) {
+  if (!client) return;
+  const channel = client.channels.get(`spa:${spaId}:appointments`);
+  await channel.publish('new-booking', booking);
+}
+
+async function publishSpaBookingStatusChangedForSpa(spaId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`spa:${spaId}:appointments`);
+  await channel.publish('booking-status-changed', payload);
+}
+
 // For @forgebuild/hotal-ui's <live-golf-bookings-feed> -- golf has no prior
 // per-course Ably channel to mirror (unlike spa's spa:{id}:appointments), so
 // this is the only publish path for golf bookings.
@@ -240,6 +256,8 @@ module.exports = {
   publishAppointmentStatusChanged,
   publishNewSpaBookingForProperty,
   publishSpaBookingStatusChangedForProperty,
+  publishNewSpaBookingForSpa,
+  publishSpaBookingStatusChangedForSpa,
   publishNewGolfBookingForProperty,
   publishGolfBookingStatusChangedForProperty,
   publishProshopItemAdded,

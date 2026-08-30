@@ -5,6 +5,8 @@ const {
   publishAppointmentStatusChanged,
   publishNewSpaBookingForProperty,
   publishSpaBookingStatusChangedForProperty,
+  publishNewSpaBookingForSpa,
+  publishSpaBookingStatusChangedForSpa,
   client: ablyClient,
 } = require('../lib/ably');
 const { sendAppointmentConfirmation, sendAppointmentCancellation } = require('../lib/resend');
@@ -640,6 +642,8 @@ async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawI
 
   publishNewSpaBookingForProperty(propertyId, toLiveSpaBooking(full))
     .catch((err) => console.error('Ably publish failed:', err.message));
+  publishNewSpaBookingForSpa(spaId, toLiveSpaBooking(full))
+    .catch((err) => console.error('Ably publish failed:', err.message));
 
   if (full.contact_email) {
     sendAppointmentConfirmation(full, full.property_name)
@@ -650,7 +654,7 @@ async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawI
 
 async function listAppointmentsForProperty(req, res, next) {
   try {
-    const { cursor, limit } = req.query;
+    const { cursor, limit, spa_id } = req.query;
     const take = Math.min(parseInt(limit, 10) || 30, 100);
     let query = `
       SELECT sa.*, st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
@@ -660,6 +664,9 @@ async function listAppointmentsForProperty(req, res, next) {
       WHERE sa.property_id = $1
     `;
     const params = [req.property_id];
+    // Optional -- the spa dashboard's own feed scopes to one spa; the
+    // property dashboard omits this to show bookings across every spa.
+    if (spa_id) { params.push(spa_id); query += ` AND st.spa_id = $${params.length}`; }
     if (cursor) { params.push(cursor); query += ` AND sa.created_at < $${params.length}`; }
     params.push(take);
     query += ` ORDER BY sa.created_at DESC LIMIT $${params.length}`;
@@ -964,6 +971,8 @@ async function updateAppointment(req, res, next) {
       });
       if (full) {
         publishSpaBookingStatusChangedForProperty(req.property_id, toLiveSpaBooking(full))
+          .catch((err) => console.error('Ably publish failed:', err.message));
+        publishSpaBookingStatusChangedForSpa(spa_id, toLiveSpaBooking(full))
           .catch((err) => console.error('Ably publish failed:', err.message));
 
         if (rows[0].status === 'cancelled' && full.contact_email) {
