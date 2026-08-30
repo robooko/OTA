@@ -425,7 +425,11 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
   status                        VARCHAR(20)  DEFAULT 'confirmed',
   notes                         TEXT,
   confirmation_resend_email_id  TEXT,
-  created_at                    TIMESTAMPTZ  DEFAULT now()
+  payment_status                VARCHAR(20)  NOT NULL DEFAULT 'unpaid',
+  paid_at                       TIMESTAMPTZ,
+  stripe_payment_intent_id      VARCHAR(255),
+  created_at                    TIMESTAMPTZ  DEFAULT now(),
+  CONSTRAINT spa_appointment_payment_status CHECK (payment_status IN ('unpaid', 'paid'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_spa_treatment_spa       ON spa_treatment(spa_id);
