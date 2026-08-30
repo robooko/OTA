@@ -334,13 +334,16 @@ CREATE INDEX IF NOT EXISTS idx_service_period_restaurant         ON service_peri
 -- ── Spa ───────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS spa (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  property_id UUID         NOT NULL REFERENCES property(id),
-  name        VARCHAR(100) NOT NULL,
-  description TEXT,
-  phone       VARCHAR(30),
-  status      VARCHAR(20)  DEFAULT 'active',
-  created_at  TIMESTAMPTZ DEFAULT now()
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id           UUID         NOT NULL REFERENCES property(id),
+  name                  VARCHAR(100) NOT NULL,
+  description           TEXT,
+  phone                 VARCHAR(30),
+  status                VARCHAR(20)  DEFAULT 'active',
+  slot_interval_minutes INT          NOT NULL DEFAULT 15, -- step between computed availability candidates; see spa_therapist_hours
+  contact_email         VARCHAR(255), -- reply-to on booking confirmation/cancellation emails
+  address               TEXT,         -- shown in booking confirmation/cancellation emails
+  created_at            TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS spa_treatment (
@@ -362,6 +365,34 @@ CREATE TABLE IF NOT EXISTS spa_therapist (
   status      VARCHAR(20)  DEFAULT 'active'
 );
 
+-- Per-therapist weekly working hours, mirrors service_period. Multiple rows
+-- per (therapist_id, day_of_week) express a lunch break/split shift. No row
+-- for a day means the therapist doesn't work that day -- there is no
+-- closed_days array on spa itself since closure is per-barber, not per-shop.
+CREATE TABLE IF NOT EXISTS spa_therapist_hours (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id  UUID NOT NULL REFERENCES property(id),
+  therapist_id UUID NOT NULL REFERENCES spa_therapist(id),
+  day_of_week  SMALLINT NOT NULL CHECK (day_of_week BETWEEN 1 AND 7), -- ISO: 1 = Mon
+  start_time   TIME NOT NULL,
+  end_time     TIME NOT NULL,
+  CHECK (start_time < end_time)
+);
+
+-- Whole-day time off per therapist, mirrors restaurant_seasonal_closure but
+-- dated rather than annually recurring. Partial-day blocks aren't a
+-- supported case -- edit hours for that week, or book a placeholder
+-- appointment.
+CREATE TABLE IF NOT EXISTS spa_therapist_time_off (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id  UUID NOT NULL REFERENCES property(id),
+  therapist_id UUID NOT NULL REFERENCES spa_therapist(id),
+  start_date   DATE NOT NULL,
+  end_date     DATE NOT NULL,
+  reason       VARCHAR(100),
+  CHECK (start_date <= end_date)
+);
+
 CREATE TABLE IF NOT EXISTS spa_slot (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id  UUID         NOT NULL REFERENCES property(id),
@@ -373,18 +404,28 @@ CREATE TABLE IF NOT EXISTS spa_slot (
   UNIQUE (therapist_id, slot_date, slot_time)
 );
 
+-- slot_id is nullable and now just an optional back-pointer to the legacy
+-- slot-based flow (Pirates Bight) -- every appointment, slot-based or
+-- computed, always has the five columns below set directly, so reads never
+-- need to join through spa_slot.
 CREATE TABLE IF NOT EXISTS spa_appointment (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  property_id   UUID         NOT NULL REFERENCES property(id),
-  slot_id       UUID         NOT NULL REFERENCES spa_slot(id),
-  guest_id      UUID         REFERENCES guest(id),
-  clerk_user_id VARCHAR(100),
-  contact_name  VARCHAR(100) NOT NULL,
-  contact_email VARCHAR(255),
-  contact_phone VARCHAR(30),
-  status        VARCHAR(20)  DEFAULT 'confirmed',
-  notes         TEXT,
-  created_at    TIMESTAMPTZ  DEFAULT now()
+  id                            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id                   UUID         NOT NULL REFERENCES property(id),
+  slot_id                       UUID         REFERENCES spa_slot(id),
+  treatment_id                  UUID         NOT NULL REFERENCES spa_treatment(id),
+  therapist_id                  UUID         NOT NULL REFERENCES spa_therapist(id),
+  appointment_date              DATE         NOT NULL,
+  start_time                    TIME         NOT NULL,
+  end_time                      TIME         NOT NULL,
+  guest_id                      UUID         REFERENCES guest(id),
+  clerk_user_id                 VARCHAR(100),
+  contact_name                  VARCHAR(100) NOT NULL,
+  contact_email                 VARCHAR(255),
+  contact_phone                 VARCHAR(30),
+  status                        VARCHAR(20)  DEFAULT 'confirmed',
+  notes                         TEXT,
+  confirmation_resend_email_id  TEXT,
+  created_at                    TIMESTAMPTZ  DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_spa_treatment_spa       ON spa_treatment(spa_id);
@@ -393,6 +434,10 @@ CREATE INDEX IF NOT EXISTS idx_spa_slot_therapist_date ON spa_slot(therapist_id,
 CREATE INDEX IF NOT EXISTS idx_spa_slot_treatment      ON spa_slot(treatment_id);
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_slot    ON spa_appointment(slot_id);
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_clerk_user ON spa_appointment(clerk_user_id);
+CREATE INDEX IF NOT EXISTS idx_spa_appointment_therapist_date ON spa_appointment(therapist_id, appointment_date);
+CREATE INDEX IF NOT EXISTS idx_spa_therapist_hours_property   ON spa_therapist_hours(property_id);
+CREATE INDEX IF NOT EXISTS idx_spa_therapist_hours_therapist  ON spa_therapist_hours(therapist_id, day_of_week);
+CREATE INDEX IF NOT EXISTS idx_spa_therapist_time_off_therapist ON spa_therapist_time_off(therapist_id, start_date, end_date);
 CREATE INDEX IF NOT EXISTS idx_spa_property             ON spa(property_id);
 CREATE INDEX IF NOT EXISTS idx_spa_treatment_property    ON spa_treatment(property_id);
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_property    ON spa_therapist(property_id);

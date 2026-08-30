@@ -21,6 +21,16 @@ router.get('/:spa_id/therapists', authenticateOrApiKey, ctrl.listTherapists);
 router.post('/:spa_id/therapists', authenticateOrApiKey, ctrl.createTherapist);
 router.put('/:spa_id/therapists/:id', authenticateOrApiKey, ctrl.updateTherapist);
 
+// Therapist hours & time off
+router.get('/:spa_id/therapists/:id/hours', authenticateOrApiKey, ctrl.listTherapistHours);
+router.put('/:spa_id/therapists/:id/hours', authenticateOrApiKey, ctrl.setTherapistHours);
+router.get('/:spa_id/therapists/:id/time-off', authenticateOrApiKey, ctrl.listTherapistTimeOff);
+router.post('/:spa_id/therapists/:id/time-off', authenticateOrApiKey, ctrl.createTherapistTimeOff);
+router.delete('/:spa_id/therapists/:id/time-off/:offId', authenticateOrApiKey, ctrl.deleteTherapistTimeOff);
+
+// Computed availability
+router.get('/:spa_id/availability', authenticateOrApiKey, ctrl.searchSpaAvailability);
+
 // Slots
 router.get('/:spa_id/slots', authenticateOrApiKey, ctrl.listSlots);
 router.post('/:spa_id/slots/bulk', authenticateOrApiKey, ctrl.bulkCreateSlots);

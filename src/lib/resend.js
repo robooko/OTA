@@ -89,6 +89,77 @@ async function sendReply(inquiry, propertyName, body, priorMessages = []) {
   return data.id;
 }
 
+function formatMoney(amount, currency) {
+  try {
+    return new Intl.NumberFormat('en-GB', { style: 'currency', currency: currency || 'GBP' }).format(amount);
+  } catch {
+    return `${amount}`;
+  }
+}
+
+// appointment.appointment_date comes back from pg as a JS Date (DATE column);
+// start_time as a 'HH:MM:SS' string (TIME column) -- normalise both into
+// display strings without going through a timezone-aware Date parse, since
+// neither column carries a timezone (same reasoning as toLiveSpaBooking's
+// start_time in src/controllers/spa.js).
+function formatAppointmentDate(appointmentDate) {
+  const iso = appointmentDate instanceof Date ? appointmentDate.toISOString().slice(0, 10) : appointmentDate;
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+}
+
+// Shared by sendAppointmentConfirmation/sendAppointmentCancellation. `verb`
+// is 'confirmed' or 'cancelled'; `extraLines` go after the booking details,
+// before the address/phone block.
+async function sendAppointmentEmail(appointment, propertyName, verb, extraLines) {
+  if (!client) throw new Error('Resend not configured');
+  const dateLabel = formatAppointmentDate(appointment.appointment_date);
+  const timeLabel = appointment.start_time.slice(0, 5);
+  const price = formatMoney(appointment.price, appointment.property_currency);
+  const subject = `Booking ${verb} — ${appointment.treatment_name}, ${dateLabel} at ${timeLabel}`;
+
+  const lines = [
+    `Hi ${appointment.contact_name},`,
+    '',
+    `${appointment.treatment_name} with ${appointment.therapist_name}`,
+    `${dateLabel} at ${timeLabel} (${appointment.duration_mins} mins) — ${price}`,
+    '',
+    ...extraLines,
+  ];
+  if (appointment.spa_address) lines.push(appointment.spa_address);
+  if (appointment.spa_phone) lines.push(appointment.spa_phone);
+  const text = lines.join('\n');
+
+  const { data, error } = await client.emails.send({
+    from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
+    to: appointment.contact_email,
+    ...(appointment.spa_contact_email ? { replyTo: appointment.spa_contact_email } : {}),
+    subject,
+    text,
+    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;">${textToHtmlParagraphs(text)}</div>`,
+  });
+  if (error) throw new Error(error.message);
+  return data.id;
+}
+
+// `appointment` is the joined shape from spa.js's getFullAppointmentForEmail:
+// sa.* plus therapist_name, treatment_name, duration_mins, price, spa_address,
+// spa_phone, spa_contact_email, property_currency. Never throws for a missing
+// contact_email -- callers only invoke this when one is present.
+function sendAppointmentConfirmation(appointment, propertyName) {
+  return sendAppointmentEmail(appointment, propertyName, 'confirmed', [
+    'Need to change or cancel? Just give us a call.',
+    '',
+  ]);
+}
+
+function sendAppointmentCancellation(appointment, propertyName) {
+  return sendAppointmentEmail(appointment, propertyName, 'cancelled', [
+    'This booking has been cancelled. Get in touch if that was a mistake, or to book another time.',
+    '',
+  ]);
+}
+
 function verifyInboundWebhook(payload, headers) {
   if (!client) throw new Error('Resend not configured');
   return client.webhooks.verify({
@@ -108,4 +179,10 @@ async function getReceivedEmail(emailId) {
   return data;
 }
 
-module.exports = { sendReply, verifyInboundWebhook, getReceivedEmail };
+module.exports = {
+  sendReply,
+  sendAppointmentConfirmation,
+  sendAppointmentCancellation,
+  verifyInboundWebhook,
+  getReceivedEmail,
+};

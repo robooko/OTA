@@ -1,11 +1,12 @@
 const pool = require('../db');
-const { isValidDate } = require('../middleware/validate');
+const { isValidDate, isValidTime } = require('../middleware/validate');
 const {
   publishNewAppointment,
   publishAppointmentStatusChanged,
   publishNewSpaBookingForProperty,
   publishSpaBookingStatusChangedForProperty,
 } = require('../lib/ably');
+const { sendAppointmentConfirmation, sendAppointmentCancellation } = require('../lib/resend');
 
 // Steps a 'YYYY-MM-DD' string forward by whole days via UTC epoch math --
 // `new Date(str); d.setDate(d.getDate() + 1)` looks equivalent but
@@ -15,6 +16,17 @@ const {
 function addDaysUTC(dateStr, days) {
   const [y, m, d] = dateStr.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d) + days * 86400000).toISOString().slice(0, 10);
+}
+
+// Same helper as restaurant.js's addMinutesToTime -- not shared between the
+// two controllers, matching this file's existing preference for local
+// self-contained helpers over a cross-controller util module.
+function addMinutesToTime(timeStr, minutesToAdd) {
+  const [h, m] = timeStr.split(':').map(Number);
+  const total = h * 60 + m + minutesToAdd;
+  const hh = Math.floor(total / 60) % 24;
+  const mm = total % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 
 // ── Spas ──────────────────────────────────────────────────────────────────────
@@ -39,11 +51,12 @@ async function getSpa(req, res, next) {
 
 async function createSpa(req, res, next) {
   try {
-    const { name, description, phone } = req.body;
+    const { name, description, phone, slot_interval_minutes, contact_email, address } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
     const { rows } = await pool.query(
-      `INSERT INTO spa (property_id, name, description, phone) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [req.property_id, name, description ?? null, phone ?? null]
+      `INSERT INTO spa (property_id, name, description, phone, slot_interval_minutes, contact_email, address)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, contact_email ?? null, address ?? null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -51,15 +64,18 @@ async function createSpa(req, res, next) {
 
 async function updateSpa(req, res, next) {
   try {
-    const { name, description, phone, status } = req.body;
+    const { name, description, phone, status, slot_interval_minutes, contact_email, address } = req.body;
     const { rows } = await pool.query(
       `UPDATE spa SET
-         name        = COALESCE($1, name),
-         description = COALESCE($2, description),
-         phone       = COALESCE($3, phone),
-         status      = COALESCE($4, status)
-       WHERE id = $5 AND property_id = $6 RETURNING *`,
-      [name, description, phone, status, req.params.id, req.property_id]
+         name                  = COALESCE($1, name),
+         description           = COALESCE($2, description),
+         phone                 = COALESCE($3, phone),
+         status                = COALESCE($4, status),
+         slot_interval_minutes = COALESCE($5, slot_interval_minutes),
+         contact_email         = COALESCE($6, contact_email),
+         address               = COALESCE($7, address)
+       WHERE id = $8 AND property_id = $9 RETURNING *`,
+      [name, description, phone, status, slot_interval_minutes, contact_email, address, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Spa not found' });
     res.json(rows[0]);
@@ -160,7 +176,272 @@ async function updateTherapist(req, res, next) {
   } catch (err) { next(err); }
 }
 
-// ── Slots ─────────────────────────────────────────────────────────────────────
+// ── Therapist hours ──────────────────────────────────────────────────────────
+// Weekly working hours per therapist, mirrors restaurant's service_period /
+// setServicePeriods. Drives computed availability below; a therapist with no
+// rows here has none (a slot-driven spa like Pirates Bight is fine to leave
+// entirely without hours -- searchAvailability just returns nothing for it).
+
+async function listTherapistHours(req, res, next) {
+  try {
+    const { spa_id, id } = req.params;
+    const therapistRes = await pool.query(
+      'SELECT id FROM spa_therapist WHERE id = $1 AND spa_id = $2 AND property_id = $3',
+      [id, spa_id, req.property_id]
+    );
+    if (!therapistRes.rows.length) return res.status(404).json({ error: 'Therapist not found' });
+
+    const { rows } = await pool.query(
+      'SELECT id, day_of_week, start_time, end_time FROM spa_therapist_hours WHERE therapist_id = $1 ORDER BY day_of_week, start_time',
+      [id]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+}
+
+function hoursOverlap(a, b) {
+  return a.start_time < b.end_time && b.start_time < a.end_time;
+}
+
+async function setTherapistHours(req, res, next) {
+  const { spa_id, id } = req.params;
+  const { hours } = req.body;
+
+  if (!Array.isArray(hours)) {
+    return res.status(400).json({ error: 'hours must be an array' });
+  }
+  for (const h of hours) {
+    if (!Number.isInteger(h.day_of_week) || h.day_of_week < 1 || h.day_of_week > 7) {
+      return res.status(400).json({ error: 'Each entry requires day_of_week between 1 (Mon) and 7 (Sun)' });
+    }
+    if (!h.start_time || !h.end_time || !isValidTime(h.start_time) || !isValidTime(h.end_time)) {
+      return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
+    }
+    if (h.start_time >= h.end_time) {
+      return res.status(400).json({ error: "Each entry's start_time must be before its end_time" });
+    }
+  }
+  // Overlapping windows on the same day would double-count candidate times
+  // in searchSpaAvailability below.
+  for (const day of new Set(hours.map((h) => h.day_of_week))) {
+    const dayHours = hours.filter((h) => h.day_of_week === day);
+    for (let i = 0; i < dayHours.length; i++) {
+      for (let j = i + 1; j < dayHours.length; j++) {
+        if (hoursOverlap(dayHours[i], dayHours[j])) {
+          return res.status(400).json({ error: `Overlapping hours on day ${day}` });
+        }
+      }
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const therapistRes = await client.query(
+      'SELECT id FROM spa_therapist WHERE id = $1 AND spa_id = $2 AND property_id = $3',
+      [id, spa_id, req.property_id]
+    );
+    if (!therapistRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Therapist not found' });
+    }
+
+    await client.query('DELETE FROM spa_therapist_hours WHERE therapist_id = $1', [id]);
+
+    const inserted = [];
+    for (const h of hours) {
+      const { rows } = await client.query(
+        `INSERT INTO spa_therapist_hours (property_id, therapist_id, day_of_week, start_time, end_time)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id, day_of_week, start_time, end_time`,
+        [req.property_id, id, h.day_of_week, h.start_time, h.end_time]
+      );
+      inserted.push(rows[0]);
+    }
+
+    await client.query('COMMIT');
+    res.json(inserted);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
+// ── Therapist time off ───────────────────────────────────────────────────────
+// Whole-day closures per therapist. Partial-day blocks aren't a supported
+// case here -- edit hours for that week, or book a placeholder appointment.
+
+async function listTherapistTimeOff(req, res, next) {
+  try {
+    const { spa_id, id } = req.params;
+    const { from, to } = req.query;
+
+    const therapistRes = await pool.query(
+      'SELECT id FROM spa_therapist WHERE id = $1 AND spa_id = $2 AND property_id = $3',
+      [id, spa_id, req.property_id]
+    );
+    if (!therapistRes.rows.length) return res.status(404).json({ error: 'Therapist not found' });
+
+    let query = 'SELECT id, start_date, end_date, reason FROM spa_therapist_time_off WHERE therapist_id = $1';
+    const params = [id];
+    if (from) { params.push(from); query += ` AND end_date >= $${params.length}`; }
+    if (to) { params.push(to); query += ` AND start_date <= $${params.length}`; }
+    query += ' ORDER BY start_date';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) { next(err); }
+}
+
+async function createTherapistTimeOff(req, res, next) {
+  try {
+    const { spa_id, id } = req.params;
+    const { start_date, end_date, reason } = req.body;
+    if (!start_date || !end_date) return res.status(400).json({ error: 'start_date and end_date are required' });
+    if (!isValidDate(start_date) || !isValidDate(end_date)) return res.status(400).json({ error: 'Invalid date format' });
+    if (start_date > end_date) return res.status(400).json({ error: 'start_date must be before or equal to end_date' });
+
+    const therapistRes = await pool.query(
+      'SELECT id FROM spa_therapist WHERE id = $1 AND spa_id = $2 AND property_id = $3',
+      [id, spa_id, req.property_id]
+    );
+    if (!therapistRes.rows.length) return res.status(404).json({ error: 'Therapist not found' });
+
+    const { rows } = await pool.query(
+      `INSERT INTO spa_therapist_time_off (property_id, therapist_id, start_date, end_date, reason)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id, start_date, end_date, reason`,
+      [req.property_id, id, start_date, end_date, reason ?? null]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) { next(err); }
+}
+
+async function deleteTherapistTimeOff(req, res, next) {
+  try {
+    const { spa_id, id, offId } = req.params;
+    const { rows } = await pool.query(
+      `DELETE FROM spa_therapist_time_off tof
+       USING spa_therapist st
+       WHERE tof.therapist_id = st.id
+         AND tof.id = $1
+         AND st.id = $2
+         AND st.spa_id = $3
+         AND st.property_id = $4
+       RETURNING tof.id`,
+      [offId, id, spa_id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Time off not found' });
+    res.status(204).end();
+  } catch (err) { next(err); }
+}
+
+// ── Computed availability ────────────────────────────────────────────────────
+// A spa is either hours-driven (has spa_therapist_hours rows) or slot-driven
+// (Pirates Bight today); mixing the two on one therapist is unsupported and
+// not validated against, matching how this project generally trusts
+// staff-side configuration. Legacy spa_slot rows are not consulted here.
+
+const MAX_AVAILABILITY_DAYS = 31;
+
+async function searchSpaAvailability(req, res, next) {
+  try {
+    const { spa_id } = req.params;
+    const { from, to, treatment_id, therapist_id } = req.query;
+
+    if (!from || !to || !treatment_id) {
+      return res.status(400).json({ error: 'from, to, and treatment_id are required' });
+    }
+    if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'Invalid date format' });
+    if (from > to) return res.status(400).json({ error: 'from must be before or equal to to' });
+    if (addDaysUTC(from, MAX_AVAILABILITY_DAYS) < to) {
+      return res.status(400).json({ error: `Range cannot exceed ${MAX_AVAILABILITY_DAYS} days` });
+    }
+
+    const treatmentRes = await pool.query(
+      "SELECT duration_mins FROM spa_treatment WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'",
+      [treatment_id, spa_id, req.property_id]
+    );
+    if (!treatmentRes.rows.length) return res.status(404).json({ error: 'Treatment not found' });
+
+    if (therapist_id) {
+      const therapistRes = await pool.query(
+        "SELECT id FROM spa_therapist WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'",
+        [therapist_id, spa_id, req.property_id]
+      );
+      if (!therapistRes.rows.length) return res.status(404).json({ error: 'Therapist not found' });
+    }
+
+    const { rows } = await pool.query(
+      `WITH r AS (
+         SELECT s.slot_interval_minutes, tr.duration_mins, p.timezone
+         FROM spa s
+         JOIN spa_treatment tr ON tr.id = $4
+         JOIN property p ON p.id = s.property_id
+         WHERE s.id = $1
+       ),
+       candidate_dates AS (
+         SELECT gs::date AS avail_date FROM generate_series($2::date, $3::date, '1 day') AS gs
+       ),
+       candidate AS (
+         SELECT
+           cd.avail_date,
+           t.id AS therapist_id,
+           t.name AS therapist_name,
+           generate_series(
+             DATE '2000-01-01' + h.start_time,
+             DATE '2000-01-01' + h.end_time - (r.duration_mins || ' minutes')::interval,
+             (r.slot_interval_minutes || ' minutes')::interval
+           )::time AS start_time
+         FROM candidate_dates cd
+         CROSS JOIN r
+         JOIN spa_therapist_hours h ON h.day_of_week = EXTRACT(ISODOW FROM cd.avail_date)::int
+         JOIN spa_therapist t ON t.id = h.therapist_id
+         WHERE t.spa_id = $1
+           AND t.status = 'active'
+           AND ($5::uuid IS NULL OR t.id = $5)
+           AND NOT EXISTS (
+             SELECT 1 FROM spa_therapist_time_off tof
+             WHERE tof.therapist_id = t.id AND cd.avail_date BETWEEN tof.start_date AND tof.end_date
+           )
+       )
+       SELECT to_char(c.avail_date, 'YYYY-MM-DD') AS avail_date, c.start_time, c.therapist_id, c.therapist_name
+       FROM candidate c
+       CROSS JOIN r
+       WHERE NOT EXISTS (
+         SELECT 1 FROM spa_appointment sa
+         WHERE sa.therapist_id = c.therapist_id
+           AND sa.appointment_date = c.avail_date
+           AND sa.status != 'cancelled'
+           AND sa.start_time < c.start_time + (r.duration_mins || ' minutes')::interval
+           AND sa.end_time   > c.start_time
+       )
+       AND (
+         c.avail_date > (now() AT TIME ZONE r.timezone)::date
+         OR c.start_time > (now() AT TIME ZONE r.timezone)::time
+       )
+       ORDER BY c.avail_date, c.start_time, c.therapist_name`,
+      [spa_id, from, to, treatment_id, therapist_id ?? null]
+    );
+
+    const byDate = new Map();
+    for (const row of rows) {
+      if (!byDate.has(row.avail_date)) byDate.set(row.avail_date, new Map());
+      const slotsByTime = byDate.get(row.avail_date);
+      const time = row.start_time.slice(0, 5);
+      if (!slotsByTime.has(time)) slotsByTime.set(time, []);
+      slotsByTime.get(time).push({ id: row.therapist_id, name: row.therapist_name });
+    }
+
+    const result = [...byDate.entries()].map(([date, slotsByTime]) => ({
+      date,
+      slots: [...slotsByTime.entries()].map(([time, therapists]) => ({ time, therapists })),
+    }));
+    res.json(result);
+  } catch (err) { next(err); }
+}
+
+// ── Slots (legacy, slot-based flow) ─────────────────────────────────────────
 
 async function listSlots(req, res, next) {
   try {
@@ -293,14 +574,15 @@ function splitContactName(name) {
     : { first_name: trimmed.slice(0, spaceIdx), last_name: trimmed.slice(spaceIdx + 1) };
 }
 
-// Shapes a joined spa_appointment row (sa.*, ss.slot_date, ss.slot_time,
-// st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins,
-// tr.price) into the LiveSpaBooking contract hotal-ui's feed expects.
-// start_time is built as a plain 'YYYY-MM-DDTHH:MM:SS' string, deliberately
-// not UTC-normalized -- slots have no stored timezone, so this is treated as
-// the property's own local wall-clock time and the client renders it as-is
-// (new Date() with no offset parses as the *viewer's* local time, so an
-// unconverted string round-trips through toLocaleString unchanged).
+// Shapes a joined spa_appointment row (sa.* -- which now includes
+// appointment_date/start_time/end_time directly -- plus therapist_name,
+// treatment_name, duration_mins, price) into the LiveSpaBooking contract
+// hotal-ui's feed expects. start_time is built as a plain
+// 'YYYY-MM-DDTHH:MM:SS' string, deliberately not UTC-normalized -- neither
+// column carries a timezone, so this is treated as the property's own local
+// wall-clock time and the client renders it as-is (new Date() with no offset
+// parses as the *viewer's* local time, so an unconverted string round-trips
+// through toLocaleString unchanged).
 function toLiveSpaBooking(row) {
   const { first_name, last_name } = splitContactName(row.contact_name);
   return {
@@ -311,7 +593,7 @@ function toLiveSpaBooking(row) {
     phone: row.contact_phone,
     treatment_name: row.treatment_name,
     therapist_name: row.therapist_name,
-    start_time: `${row.slot_date instanceof Date ? row.slot_date.toISOString().slice(0, 10) : row.slot_date}T${row.slot_time}`,
+    start_time: `${row.appointment_date instanceof Date ? row.appointment_date.toISOString().slice(0, 10) : row.appointment_date}T${row.start_time}`,
     duration_minutes: row.duration_mins,
     price: row.price,
     status: row.status,
@@ -319,17 +601,61 @@ function toLiveSpaBooking(row) {
   };
 }
 
+// Everything sendAppointmentConfirmation/sendAppointmentCancellation need,
+// plus what toLiveSpaBooking needs -- one query so the post-commit Ably
+// publish and confirmation/cancellation email never make redundant round
+// trips. Not used by the list/get endpoints below, which stay lean (no
+// spa/property fields) since nothing else needs them.
+async function getFullAppointmentForEmail(appointmentId) {
+  const { rows } = await pool.query(
+    `SELECT sa.*,
+            st.name AS therapist_name,
+            tr.name AS treatment_name, tr.duration_mins, tr.price,
+            s.contact_email AS spa_contact_email, s.address AS spa_address, s.phone AS spa_phone,
+            p.name AS property_name, p.currency AS property_currency
+     FROM spa_appointment sa
+     JOIN spa_therapist st ON st.id = sa.therapist_id
+     JOIN spa_treatment tr ON tr.id = sa.treatment_id
+     JOIN spa s ON s.id = st.spa_id
+     JOIN property p ON p.id = sa.property_id
+     WHERE sa.id = $1`,
+    [appointmentId]
+  );
+  return rows[0] || null;
+}
+
+// Fire-and-forget publish + (optional) email after a commit, shared by
+// createAppointment and updateAppointment's cancellation path. Never throws
+// -- every failure is caught and logged, matching the existing Ably
+// .catch() convention in this file.
+async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawInsertedRow) {
+  publishNewAppointment(spaId, rawInsertedRow).catch((err) => console.error('Ably publish failed:', err.message));
+
+  const full = await getFullAppointmentForEmail(appointmentId).catch((err) => {
+    console.error('Failed to load full appointment for Ably/email:', err.message);
+    return null;
+  });
+  if (!full) return;
+
+  publishNewSpaBookingForProperty(propertyId, toLiveSpaBooking(full))
+    .catch((err) => console.error('Ably publish failed:', err.message));
+
+  if (full.contact_email) {
+    sendAppointmentConfirmation(full, full.property_name)
+      .then((emailId) => pool.query('UPDATE spa_appointment SET confirmation_resend_email_id = $1 WHERE id = $2', [emailId, appointmentId]))
+      .catch((err) => console.error('Confirmation email failed:', err.message));
+  }
+}
+
 async function listAppointmentsForProperty(req, res, next) {
   try {
     const { cursor, limit } = req.query;
     const take = Math.min(parseInt(limit, 10) || 30, 100);
     let query = `
-      SELECT sa.*, ss.slot_date, ss.slot_time,
-             st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
+      SELECT sa.*, st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
       FROM spa_appointment sa
-      JOIN spa_slot ss ON ss.id = sa.slot_id
-      JOIN spa_therapist st ON st.id = ss.therapist_id
-      JOIN spa_treatment tr ON tr.id = ss.treatment_id
+      JOIN spa_therapist st ON st.id = sa.therapist_id
+      JOIN spa_treatment tr ON tr.id = sa.treatment_id
       WHERE sa.property_id = $1
     `;
     const params = [req.property_id];
@@ -344,22 +670,21 @@ async function listAppointmentsForProperty(req, res, next) {
 async function listAppointments(req, res, next) {
   try {
     const { spa_id } = req.params;
-    const { date, status, guest_id, clerk_user_id } = req.query;
+    const { date, status, guest_id, clerk_user_id, therapist_id } = req.query;
     let query = `
-      SELECT sa.*, ss.slot_date, ss.slot_time,
-             st.name AS therapist_name, tr.name AS treatment_name, tr.price
+      SELECT sa.*, st.name AS therapist_name, tr.name AS treatment_name, tr.price
       FROM spa_appointment sa
-      JOIN spa_slot ss ON ss.id = sa.slot_id
-      JOIN spa_therapist st ON st.id = ss.therapist_id
-      JOIN spa_treatment tr ON tr.id = ss.treatment_id
+      JOIN spa_therapist st ON st.id = sa.therapist_id
+      JOIN spa_treatment tr ON tr.id = sa.treatment_id
       WHERE st.spa_id = $1 AND sa.property_id = $2
     `;
     const params = [spa_id, req.property_id];
-    if (date) { params.push(date); query += ` AND ss.slot_date = $${params.length}`; }
+    if (date) { params.push(date); query += ` AND sa.appointment_date = $${params.length}`; }
     if (status) { params.push(status); query += ` AND sa.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND sa.guest_id = $${params.length}`; }
     if (clerk_user_id) { params.push(clerk_user_id); query += ` AND sa.clerk_user_id = $${params.length}`; }
-    query += ' ORDER BY ss.slot_date, ss.slot_time';
+    if (therapist_id) { params.push(therapist_id); query += ` AND sa.therapist_id = $${params.length}`; }
+    query += ' ORDER BY sa.appointment_date, sa.start_time';
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) { next(err); }
@@ -369,12 +694,10 @@ async function getAppointment(req, res, next) {
   try {
     const { spa_id, id } = req.params;
     const { rows } = await pool.query(
-      `SELECT sa.*, ss.slot_date, ss.slot_time,
-              st.name AS therapist_name, tr.name AS treatment_name, tr.price
+      `SELECT sa.*, st.name AS therapist_name, tr.name AS treatment_name, tr.price
        FROM spa_appointment sa
-       JOIN spa_slot ss ON ss.id = sa.slot_id
-       JOIN spa_therapist st ON st.id = ss.therapist_id
-       JOIN spa_treatment tr ON tr.id = ss.treatment_id
+       JOIN spa_therapist st ON st.id = sa.therapist_id
+       JOIN spa_treatment tr ON tr.id = sa.treatment_id
        WHERE sa.id = $1 AND st.spa_id = $2 AND sa.property_id = $3`,
       [id, spa_id, req.property_id]
     );
@@ -383,10 +706,12 @@ async function getAppointment(req, res, next) {
   } catch (err) { next(err); }
 }
 
-async function createAppointment(req, res, next) {
+// Legacy path: booking against a pre-generated spa_slot row. Unchanged
+// beyond also populating the five direct columns from the slot, so every
+// appointment -- slot-based or computed -- has them.
+async function createAppointmentFromSlot(req, res, next) {
   const { spa_id } = req.params;
   const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes } = req.body;
-  if (!slot_id || !contact_name) return res.status(400).json({ error: 'slot_id and contact_name are required' });
 
   const client = await pool.connect();
   try {
@@ -399,7 +724,8 @@ async function createAppointment(req, res, next) {
       [slot_id, spa_id, req.property_id]
     );
     if (!slotRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Slot not found' }); }
-    if (slotRes.rows[0].status !== 'available') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Slot is not available' }); }
+    const slot = slotRes.rows[0];
+    if (slot.status !== 'available') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Slot is not available' }); }
 
     if (guest_id) {
       const guestRes = await client.query('SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, req.property_id]);
@@ -411,31 +737,22 @@ async function createAppointment(req, res, next) {
     );
     if (conflictRes.rows.length) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Slot already booked' }); }
 
+    const treatmentRes = await client.query('SELECT duration_mins FROM spa_treatment WHERE id = $1', [slot.treatment_id]);
+    const endTime = addMinutesToTime(slot.slot_time, treatmentRes.rows[0].duration_mins);
+
     const { rows } = await client.query(
-      `INSERT INTO spa_appointment (property_id, slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.property_id, slot_id, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null]
+      `INSERT INTO spa_appointment
+         (property_id, slot_id, treatment_id, therapist_id, appointment_date, start_time, end_time,
+          guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+      [
+        req.property_id, slot_id, slot.treatment_id, slot.therapist_id, slot.slot_date, slot.slot_time, endTime,
+        guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
+      ]
     );
 
     await client.query('COMMIT');
-
-    publishNewAppointment(spa_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
-
-    const { rows: full } = await pool.query(
-      `SELECT sa.*, ss.slot_date, ss.slot_time,
-              st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
-       FROM spa_appointment sa
-       JOIN spa_slot ss ON ss.id = sa.slot_id
-       JOIN spa_therapist st ON st.id = ss.therapist_id
-       JOIN spa_treatment tr ON tr.id = ss.treatment_id
-       WHERE sa.id = $1`,
-      [rows[0].id]
-    );
-    if (full.length) {
-      publishNewSpaBookingForProperty(req.property_id, toLiveSpaBooking(full[0]))
-        .catch((err) => console.error('Ably publish failed:', err.message));
-    }
-
+    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0]);
     res.status(201).json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -445,6 +762,147 @@ async function createAppointment(req, res, next) {
   }
 }
 
+// Checks whether therapistId is bookable for a treatment of durationMins
+// starting at date/time: within a working-hours window, not on a time-off
+// day, has no overlapping non-cancelled appointment, and isn't already in
+// the past in the property's own timezone. Called inside the same
+// transaction/connection that will lock the therapist row, so this read is
+// consistent with that lock.
+async function isTherapistFree(client, therapistId, date, time, durationMins, timezone) {
+  const { rows } = await client.query(
+    `SELECT
+       EXISTS (
+         SELECT 1 FROM spa_therapist_hours h
+         WHERE h.therapist_id = $1
+           AND h.day_of_week = EXTRACT(ISODOW FROM $2::date)::int
+           AND h.start_time <= $3::time
+           AND h.end_time   >= $3::time + ($4 || ' minutes')::interval
+       ) AS within_hours,
+       EXISTS (
+         SELECT 1 FROM spa_therapist_time_off t
+         WHERE t.therapist_id = $1 AND $2::date BETWEEN t.start_date AND t.end_date
+       ) AS has_time_off,
+       EXISTS (
+         SELECT 1 FROM spa_appointment sa
+         WHERE sa.therapist_id = $1
+           AND sa.appointment_date = $2::date
+           AND sa.status != 'cancelled'
+           AND sa.start_time < $3::time + ($4 || ' minutes')::interval
+           AND sa.end_time   > $3::time
+       ) AS has_overlap,
+       (
+         $2::date < (now() AT TIME ZONE $5)::date
+         OR ($2::date = (now() AT TIME ZONE $5)::date AND $3::time <= (now() AT TIME ZONE $5)::time)
+       ) AS is_past`,
+    [therapistId, date, time, durationMins, timezone]
+  );
+  const r = rows[0];
+  return r.within_hours && !r.has_time_off && !r.has_overlap && !r.is_past;
+}
+
+// New computed-availability path: books against working hours rather than a
+// pre-generated slot. therapist_id is optional -- when omitted, the server
+// picks the free therapist with the lowest name (deterministic, no
+// cleverness).
+async function createAppointmentFromAvailability(req, res, next) {
+  const { spa_id } = req.params;
+  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes } = req.body;
+
+  if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
+  if (!isValidTime(time)) return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const treatmentRes = await client.query(
+      "SELECT id, duration_mins FROM spa_treatment WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'",
+      [treatment_id, spa_id, req.property_id]
+    );
+    if (!treatmentRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Treatment not found' }); }
+    const durationMins = treatmentRes.rows[0].duration_mins;
+
+    const propertyRes = await client.query(
+      `SELECT p.timezone FROM property p JOIN spa s ON s.property_id = p.id WHERE s.id = $1`,
+      [spa_id]
+    );
+    const timezone = propertyRes.rows[0].timezone;
+
+    if (guest_id) {
+      const guestRes = await client.query('SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, req.property_id]);
+      if (!guestRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Guest not found' }); }
+    }
+
+    let chosenTherapistId = null;
+    if (therapist_id) {
+      // FOR UPDATE serialises concurrent bookings for this barber -- the
+      // same role the UNIQUE constraint on spa_slot played for the legacy
+      // flow.
+      const tRes = await client.query(
+        "SELECT id FROM spa_therapist WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active' FOR UPDATE",
+        [therapist_id, spa_id, req.property_id]
+      );
+      if (!tRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Therapist not found' }); }
+      if (await isTherapistFree(client, therapist_id, date, time, durationMins, timezone)) {
+        chosenTherapistId = therapist_id;
+      }
+    } else {
+      const allRes = await client.query(
+        "SELECT id FROM spa_therapist WHERE spa_id = $1 AND property_id = $2 AND status = 'active' ORDER BY name FOR UPDATE",
+        [spa_id, req.property_id]
+      );
+      for (const t of allRes.rows) {
+        if (await isTherapistFree(client, t.id, date, time, durationMins, timezone)) {
+          chosenTherapistId = t.id;
+          break;
+        }
+      }
+    }
+
+    if (!chosenTherapistId) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Time is not available' });
+    }
+
+    const endTime = addMinutesToTime(time, durationMins);
+    const { rows } = await client.query(
+      `INSERT INTO spa_appointment
+         (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time,
+          guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+      [
+        req.property_id, treatment_id, chosenTherapistId, date, time, endTime,
+        guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
+      ]
+    );
+
+    await client.query('COMMIT');
+    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0]);
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
+async function createAppointment(req, res, next) {
+  const { slot_id, treatment_id, date, time, contact_name } = req.body;
+
+  if (slot_id && treatment_id) {
+    return res.status(400).json({ error: 'Provide either slot_id or treatment_id, not both' });
+  }
+  if (!contact_name) return res.status(400).json({ error: 'contact_name is required' });
+
+  if (slot_id) return createAppointmentFromSlot(req, res, next);
+
+  if (!treatment_id || !date || !time) {
+    return res.status(400).json({ error: 'treatment_id, date, and time are required (or slot_id for the legacy flow)' });
+  }
+  return createAppointmentFromAvailability(req, res, next);
+}
+
 async function updateAppointment(req, res, next) {
   try {
     const { spa_id, id } = req.params;
@@ -452,8 +910,7 @@ async function updateAppointment(req, res, next) {
 
     const beforeRes = await pool.query(
       `SELECT sa.status FROM spa_appointment sa
-       JOIN spa_slot ss ON ss.id = sa.slot_id
-       JOIN spa_therapist st ON st.id = ss.therapist_id
+       JOIN spa_therapist st ON st.id = sa.therapist_id
        WHERE sa.id = $1 AND st.spa_id = $2 AND sa.property_id = $3`,
       [id, spa_id, req.property_id]
     );
@@ -464,9 +921,8 @@ async function updateAppointment(req, res, next) {
       `UPDATE spa_appointment sa SET
          status = COALESCE($1, sa.status),
          notes  = COALESCE($2, sa.notes)
-       FROM spa_slot ss
-       JOIN spa_therapist st ON st.id = ss.therapist_id
-       WHERE sa.slot_id = ss.id
+       FROM spa_therapist st
+       WHERE sa.therapist_id = st.id
          AND sa.id = $3
          AND st.spa_id = $4
          AND sa.property_id = $5
@@ -483,19 +939,18 @@ async function updateAppointment(req, res, next) {
       // id on every event (same as live-dining-orders-feed) -- a bare
       // {id, status} patch would blank out treatment/therapist/price/etc.
       // on every status change, so re-fetch the joined shape first.
-      const { rows: full } = await pool.query(
-        `SELECT sa.*, ss.slot_date, ss.slot_time,
-                st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
-         FROM spa_appointment sa
-         JOIN spa_slot ss ON ss.id = sa.slot_id
-         JOIN spa_therapist st ON st.id = ss.therapist_id
-         JOIN spa_treatment tr ON tr.id = ss.treatment_id
-         WHERE sa.id = $1`,
-        [rows[0].id]
-      );
-      if (full.length) {
-        publishSpaBookingStatusChangedForProperty(req.property_id, toLiveSpaBooking(full[0]))
+      const full = await getFullAppointmentForEmail(rows[0].id).catch((err) => {
+        console.error('Failed to load full appointment for Ably/email:', err.message);
+        return null;
+      });
+      if (full) {
+        publishSpaBookingStatusChangedForProperty(req.property_id, toLiveSpaBooking(full))
           .catch((err) => console.error('Ably publish failed:', err.message));
+
+        if (rows[0].status === 'cancelled' && full.contact_email) {
+          sendAppointmentCancellation(full, full.property_name)
+            .catch((err) => console.error('Cancellation email failed:', err.message));
+        }
       }
     }
 
@@ -507,6 +962,9 @@ module.exports = {
   listSpas, getSpa, createSpa, updateSpa,
   listTreatments, createTreatment, updateTreatment,
   listTherapists, createTherapist, updateTherapist,
+  listTherapistHours, setTherapistHours,
+  listTherapistTimeOff, createTherapistTimeOff, deleteTherapistTimeOff,
+  searchSpaAvailability,
   listSlots, bulkCreateSlots, searchSlots, updateSlot,
   listAppointments, getAppointment, createAppointment, updateAppointment,
   listAppointmentsForProperty,
