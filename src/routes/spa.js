@@ -32,6 +32,9 @@ router.delete('/:spa_id/therapists/:id/time-off/:offId', authenticateOrApiKey, c
 // Computed availability
 router.get('/:spa_id/availability', authenticateOrApiKey, ctrl.searchSpaAvailability);
 
+// Realtime (subscribe-only token for the appointments channel)
+router.get('/:spa_id/ably-token', authenticateOrApiKey, ctrl.getSpaAblyToken);
+
 // Slots
 router.get('/:spa_id/slots', authenticateOrApiKey, ctrl.listSlots);
 router.post('/:spa_id/slots/bulk', authenticateOrApiKey, ctrl.bulkCreateSlots);

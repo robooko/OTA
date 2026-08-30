@@ -5,6 +5,7 @@ const {
   publishAppointmentStatusChanged,
   publishNewSpaBookingForProperty,
   publishSpaBookingStatusChangedForProperty,
+  client: ablyClient,
 } = require('../lib/ably');
 const { sendAppointmentConfirmation, sendAppointmentCancellation } = require('../lib/resend');
 
@@ -690,6 +691,24 @@ async function listAppointments(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Subscribe-only token for the app's live schedule -- mirrors
+// restaurantOrders.getAblyToken. The channel is the one
+// publishNewAppointment / publishAppointmentStatusChanged already use.
+async function getSpaAblyToken(req, res, next) {
+  try {
+    const { spa_id } = req.params;
+    const { rows } = await pool.query('SELECT id FROM spa WHERE id = $1 AND property_id = $2', [spa_id, req.property_id]);
+    if (!rows.length) return res.status(404).json({ error: 'Spa not found' });
+    if (!ablyClient) return res.status(503).json({ error: 'Realtime notifications are not configured' });
+
+    const channel = `spa:${spa_id}:appointments`;
+    const tokenRequest = await ablyClient.auth.createTokenRequest({
+      capability: { [channel]: ['subscribe'] },
+    });
+    res.json({ tokenRequest, channel });
+  } catch (err) { next(err); }
+}
+
 async function getAppointment(req, res, next) {
   try {
     const { spa_id, id } = req.params;
@@ -967,5 +986,6 @@ module.exports = {
   searchSpaAvailability,
   listSlots, bulkCreateSlots, searchSlots, updateSlot,
   listAppointments, getAppointment, createAppointment, updateAppointment,
+  getSpaAblyToken,
   listAppointmentsForProperty,
 };
