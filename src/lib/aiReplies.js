@@ -62,7 +62,7 @@ const ReplyAssessment = z.object({
 
 // Frozen text: byte-stable across every property and call, so it sits first
 // in the cached prefix (tools -> system -> messages render order).
-const BASE_SYSTEM_PROMPT = `You draft email replies from a hospitality venue's events team to guests who have enquired about holding a private event (dinners, parties, weddings, corporate bookings and similar). You return a JSON object matching the provided schema: a summary, the reply body, whether a human must take over, and a quality score.
+const BASE_SYSTEM_PROMPT = `You draft email replies on behalf of a hospitality business (a hotel, restaurant, venue, salon or similar) to people who have sent an enquiry -- about holding a private event, making a group booking, or a general question about what the business offers. You return a JSON object matching the provided schema: a summary, the reply body, whether a human must take over, and a quality score.
 
 FACTS
 - The only facts you may state about the venue -- capacity, spaces, menus, packages, prices, minimum spends, availability, opening days, policies, deposits, contact details -- are those given in <venue_instructions>. Never invent, estimate or "typically" a fact that is not there.
@@ -94,11 +94,12 @@ QUALITY SCORE (0-100)
 
 STYLE
 - Plain text only. No subject line, no markdown, no bullet symbols, no placeholders.
+- Write currency symbols, accents and other non-ASCII characters as the plain characters themselves (£45, café). Never use backslash escapes, character codes or HTML entities.
 - Warm, professional, concise: usually 60-180 words, longer only if the guest asked several distinct questions.
 - Reply in the language the guest wrote in.
 - Greet the guest by first name. Do not repeat their message back to them.
-- Answer what was asked, then invite the next step (a date to hold, a menu to choose, a visit) only if the instructions support it.
-- Sign off as "The events team, <venue name>" unless the instructions give a different signature.
+- Answer what was asked, then invite the next step (a date to hold, a menu to choose, a visit, a call) only if the instructions support it.
+- Sign off as "The team at <business name>" unless the instructions give a different signature or tone.
 - Do not say you are an AI or automated unless the instructions tell you to.
 
 THREAD
@@ -169,6 +170,20 @@ function clampScore(n) {
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
+// The model very occasionally mangles a non-ASCII character into a bogus
+// escape -- observed once in ~12 live calls as "\ffffff1,500" where
+// "£1,500" was meant. A real email body has no business containing a
+// backslash escape, a control character or U+FFFD, so treat any of them
+// as a corrupt draft: retry once (generation is idempotent and cheap),
+// then fail the draft rather than let it reach a guest.
+const CORRUPTION = /\\[a-zA-Z0-9]{1,10}|[\x00-\x08\x0b\x0c\x0e-\x1f�]/;
+const MAX_ATTEMPTS = 2;
+
+function findCorruption(text) {
+  const m = CORRUPTION.exec(text);
+  return m ? m[0] : null;
+}
+
 // Returns { body, quality_score, requires_human, requires_human_reason, summary,
 // model, usage: { input_tokens, output_tokens, cache_read_input_tokens } } or
 // throws AiReplyError. Callers persist failures rather than letting them
@@ -177,39 +192,52 @@ async function generateInquiryReply({ property, inquiry, restaurant = null, thre
   if (!client) throw new AiReplyError('AI replies are not configured (ANTHROPIC_API_KEY is unset)', { kind: 'not_configured' });
   today = today || new Date().toISOString().slice(0, 10);
 
-  let response;
-  try {
-    response = await client.messages.parse({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      system: [
-        { type: 'text', text: BASE_SYSTEM_PROMPT },
-        { type: 'text', text: buildPropertyBlock(property, restaurant), cache_control: { type: 'ephemeral' } },
-      ],
-      messages: [{ role: 'user', content: buildUserMessage({ inquiry, thread, triggerType, today }) }],
-      // Opus 5 runs adaptive thinking by default -- no `thinking` param needed.
-      output_config: { effort: EFFORT, format: zodOutputFormat(ReplyAssessment) },
-    });
-  } catch (err) {
-    // Most-specific first: the pipeline only needs the kind, but the message
-    // (with status) is stored on the draft row for diagnosis.
-    if (err instanceof Anthropic.RateLimitError) throw new AiReplyError(`Rate limited by the Claude API: ${err.message}`, { kind: 'rate_limit', cause: err });
-    if (err instanceof Anthropic.APIConnectionError) throw new AiReplyError(`Could not reach the Claude API: ${err.message}`, { kind: 'network', cause: err });
-    if (err instanceof Anthropic.APIError) throw new AiReplyError(`Claude API error ${err.status}: ${err.message}`, { kind: 'api', cause: err });
-    throw err;
-  }
+  const request = {
+    model: MODEL,
+    max_tokens: MAX_TOKENS,
+    system: [
+      { type: 'text', text: BASE_SYSTEM_PROMPT },
+      { type: 'text', text: buildPropertyBlock(property, restaurant), cache_control: { type: 'ephemeral' } },
+    ],
+    messages: [{ role: 'user', content: buildUserMessage({ inquiry, thread, triggerType, today }) }],
+    // Opus 5 runs adaptive thinking by default -- no `thinking` param needed.
+    output_config: { effort: EFFORT, format: zodOutputFormat(ReplyAssessment) },
+  };
 
-  // Always check stop_reason before reading content: a safety classifier can
-  // decline with HTTP 200 + stop_reason 'refusal'.
-  if (response.stop_reason === 'refusal') {
-    throw new AiReplyError(`Model declined to draft a reply${response.stop_details?.explanation ? `: ${response.stop_details.explanation}` : ''}`, { kind: 'refusal' });
-  }
-  if (response.stop_reason === 'max_tokens') {
-    throw new AiReplyError('Draft was cut off (max_tokens reached)', { kind: 'parse' });
-  }
-  const parsed = response.parsed_output;
-  if (!parsed || !parsed.body?.trim()) {
-    throw new AiReplyError('Model returned an unparseable or empty draft', { kind: 'parse' });
+  let response;
+  let parsed;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      response = await client.messages.parse(request);
+    } catch (err) {
+      // Most-specific first: the pipeline only needs the kind, but the message
+      // (with status) is stored on the draft row for diagnosis.
+      if (err instanceof Anthropic.RateLimitError) throw new AiReplyError(`Rate limited by the Claude API: ${err.message}`, { kind: 'rate_limit', cause: err });
+      if (err instanceof Anthropic.APIConnectionError) throw new AiReplyError(`Could not reach the Claude API: ${err.message}`, { kind: 'network', cause: err });
+      if (err instanceof Anthropic.APIError) throw new AiReplyError(`Claude API error ${err.status}: ${err.message}`, { kind: 'api', cause: err });
+      throw err;
+    }
+
+    // Always check stop_reason before reading content: a safety classifier can
+    // decline with HTTP 200 + stop_reason 'refusal'.
+    if (response.stop_reason === 'refusal') {
+      throw new AiReplyError(`Model declined to draft a reply${response.stop_details?.explanation ? `: ${response.stop_details.explanation}` : ''}`, { kind: 'refusal' });
+    }
+    if (response.stop_reason === 'max_tokens') {
+      throw new AiReplyError('Draft was cut off (max_tokens reached)', { kind: 'parse' });
+    }
+    parsed = response.parsed_output;
+    if (!parsed || !parsed.body?.trim()) {
+      throw new AiReplyError('Model returned an unparseable or empty draft', { kind: 'parse' });
+    }
+
+    const corruption = findCorruption(parsed.body);
+    if (!corruption) break;
+    if (attempt < MAX_ATTEMPTS) {
+      console.warn(`AI draft contained a corrupt sequence (${JSON.stringify(corruption)}); retrying (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
+      continue;
+    }
+    throw new AiReplyError(`Draft contained a corrupt character sequence (${JSON.stringify(corruption)}) on ${MAX_ATTEMPTS} attempts`, { kind: 'parse' });
   }
 
   const requiresHuman = !!parsed.requires_human;
@@ -231,4 +259,4 @@ async function generateInquiryReply({ property, inquiry, restaurant = null, thre
   };
 }
 
-module.exports = { isConfigured, generateInquiryReply, AiReplyError, MODEL, EFFORT };
+module.exports = { isConfigured, generateInquiryReply, findCorruption, AiReplyError, MODEL, EFFORT };
