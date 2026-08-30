@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/spa');
+const payments = require('../controllers/spaPayments');
 const { authenticateOrApiKey } = require('../middleware/auth');
 
 // Spas
@@ -42,5 +43,9 @@ router.get('/:spa_id/appointments', authenticateOrApiKey, ctrl.listAppointments)
 router.get('/:spa_id/appointments/:id', authenticateOrApiKey, ctrl.getAppointment);
 router.post('/:spa_id/appointments', authenticateOrApiKey, ctrl.createAppointment);
 router.put('/:spa_id/appointments/:id', authenticateOrApiKey, ctrl.updateAppointment);
+
+// Tap to Pay (see 2026-08-30-spa-tap-to-pay-backend-requirements.md)
+router.post('/:spa_id/appointments/:id/payment-intent', authenticateOrApiKey, payments.createAppointmentPaymentIntent);
+router.post('/:spa_id/appointments/:id/confirm-payment', authenticateOrApiKey, payments.confirmAppointmentPayment);
 
 module.exports = router;
