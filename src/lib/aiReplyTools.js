@@ -81,12 +81,16 @@ async function executeAvailabilityTool(inquiry, input) {
     [inquiry.spa_id]
   );
   const wanted = String(input?.treatment_name ?? '').trim().toLowerCase();
-  const matches = wanted
-    ? treatments.filter((t) => {
-        const name = t.name.toLowerCase();
-        return name.includes(wanted) || wanted.includes(name);
-      })
-    : [];
+  // Exact name first: with a menu like "Haircut" / "Kids Haircut (under 12)"
+  // the substring pass alone can never uniquely resolve "haircut", so the
+  // most common request would always error out as ambiguous.
+  let matches = wanted ? treatments.filter((t) => t.name.toLowerCase() === wanted) : [];
+  if (wanted && !matches.length) {
+    matches = treatments.filter((t) => {
+      const name = t.name.toLowerCase();
+      return name.includes(wanted) || wanted.includes(name);
+    });
+  }
   if (matches.length !== 1) {
     return {
       error: matches.length > 1 ? 'treatment_name matched more than one treatment' : 'treatment_name did not match a treatment',
