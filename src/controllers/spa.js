@@ -374,34 +374,13 @@ async function deleteTherapistTimeOff(req, res, next) {
 
 const MAX_AVAILABILITY_DAYS = 31;
 
-async function searchSpaAvailability(req, res, next) {
-  try {
-    const { spa_id } = req.params;
-    const { from, to, treatment_id, therapist_id } = req.query;
-
-    if (!from || !to || !treatment_id) {
-      return res.status(400).json({ error: 'from, to, and treatment_id are required' });
-    }
-    if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'Invalid date format' });
-    if (from > to) return res.status(400).json({ error: 'from must be before or equal to to' });
-    if (addDaysUTC(from, MAX_AVAILABILITY_DAYS) < to) {
-      return res.status(400).json({ error: `Range cannot exceed ${MAX_AVAILABILITY_DAYS} days` });
-    }
-
-    const treatmentRes = await pool.query(
-      "SELECT duration_mins FROM spa_treatment WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'",
-      [treatment_id, spa_id, req.property_id]
-    );
-    if (!treatmentRes.rows.length) return res.status(404).json({ error: 'Treatment not found' });
-
-    if (therapist_id) {
-      const therapistRes = await pool.query(
-        "SELECT id FROM spa_therapist WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'",
-        [therapist_id, spa_id, req.property_id]
-      );
-      if (!therapistRes.rows.length) return res.status(404).json({ error: 'Therapist not found' });
-    }
-
+// Shared core of GET /:spa_id/availability -- also called directly (no HTTP
+// hop) by the AI reply pipeline's check_availability tool (see
+// aiReplyTools.js), so the two paths can never drift apart on what
+// "available" means. Caller is responsible for validating spa_id/
+// treatment_id/therapist_id belong to the property first (searchSpaAvailability
+// does this for the route; aiReplyTools.js does its own lookup).
+async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = null) {
     const { rows } = await pool.query(
       `WITH r AS (
          SELECT s.slot_interval_minutes, tr.duration_mins, p.timezone
@@ -451,7 +430,7 @@ async function searchSpaAvailability(req, res, next) {
          OR c.start_time > (now() AT TIME ZONE r.timezone)::time
        )
        ORDER BY c.avail_date, c.start_time, c.therapist_name`,
-      [spa_id, from, to, treatment_id, therapist_id ?? null]
+      [spaId, from, to, treatmentId, therapistId]
     );
 
     const byDate = new Map();
@@ -463,10 +442,41 @@ async function searchSpaAvailability(req, res, next) {
       slotsByTime.get(time).push({ id: row.therapist_id, name: row.therapist_name });
     }
 
-    const result = [...byDate.entries()].map(([date, slotsByTime]) => ({
+    return [...byDate.entries()].map(([date, slotsByTime]) => ({
       date,
       slots: [...slotsByTime.entries()].map(([time, therapists]) => ({ time, therapists })),
     }));
+}
+
+async function searchSpaAvailability(req, res, next) {
+  try {
+    const { spa_id } = req.params;
+    const { from, to, treatment_id, therapist_id } = req.query;
+
+    if (!from || !to || !treatment_id) {
+      return res.status(400).json({ error: 'from, to, and treatment_id are required' });
+    }
+    if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'Invalid date format' });
+    if (from > to) return res.status(400).json({ error: 'from must be before or equal to to' });
+    if (addDaysUTC(from, MAX_AVAILABILITY_DAYS) < to) {
+      return res.status(400).json({ error: `Range cannot exceed ${MAX_AVAILABILITY_DAYS} days` });
+    }
+
+    const treatmentRes = await pool.query(
+      "SELECT duration_mins FROM spa_treatment WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'",
+      [treatment_id, spa_id, req.property_id]
+    );
+    if (!treatmentRes.rows.length) return res.status(404).json({ error: 'Treatment not found' });
+
+    if (therapist_id) {
+      const therapistRes = await pool.query(
+        "SELECT id FROM spa_therapist WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'",
+        [therapist_id, spa_id, req.property_id]
+      );
+      if (!therapistRes.rows.length) return res.status(404).json({ error: 'Therapist not found' });
+    }
+
+    const result = await findSpaAvailability(spa_id, from, to, treatment_id, therapist_id ?? null);
     res.json(result);
   } catch (err) { next(err); }
 }
@@ -1039,6 +1049,7 @@ module.exports = {
   listTherapistHours, setTherapistHours,
   listTherapistTimeOff, createTherapistTimeOff, deleteTherapistTimeOff,
   searchSpaAvailability,
+  findSpaAvailability,
   listSlots, bulkCreateSlots, searchSlots, updateSlot,
   listAppointments, getAppointment, createAppointment, updateAppointment,
   getSpaAblyToken,

@@ -289,24 +289,11 @@ async function setServicePeriods(req, res, next) {
 
 // ── Availability search ─────────────────────────────────────────────────────
 
-async function searchAvailability(req, res, next) {
-  try {
-    const { restaurant_id } = req.params;
-    const { from, to, party_size, location } = req.query;
-
-    if (!from || !to || !party_size) {
-      return res.status(400).json({ error: 'from, to, and party_size are required' });
-    }
-    if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'Invalid date format' });
-    if (from > to) return res.status(400).json({ error: 'from must be before or equal to to' });
-    const partySize = parseInt(party_size, 10);
-    if (!Number.isInteger(partySize) || partySize <= 0) {
-      return res.status(400).json({ error: 'party_size must be a positive integer' });
-    }
-
-    const restaurantRes = await pool.query("SELECT id FROM restaurant WHERE id = $1 AND status = 'active'", [restaurant_id]);
-    if (!restaurantRes.rows.length) return res.status(404).json({ error: 'Restaurant not found' });
-
+// Shared core of GET /:restaurant_id/availability/search -- also called
+// directly (no HTTP hop) by the AI reply pipeline's check_availability tool
+// (see aiReplyTools.js), so the two paths can never drift apart on what
+// "available" means.
+async function findRestaurantAvailability(restaurantId, from, to, partySize, location = null) {
     const { rows } = await pool.query(
       `WITH r AS (
          SELECT slot_interval_minutes, default_duration_minutes, closed_days
@@ -358,7 +345,7 @@ async function searchAvailability(req, res, next) {
        GROUP BY cd.reservation_date, ct.start_time, rt.location
        HAVING COUNT(rt.id) > 0
        ORDER BY cd.reservation_date, ct.start_time, rt.location`,
-      [restaurant_id, from, to, partySize, location ?? null]
+      [restaurantId, from, to, partySize, location]
     );
 
     const byDate = new Map();
@@ -370,7 +357,29 @@ async function searchAvailability(req, res, next) {
         available_tables: parseInt(row.available_tables, 10),
       });
     }
-    res.json([...byDate.entries()].map(([date, slots]) => ({ date, slots })));
+    return [...byDate.entries()].map(([date, slots]) => ({ date, slots }));
+}
+
+async function searchAvailability(req, res, next) {
+  try {
+    const { restaurant_id } = req.params;
+    const { from, to, party_size, location } = req.query;
+
+    if (!from || !to || !party_size) {
+      return res.status(400).json({ error: 'from, to, and party_size are required' });
+    }
+    if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'Invalid date format' });
+    if (from > to) return res.status(400).json({ error: 'from must be before or equal to to' });
+    const partySize = parseInt(party_size, 10);
+    if (!Number.isInteger(partySize) || partySize <= 0) {
+      return res.status(400).json({ error: 'party_size must be a positive integer' });
+    }
+
+    const restaurantRes = await pool.query("SELECT id FROM restaurant WHERE id = $1 AND status = 'active'", [restaurant_id]);
+    if (!restaurantRes.rows.length) return res.status(404).json({ error: 'Restaurant not found' });
+
+    const result = await findRestaurantAvailability(restaurant_id, from, to, partySize, location ?? null);
+    res.json(result);
   } catch (err) { next(err); }
 }
 
@@ -880,6 +889,7 @@ module.exports = {
   listTables, createTable, updateTable,
   listServicePeriods, setServicePeriods,
   searchAvailability,
+  findRestaurantAvailability,
   listAllReservations,
   listReservations, getReservation, createReservation, updateReservation, seatReservation,
   cancelReservation,
