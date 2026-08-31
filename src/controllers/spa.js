@@ -166,13 +166,18 @@ async function createTherapist(req, res, next) {
 async function updateTherapist(req, res, next) {
   try {
     const { spa_id, id } = req.params;
-    const { name, status } = req.body;
+    const { name, status, clerk_user_id } = req.body;
+    // clerk_user_id is genuinely nullable (unlinking a user), unlike
+    // name/status -- COALESCE can't distinguish "not sent" from "clear it",
+    // so it's only touched when the key is present in the body at all.
+    const hasClerkUserId = Object.prototype.hasOwnProperty.call(req.body, 'clerk_user_id');
     const { rows } = await pool.query(
       `UPDATE spa_therapist SET
-         name   = COALESCE($1, name),
-         status = COALESCE($2, status)
-       WHERE id = $3 AND spa_id = $4 AND property_id = $5 RETURNING *`,
-      [name, status, id, spa_id, req.property_id]
+         name          = COALESCE($1, name),
+         status        = COALESCE($2, status),
+         clerk_user_id = CASE WHEN $3 THEN $4 ELSE clerk_user_id END
+       WHERE id = $5 AND spa_id = $6 AND property_id = $7 RETURNING *`,
+      [name, status, hasClerkUserId, clerk_user_id ?? null, id, spa_id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Therapist not found' });
     res.json(rows[0]);
@@ -596,6 +601,7 @@ function toLiveSpaBooking(row) {
     phone: row.contact_phone,
     treatment_name: row.treatment_name,
     therapist_name: row.therapist_name,
+    therapist_id: row.therapist_id,
     start_time: `${row.appointment_date instanceof Date ? row.appointment_date.toISOString().slice(0, 10) : row.appointment_date}T${row.start_time}`,
     duration_minutes: row.duration_mins,
     price: row.price,
@@ -654,7 +660,7 @@ async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawI
 
 async function listAppointmentsForProperty(req, res, next) {
   try {
-    const { cursor, limit, spa_id } = req.query;
+    const { cursor, limit, spa_id, therapist_id } = req.query;
     const take = Math.min(parseInt(limit, 10) || 30, 100);
     let query = `
       SELECT sa.*, st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
@@ -667,6 +673,9 @@ async function listAppointmentsForProperty(req, res, next) {
     // Optional -- the spa dashboard's own feed scopes to one spa; the
     // property dashboard omits this to show bookings across every spa.
     if (spa_id) { params.push(spa_id); query += ` AND st.spa_id = $${params.length}`; }
+    // Optional -- a therapist linked to their own login sees just their own
+    // appointments on the spa dashboard.
+    if (therapist_id) { params.push(therapist_id); query += ` AND sa.therapist_id = $${params.length}`; }
     if (cursor) { params.push(cursor); query += ` AND sa.created_at < $${params.length}`; }
     params.push(take);
     query += ` ORDER BY sa.created_at DESC LIMIT $${params.length}`;

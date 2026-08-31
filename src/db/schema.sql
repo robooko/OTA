@@ -358,11 +358,13 @@ CREATE TABLE IF NOT EXISTS spa_treatment (
 );
 
 CREATE TABLE IF NOT EXISTS spa_therapist (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  property_id UUID         NOT NULL REFERENCES property(id),
-  spa_id      UUID         NOT NULL REFERENCES spa(id),
-  name        VARCHAR(100) NOT NULL,
-  status      VARCHAR(20)  DEFAULT 'active'
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID         NOT NULL REFERENCES property(id),
+  spa_id        UUID         NOT NULL REFERENCES spa(id),
+  name          VARCHAR(100) NOT NULL,
+  status        VARCHAR(20)  DEFAULT 'active',
+  clerk_user_id VARCHAR(100) -- optional: this therapist's own staff login, so the
+                              -- spa dashboard can default to just their appointments
 );
 
 -- Per-therapist weekly working hours, mirrors service_period. Multiple rows
@@ -434,6 +436,7 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
 
 CREATE INDEX IF NOT EXISTS idx_spa_treatment_spa       ON spa_treatment(spa_id);
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_spa       ON spa_therapist(spa_id);
+CREATE INDEX IF NOT EXISTS idx_spa_therapist_clerk_user ON spa_therapist(clerk_user_id);
 CREATE INDEX IF NOT EXISTS idx_spa_slot_therapist_date ON spa_slot(therapist_id, slot_date);
 CREATE INDEX IF NOT EXISTS idx_spa_slot_treatment      ON spa_slot(treatment_id);
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_slot    ON spa_appointment(slot_id);
