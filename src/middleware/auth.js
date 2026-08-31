@@ -1,5 +1,6 @@
 const { createClerkClient, verifyToken } = require('@clerk/backend');
 const pool = require('../db');
+const { apiKeyRateLimiter } = require('./rateLimiter');
 
 if (!process.env.CLERK_SECRET_KEY) {
   throw new Error('CLERK_SECRET_KEY is required');
@@ -68,15 +69,17 @@ async function authenticateOrApiKey(req, res, next) {
     return res.status(401).json({ error: 'Missing or invalid Authorization header or X-Api-Key' });
   }
 
-  try {
-    const { rows } = await pool.query('SELECT id FROM property WHERE api_key = $1 AND api_key_enabled = true', [key]);
-    if (!rows.length) return res.status(401).json({ error: 'Missing or invalid Authorization header or X-Api-Key' });
-    req.property_id = rows[0].id;
-    req.auth_method = 'api_key'; // untrusted guest-proxy rail -- join codes enforced
-    next();
-  } catch (err) {
-    next(err);
-  }
+  return apiKeyRateLimiter(req, res, async () => {
+    try {
+      const { rows } = await pool.query('SELECT id FROM property WHERE api_key = $1 AND api_key_enabled = true', [key]);
+      if (!rows.length) return res.status(401).json({ error: 'Missing or invalid Authorization header or X-Api-Key' });
+      req.property_id = rows[0].id;
+      req.auth_method = 'api_key'; // untrusted guest-proxy rail -- join codes enforced
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
 }
 
 function requireRole(...roles) {
