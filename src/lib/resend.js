@@ -110,35 +110,36 @@ function formatAppointmentDate(appointmentDate) {
 
 // Shared by sendAppointmentConfirmation/sendAppointmentCancellation. `verb`
 // is 'confirmed' or 'cancelled'; `extraLines` go after the booking details,
-// before the address/phone block. `override` (caller-supplied {subject,
-// body}) replaces the generated text wholesale when present -- the booking
-// site holds the treatment/therapist/price copy already, so OTA doesn't
-// need to re-derive it. Sender identity/address is never overridable.
-async function sendAppointmentEmail(appointment, propertyName, verb, extraLines, override) {
+// before the address/phone block. Booking text is always generated here --
+// `branding` (caller-supplied {logo_url, brand_color}, validated by
+// spa.js's validateBranding) only affects the HTML header's logo/accent
+// color, is never persisted, and can't touch email content -- so a
+// compromised API key can pick which image/color show, nothing else.
+async function sendAppointmentEmail(appointment, propertyName, verb, extraLines, branding) {
   if (!client) throw new Error('Resend not configured');
   const dateLabel = formatAppointmentDate(appointment.appointment_date);
   const timeLabel = appointment.start_time.slice(0, 5);
   const price = formatMoney(appointment.price, appointment.property_currency);
-  const defaultSubject = `Booking ${verb} — ${appointment.treatment_name}, ${dateLabel} at ${timeLabel}`;
+  const subject = `Booking ${verb} — ${appointment.treatment_name}, ${dateLabel} at ${timeLabel}`;
 
-  let subject = defaultSubject;
-  let text;
-  if (override?.body) {
-    subject = override.subject || defaultSubject;
-    text = override.body;
-  } else {
-    const lines = [
-      `Hi ${appointment.contact_name},`,
-      '',
-      `${appointment.treatment_name} with ${appointment.therapist_name}`,
-      `${dateLabel} at ${timeLabel} (${appointment.duration_mins} mins) — ${price}`,
-      '',
-      ...extraLines,
-    ];
-    if (appointment.spa_address) lines.push(appointment.spa_address);
-    if (appointment.spa_phone) lines.push(appointment.spa_phone);
-    text = lines.join('\n');
-  }
+  const lines = [
+    `Hi ${appointment.contact_name},`,
+    '',
+    `${appointment.treatment_name} with ${appointment.therapist_name}`,
+    `${dateLabel} at ${timeLabel} (${appointment.duration_mins} mins) — ${price}`,
+    '',
+    ...extraLines,
+  ];
+  if (appointment.spa_address) lines.push(appointment.spa_address);
+  if (appointment.spa_phone) lines.push(appointment.spa_phone);
+  const text = lines.join('\n');
+
+  const accentColor = branding?.brand_color || '#e0e0e0';
+  const logoHtml = branding?.logo_url
+    ? `<div style="margin-bottom:20px;padding-bottom:16px;border-bottom:3px solid ${accentColor};">
+        <img src="${escapeHtml(branding.logo_url)}" alt="${escapeHtml(propertyName)}" style="max-height:48px;max-width:220px;display:block;">
+      </div>`
+    : '';
 
   const { data, error } = await client.emails.send({
     from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
@@ -146,7 +147,7 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
     ...(appointment.spa_contact_email ? { replyTo: appointment.spa_contact_email } : {}),
     subject,
     text,
-    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;">${textToHtmlParagraphs(text)}</div>`,
+    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;">${logoHtml}${textToHtmlParagraphs(text)}</div>`,
   });
   if (error) throw new Error(error.message);
   return data.id;
@@ -156,18 +157,18 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
 // sa.* plus therapist_name, treatment_name, duration_mins, price, spa_address,
 // spa_phone, spa_contact_email, property_currency. Never throws for a missing
 // contact_email -- callers only invoke this when one is present.
-function sendAppointmentConfirmation(appointment, propertyName, override) {
+function sendAppointmentConfirmation(appointment, propertyName, branding) {
   return sendAppointmentEmail(appointment, propertyName, 'confirmed', [
     'Need to change or cancel? Just give us a call.',
     '',
-  ], override);
+  ], branding);
 }
 
-function sendAppointmentCancellation(appointment, propertyName, override) {
+function sendAppointmentCancellation(appointment, propertyName, branding) {
   return sendAppointmentEmail(appointment, propertyName, 'cancelled', [
     'This booking has been cancelled. Get in touch if that was a mistake, or to book another time.',
     '',
-  ], override);
+  ], branding);
 }
 
 function verifyInboundWebhook(payload, headers) {
