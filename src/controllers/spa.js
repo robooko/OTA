@@ -674,7 +674,12 @@ async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawI
     .catch((err) => console.error('Ably publish failed:', err.message));
 
   if (full.contact_email) {
-    sendAppointmentConfirmation(full, full.property_name, branding, cancelUrl)
+    // A literal `{id}` in cancel_url resolves to the new appointment's id
+    // here -- the caller can't know it when supplying the URL (this email
+    // sends during creation), and the unguessable UUID lets the link work
+    // for guests with no account.
+    const resolvedCancelUrl = cancelUrl ? cancelUrl.replace('{id}', appointmentId) : cancelUrl;
+    sendAppointmentConfirmation(full, full.property_name, branding, resolvedCancelUrl)
       .then((emailId) => pool.query('UPDATE spa_appointment SET confirmation_resend_email_id = $1 WHERE id = $2', [emailId, appointmentId]))
       .catch((err) => console.error('Confirmation email failed:', err.message));
   }
