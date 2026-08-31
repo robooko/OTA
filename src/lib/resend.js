@@ -111,11 +111,11 @@ function formatAppointmentDate(appointmentDate) {
 // Shared by sendAppointmentConfirmation/sendAppointmentCancellation. `verb`
 // is 'confirmed' or 'cancelled'; `extraLines` go after the booking details,
 // before the address/phone block. Booking text is always generated here --
-// `branding` (caller-supplied {logo_url, brand_color}, validated by
-// spa.js's validateBranding) only affects the HTML header's logo/accent
-// color, is never persisted, and can't touch email content -- so a
-// compromised API key can pick which image/color show, nothing else.
-async function sendAppointmentEmail(appointment, propertyName, verb, extraLines, branding) {
+// `branding` (caller-supplied {logo_url, brand_color, header_bg}, validated
+// by spa.js's validateBranding) only affects the HTML header's logo/colors,
+// and `cancelUrl` (validated http(s) URL) only adds a cancel link/button --
+// neither is persisted, and neither can touch the booking text itself.
+async function sendAppointmentEmail(appointment, propertyName, verb, extraLines, branding, cancelUrl) {
   if (!client) throw new Error('Resend not configured');
   const dateLabel = formatAppointmentDate(appointment.appointment_date);
   const timeLabel = appointment.start_time.slice(0, 5);
@@ -130,16 +130,22 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
     '',
     ...extraLines,
   ];
+  if (cancelUrl) lines.push(`Cancel your booking: ${cancelUrl}`, '');
   if (appointment.spa_address) lines.push(appointment.spa_address);
   if (appointment.spa_phone) lines.push(appointment.spa_phone);
   const text = lines.join('\n');
 
   // HTML version: same content as `text`, laid out as header / greeting /
-  // details card / note / muted footer. Plain-text part above stays the
-  // single source of the wording.
+  // details card / note / cancel button / muted footer. Plain-text part
+  // above stays the single source of the wording.
   const accentColor = branding?.brand_color || '#e0e0e0';
+  // header_bg paints a box behind the logo so dark-ink logos survive
+  // dark-mode clients (which otherwise leave them on a dark ground).
+  const headerBoxStyle = branding?.header_bg
+    ? `background:${branding.header_bg};padding:18px;border-radius:8px;`
+    : 'padding-bottom:18px;';
   const logoHtml = branding?.logo_url
-    ? `<div style="text-align:center;margin-bottom:24px;padding-bottom:18px;border-bottom:3px solid ${accentColor};">
+    ? `<div style="text-align:center;margin-bottom:24px;${headerBoxStyle}border-bottom:3px solid ${accentColor};">
         <img src="${escapeHtml(branding.logo_url)}" alt="${escapeHtml(propertyName)}" style="max-height:64px;max-width:260px;display:inline-block;">
       </div>`
     : '';
@@ -155,6 +161,12 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
     .filter(Boolean)
     .map((l) => `<p style="margin:0 0 12px;">${escapeHtml(l)}</p>`)
     .join('');
+
+  const cancelHtml = cancelUrl
+    ? `<div style="margin:20px 0;">
+        <a href="${escapeHtml(cancelUrl)}" style="display:inline-block;background:${branding?.brand_color || '#1a1a1a'};color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:6px;">Cancel booking</a>
+      </div>`
+    : '';
 
   const footerParts = [];
   if (appointment.spa_address) footerParts.push(escapeHtml(appointment.spa_address));
@@ -174,6 +186,7 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
       <p style="margin:0 0 16px;">Hi ${escapeHtml(appointment.contact_name)},</p>
       ${detailsHtml}
       ${noteHtml}
+      ${cancelHtml}
       ${footerHtml}
     </div>`,
   });
@@ -185,11 +198,13 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
 // sa.* plus therapist_name, treatment_name, duration_mins, price, spa_address,
 // spa_phone, spa_contact_email, property_currency. Never throws for a missing
 // contact_email -- callers only invoke this when one is present.
-function sendAppointmentConfirmation(appointment, propertyName, branding) {
+function sendAppointmentConfirmation(appointment, propertyName, branding, cancelUrl) {
   return sendAppointmentEmail(appointment, propertyName, 'confirmed', [
-    'Need to change or cancel? Just give us a call.',
+    cancelUrl
+      ? 'Need to change or cancel? Use the link below.'
+      : 'Need to change or cancel? Just give us a call.',
     '',
-  ], branding);
+  ], branding, cancelUrl);
 }
 
 function sendAppointmentCancellation(appointment, propertyName, branding) {

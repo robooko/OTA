@@ -13,18 +13,22 @@ const { sendAppointmentConfirmation, sendAppointmentCancellation } = require('..
 
 const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i;
 
-// Validates the optional caller-supplied {logo_url, brand_color} used to
-// style the confirmation/cancellation email header. Passed straight through
-// per-request -- never persisted -- so OTA doesn't need to hold a copy of
-// the property's branding. Returns an error string, or null when `branding`
-// is absent/valid.
+// Validates the optional caller-supplied {logo_url, brand_color, header_bg}
+// used to style the confirmation/cancellation email header. Passed straight
+// through per-request -- never persisted -- so OTA doesn't need to hold a
+// copy of the property's branding. header_bg paints behind the logo so a
+// dark-ink logo stays legible in dark-mode email clients. Returns an error
+// string, or null when `branding` is absent/valid.
 function validateBranding(branding) {
   if (branding === undefined || branding === null) return null;
   if (typeof branding !== 'object' || Array.isArray(branding)) return 'branding must be an object';
-  const { logo_url, brand_color } = branding;
+  const { logo_url, brand_color, header_bg } = branding;
   if (logo_url !== undefined && !isValidUrl(logo_url)) return 'branding.logo_url must be a valid http(s) URL';
   if (brand_color !== undefined && !HEX_COLOR_RE.test(brand_color)) {
     return 'branding.brand_color must be a hex color, e.g. #1a1a1a';
+  }
+  if (header_bg !== undefined && !HEX_COLOR_RE.test(header_bg)) {
+    return 'branding.header_bg must be a hex color, e.g. #ffffff';
   }
   return null;
 }
@@ -655,7 +659,7 @@ async function getFullAppointmentForEmail(appointmentId) {
 // createAppointment and updateAppointment's cancellation path. Never throws
 // -- every failure is caught and logged, matching the existing Ably
 // .catch() convention in this file.
-async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawInsertedRow, branding) {
+async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawInsertedRow, branding, cancelUrl) {
   publishNewAppointment(spaId, rawInsertedRow).catch((err) => console.error('Ably publish failed:', err.message));
 
   const full = await getFullAppointmentForEmail(appointmentId).catch((err) => {
@@ -670,7 +674,7 @@ async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawI
     .catch((err) => console.error('Ably publish failed:', err.message));
 
   if (full.contact_email) {
-    sendAppointmentConfirmation(full, full.property_name, branding)
+    sendAppointmentConfirmation(full, full.property_name, branding, cancelUrl)
       .then((emailId) => pool.query('UPDATE spa_appointment SET confirmation_resend_email_id = $1 WHERE id = $2', [emailId, appointmentId]))
       .catch((err) => console.error('Confirmation email failed:', err.message));
   }
@@ -764,7 +768,7 @@ async function getAppointment(req, res, next) {
 // appointment -- slot-based or computed -- has them.
 async function createAppointmentFromSlot(req, res, next) {
   const { spa_id } = req.params;
-  const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, branding } = req.body;
+  const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, branding, cancel_url } = req.body;
 
   const client = await pool.connect();
   try {
@@ -805,7 +809,7 @@ async function createAppointmentFromSlot(req, res, next) {
     );
 
     await client.query('COMMIT');
-    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0], branding);
+    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0], branding, cancel_url);
     res.status(201).json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -859,7 +863,7 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // cleverness).
 async function createAppointmentFromAvailability(req, res, next) {
   const { spa_id } = req.params;
-  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, branding } = req.body;
+  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, branding, cancel_url } = req.body;
 
   if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
   if (!isValidTime(time)) return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
@@ -930,7 +934,7 @@ async function createAppointmentFromAvailability(req, res, next) {
     );
 
     await client.query('COMMIT');
-    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0], branding);
+    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0], branding, cancel_url);
     res.status(201).json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -941,7 +945,7 @@ async function createAppointmentFromAvailability(req, res, next) {
 }
 
 async function createAppointment(req, res, next) {
-  const { slot_id, treatment_id, date, time, contact_name, branding } = req.body;
+  const { slot_id, treatment_id, date, time, contact_name, branding, cancel_url } = req.body;
 
   if (slot_id && treatment_id) {
     return res.status(400).json({ error: 'Provide either slot_id or treatment_id, not both' });
@@ -950,6 +954,10 @@ async function createAppointment(req, res, next) {
 
   const brandingError = validateBranding(branding);
   if (brandingError) return res.status(400).json({ error: brandingError });
+
+  if (cancel_url !== undefined && !isValidUrl(cancel_url)) {
+    return res.status(400).json({ error: 'cancel_url must be a valid http(s) URL' });
+  }
 
   if (slot_id) return createAppointmentFromSlot(req, res, next);
 
