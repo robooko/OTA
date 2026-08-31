@@ -872,26 +872,23 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
   return r.within_hours && !r.has_time_off && !r.has_overlap && !r.is_past;
 }
 
-// New computed-availability path: books against working hours rather than a
-// pre-generated slot. therapist_id is optional -- when omitted, the server
-// picks the free therapist with the lowest name (deterministic, no
-// cleverness).
-async function createAppointmentFromAvailability(req, res, next) {
-  const { spa_id } = req.params;
-  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, branding, cancel_url } = req.body;
-
-  if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
-  if (!isValidTime(time)) return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
-
+// Core of the computed-availability booking path, shared by the HTTP handler
+// below and the AI reply pipeline (booking-on-approval). Books against
+// working hours rather than a pre-generated slot. therapist_id is optional --
+// when omitted, picks the free therapist with the lowest name (deterministic,
+// no cleverness). Returns { ok: true, appointment } or { ok: false, code }
+// with code one of 'treatment_not_found' | 'guest_not_found' |
+// 'therapist_not_found' | 'unavailable'.
+async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, branding, cancel_url }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const treatmentRes = await client.query(
       "SELECT id, duration_mins FROM spa_treatment WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'",
-      [treatment_id, spa_id, req.property_id]
+      [treatment_id, spa_id, property_id]
     );
-    if (!treatmentRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Treatment not found' }); }
+    if (!treatmentRes.rows.length) { await client.query('ROLLBACK'); return { ok: false, code: 'treatment_not_found' }; }
     const durationMins = treatmentRes.rows[0].duration_mins;
 
     const propertyRes = await client.query(
@@ -901,8 +898,8 @@ async function createAppointmentFromAvailability(req, res, next) {
     const timezone = propertyRes.rows[0].timezone;
 
     if (guest_id) {
-      const guestRes = await client.query('SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, req.property_id]);
-      if (!guestRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Guest not found' }); }
+      const guestRes = await client.query('SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, property_id]);
+      if (!guestRes.rows.length) { await client.query('ROLLBACK'); return { ok: false, code: 'guest_not_found' }; }
     }
 
     let chosenTherapistId = null;
@@ -912,16 +909,16 @@ async function createAppointmentFromAvailability(req, res, next) {
       // flow.
       const tRes = await client.query(
         "SELECT id FROM spa_therapist WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active' FOR UPDATE",
-        [therapist_id, spa_id, req.property_id]
+        [therapist_id, spa_id, property_id]
       );
-      if (!tRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Therapist not found' }); }
+      if (!tRes.rows.length) { await client.query('ROLLBACK'); return { ok: false, code: 'therapist_not_found' }; }
       if (await isTherapistFree(client, therapist_id, date, time, durationMins, timezone)) {
         chosenTherapistId = therapist_id;
       }
     } else {
       const allRes = await client.query(
         "SELECT id FROM spa_therapist WHERE spa_id = $1 AND property_id = $2 AND status = 'active' ORDER BY name FOR UPDATE",
-        [spa_id, req.property_id]
+        [spa_id, property_id]
       );
       for (const t of allRes.rows) {
         if (await isTherapistFree(client, t.id, date, time, durationMins, timezone)) {
@@ -933,7 +930,7 @@ async function createAppointmentFromAvailability(req, res, next) {
 
     if (!chosenTherapistId) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Time is not available' });
+      return { ok: false, code: 'unavailable' };
     }
 
     const endTime = addMinutesToTime(time, durationMins);
@@ -943,19 +940,48 @@ async function createAppointmentFromAvailability(req, res, next) {
           guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
       [
-        req.property_id, treatment_id, chosenTherapistId, date, time, endTime,
+        property_id, treatment_id, chosenTherapistId, date, time, endTime,
         guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
       ]
     );
 
     await client.query('COMMIT');
-    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0], branding, cancel_url);
-    res.status(201).json(rows[0]);
+    await publishAndEmailAfterCreate(spa_id, property_id, rows[0].id, rows[0], branding, cancel_url);
+    return { ok: true, appointment: rows[0] };
   } catch (err) {
     await client.query('ROLLBACK');
-    next(err);
+    throw err;
   } finally {
     client.release();
+  }
+}
+
+const BOOK_FAILURE_HTTP = {
+  treatment_not_found: [404, 'Treatment not found'],
+  guest_not_found: [404, 'Guest not found'],
+  therapist_not_found: [404, 'Therapist not found'],
+  unavailable: [409, 'Time is not available'],
+};
+
+async function createAppointmentFromAvailability(req, res, next) {
+  const { spa_id } = req.params;
+  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, branding, cancel_url } = req.body;
+
+  if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
+  if (!isValidTime(time)) return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
+
+  try {
+    const result = await bookFromAvailability({
+      property_id: req.property_id, spa_id, treatment_id, therapist_id, date, time,
+      guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, branding, cancel_url,
+    });
+    if (!result.ok) {
+      const [status, error] = BOOK_FAILURE_HTTP[result.code];
+      return res.status(status).json({ error });
+    }
+    res.status(201).json(result.appointment);
+  } catch (err) {
+    next(err);
   }
 }
 
@@ -1050,6 +1076,7 @@ module.exports = {
   listTherapistTimeOff, createTherapistTimeOff, deleteTherapistTimeOff,
   searchSpaAvailability,
   findSpaAvailability,
+  bookFromAvailability,
   listSlots, bulkCreateSlots, searchSlots, updateSlot,
   listAppointments, getAppointment, createAppointment, updateAppointment,
   getSpaAblyToken,

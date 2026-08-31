@@ -3,11 +3,14 @@
 // shared outbound path. Owns every DB write to event_inquiry_ai_draft.
 //
 // Import graph (no cycles): this -> db, ably, aiReplies (SDK only),
-// inquiryReplies (send path). Controllers import this; it never imports them.
+// inquiryReplies (send path), controllers/spa (bookFromAvailability only --
+// spa never imports this module or eventInquiries). eventInquiries imports
+// this; it never imports eventInquiries.
 const pool = require('../db');
 const { publishAiDraftReady, publishAiDraftUpdated } = require('./ably');
 const { isConfigured, generateInquiryReply, AiReplyError, MODEL } = require('./aiReplies');
 const { loadInquiryWithProperty, sendOutboundReply } = require('./inquiryReplies');
+const { bookFromAvailability } = require('../controllers/spa');
 
 // Hard cap on unreviewed sends per inquiry. Defends against an auto-responder
 // on the guest's side (out-of-office bouncing our reply back, each bounce
@@ -23,6 +26,18 @@ class DraftNotPendingError extends Error {
   constructor(draftId) {
     super('Draft is not pending');
     this.name = 'DraftNotPendingError';
+    this.draftId = draftId;
+  }
+}
+
+// Thrown when a draft's proposed booking can't be made at send time (slot
+// taken since the draft was written, treatment renamed, ...). The draft is
+// already back in 'pending' with the error recorded; controllers map it to
+// 409 so the reviewer sees why nothing was sent.
+class ProposedBookingError extends Error {
+  constructor(draftId, message) {
+    super(message);
+    this.name = 'ProposedBookingError';
     this.draftId = draftId;
   }
 }
@@ -82,15 +97,21 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
       thread,
       triggerType,
     });
+    // A proposal is only bookable against a spa diary, so it's dropped (not
+    // stored) for inquiries without one -- the draft text then over-promises,
+    // which the reviewer catches, rather than approve silently doing nothing.
+    const proposal = inquiry.spa_id ? result.proposed_booking : null;
     ({ rows: [draftRow] } = await pool.query(
       `INSERT INTO event_inquiry_ai_draft
          (property_id, event_inquiry_id, trigger_type, trigger_message_id, body, quality_score,
           requires_human, requires_human_reason, summary, status, model,
-          input_tokens, output_tokens, cache_read_input_tokens)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12, $13) RETURNING *`,
+          input_tokens, output_tokens, cache_read_input_tokens,
+          proposed_treatment_name, proposed_date, proposed_time)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
       [inquiry.property_id, inquiry.id, triggerType, triggerMessageId, result.body, result.quality_score,
         result.requires_human, result.requires_human_reason, result.summary, result.model,
-        result.usage.input_tokens, result.usage.output_tokens, result.usage.cache_read_input_tokens]
+        result.usage.input_tokens, result.usage.output_tokens, result.usage.cache_read_input_tokens,
+        proposal?.treatment_name ?? null, proposal?.date ?? null, proposal?.time ?? null]
     ));
   } catch (err) {
     if (!(err instanceof AiReplyError)) throw err; // a DB error is a real 500, not a model failure
@@ -110,6 +131,42 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
   return draftRow;
 }
 
+// Creates the spa appointment a claimed draft proposed. Treatment is matched
+// by exact name (case-insensitive) against the inquiry's spa -- the model is
+// told to copy the name from check_availability results verbatim, so a miss
+// means the menu changed since the draft was written.
+async function bookProposedSlot(claimedDraft, inquiry) {
+  const { rows: [treatment] } = await pool.query(
+    "SELECT id FROM spa_treatment WHERE spa_id = $1 AND status = 'active' AND lower(name) = lower($2)",
+    [inquiry.spa_id, claimedDraft.proposed_treatment_name]
+  );
+  if (!treatment) {
+    throw new ProposedBookingError(claimedDraft.id, `Proposed treatment "${claimedDraft.proposed_treatment_name}" no longer matches the menu`);
+  }
+  const result = await bookFromAvailability({
+    property_id: inquiry.property_id,
+    spa_id: inquiry.spa_id,
+    treatment_id: treatment.id,
+    date: claimedDraft.proposed_date_text,
+    time: claimedDraft.proposed_time_text.slice(0, 5),
+    contact_name: inquiry.name,
+    contact_email: inquiry.email,
+    contact_phone: inquiry.phone,
+    notes: `Booked from AI reply (draft ${claimedDraft.id})`,
+  });
+  if (!result.ok) {
+    const why = result.code === 'unavailable'
+      ? `Proposed slot ${claimedDraft.proposed_date_text} ${claimedDraft.proposed_time_text.slice(0, 5)} is no longer available`
+      : `Proposed booking failed (${result.code})`;
+    throw new ProposedBookingError(claimedDraft.id, why);
+  }
+  await pool.query(
+    'UPDATE event_inquiry_ai_draft SET booked_appointment_id = $2 WHERE id = $1',
+    [claimedDraft.id, result.appointment.id]
+  );
+  return result.appointment;
+}
+
 // Sends a pending draft to the guest. body may differ from draft.body when
 // the approver edited it. sender is the reviewing staff member (null for an
 // auto-send). auto marks the draft as sent without review.
@@ -124,10 +181,30 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
 async function sendDraft({ draft, inquiry, body, sender = null, auto = false }) {
   const { rows: claimed } = await pool.query(
     `UPDATE event_inquiry_ai_draft SET status = 'sending', error = NULL
-     WHERE id = $1 AND status = 'pending' RETURNING *`,
+     WHERE id = $1 AND status = 'pending'
+     RETURNING *, proposed_date::text AS proposed_date_text, proposed_time::text AS proposed_time_text`,
     [draft.id]
   );
   if (!claimed.length) throw new DraftNotPendingError(draft.id);
+
+  // Book the proposed slot before sending, so the reply's "you're booked in"
+  // is true by the time the guest reads it. booked_appointment_id makes this
+  // idempotent: a retry after a Resend failure won't book twice. Failure puts
+  // the draft back to pending with the reason -- nothing was sent, and the
+  // reviewer (or the next guest message) takes it from there.
+  const c = claimed[0];
+  if (c.proposed_treatment_name && c.proposed_date_text && c.proposed_time_text && !c.booked_appointment_id && inquiry.spa_id) {
+    try {
+      await bookProposedSlot(c, inquiry);
+    } catch (err) {
+      const reason = err instanceof ProposedBookingError ? err.message : `Booking failed: ${err.message}`;
+      await pool.query(
+        `UPDATE event_inquiry_ai_draft SET status = 'pending', error = $2 WHERE id = $1`,
+        [draft.id, reason]
+      ).catch((dbErr) => console.error('Failed to release draft claim:', dbErr.message));
+      throw err;
+    }
+  }
 
   let sent;
   try {
@@ -205,5 +282,5 @@ async function runAiReply({ inquiryId, triggerType, triggerMessageId = null }) {
 
 module.exports = {
   runAiReply, generateDraft, sendDraft, supersedePendingDrafts,
-  DraftNotPendingError, MAX_AUTO_SENT_PER_INQUIRY,
+  DraftNotPendingError, ProposedBookingError, MAX_AUTO_SENT_PER_INQUIRY,
 };

@@ -59,6 +59,15 @@ const ReplyAssessment = z.object({
   quality_score: z.number().int().describe(
     'Self-assessed confidence that the draft fully and correctly answers the guest using only the venue instructions, 0-100 per the scoring rubric. Never above 40 when requires_human is true.'
   ),
+  proposed_booking_treatment: z.string().describe(
+    'See BOOKING: the exact treatment name from check_availability results, only when the guest has settled on a specific bookable slot. Empty string otherwise.'
+  ),
+  proposed_booking_date: z.string().describe(
+    'The proposed booking date, YYYY-MM-DD. Empty string when no booking is proposed.'
+  ),
+  proposed_booking_time: z.string().describe(
+    'The proposed booking start time, HH:MM 24-hour. Empty string when no booking is proposed.'
+  ),
 });
 
 // Frozen text: byte-stable across every property and call, so it sits first
@@ -69,7 +78,12 @@ FACTS
 - The only facts you may state about the venue -- capacity, spaces, menus, packages, prices, minimum spends, availability, opening days, policies, deposits, contact details -- are those given in <venue_instructions>. Never invent, estimate or "typically" a fact that is not there.
 - If the guest asks something the instructions do not cover, do not guess: acknowledge the question, say the team will confirm, and set requires_human to true if that missing fact is essential to a useful reply.
 - Never quote or agree a price unless the instructions explicitly state it.
-- You cannot create, change or cancel a booking -- no tool does this. Never tell the guest a booking is made, confirmed, or that they are "all set". When the guest has settled on a specific slot, say it will be booked in (per the instructions) and set requires_human to true so staff actually make the booking before the reply goes out.
+
+BOOKING
+- When the guest has clearly settled on one specific treatment, date and start time, and check_availability confirms that exact slot is open in this same conversation turn, propose the booking: fill proposed_booking_treatment (the treatment's exact name as the venue lists it), proposed_booking_date (YYYY-MM-DD) and proposed_booking_time (HH:MM, 24-hour). The system creates the real booking at the moment your reply is approved and sent -- so the reply should read as a confirmation ("you're booked in for...").
+- A proposal needs all three settled by the guest, not assumed by you: if the treatment, date or time is still open, ask for it instead and leave all three fields empty.
+- When no booking is proposed, never tell the guest a booking is made, confirmed, or that they are "all set" -- you cannot change or cancel bookings either. Say it will be booked in, per the instructions.
+- Changes and cancellations of existing bookings are for staff: acknowledge, set requires_human to true.
 - Availability is handled under TOOLS below, not here: without a check_availability tool, never confirm availability for a date.
 
 TOOLS
@@ -290,7 +304,19 @@ async function generateInquiryReply({ property, inquiry, restaurant = null, spa 
   let score = clampScore(parsed.quality_score);
   if (requiresHuman) score = Math.min(score, 40); // enforce the rubric even if the model forgets
 
+  // A proposal is all-or-nothing: any missing or malformed field means no
+  // booking happens on approval (the draft then reads as an over-promise a
+  // reviewer can catch, rather than us booking something half-specified).
+  const treatment = parsed.proposed_booking_treatment?.trim();
+  const date = parsed.proposed_booking_date?.trim();
+  const time = parsed.proposed_booking_time?.trim();
+  const proposedBooking =
+    treatment && /^\d{4}-\d{2}-\d{2}$/.test(date ?? '') && /^\d{2}:\d{2}$/.test(time ?? '')
+      ? { treatment_name: treatment, date, time }
+      : null;
+
   return {
+    proposed_booking: proposedBooking,
     body: parsed.body.trim(),
     quality_score: score,
     requires_human: requiresHuman,

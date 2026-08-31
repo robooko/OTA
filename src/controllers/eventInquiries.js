@@ -14,7 +14,7 @@ const {
 const { verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
 const { loadInquiryWithProperty, sendOutboundReply } = require('../lib/inquiryReplies');
 const { isConfigured: aiConfigured } = require('../lib/aiReplies');
-const { runAiReply, supersedePendingDrafts, generateDraft, sendDraft, DraftNotPendingError } = require('../lib/aiReplyPipeline');
+const { runAiReply, supersedePendingDrafts, generateDraft, sendDraft, DraftNotPendingError, ProposedBookingError } = require('../lib/aiReplyPipeline');
 
 const AI_DRAFT_STATUSES = ['pending', 'sending', 'sent', 'rejected', 'superseded', 'failed'];
 
@@ -385,6 +385,7 @@ async function approveAiDraft(req, res, next) {
       result = await sendDraft({ draft, inquiry, body: body?.trim() ?? draft.body, sender, auto: false });
     } catch (err) {
       if (err instanceof DraftNotPendingError) return res.status(409).json({ error: 'Draft is not pending' });
+      if (err instanceof ProposedBookingError) return res.status(409).json({ error: err.message });
       throw err;
     }
     res.json(result);

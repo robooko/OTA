@@ -774,6 +774,10 @@ CREATE TABLE IF NOT EXISTS event_inquiry_ai_draft (
   output_tokens           INT,
   cache_read_input_tokens INT,
   error                   TEXT,
+  proposed_treatment_name VARCHAR(255), -- model-proposed slot; booked on approval (see aiReplyPipeline)
+  proposed_date           DATE,
+  proposed_time           TIME,
+  booked_appointment_id   UUID REFERENCES spa_appointment(id), -- set once booked; guards send retries from double-booking
   created_at              TIMESTAMPTZ DEFAULT now(),
   CONSTRAINT event_inquiry_ai_draft_trigger_type_check
     CHECK (trigger_type IN ('new_inquiry', 'inbound_reply', 'manual')),
