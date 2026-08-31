@@ -11,6 +11,22 @@ const {
 } = require('../lib/ably');
 const { sendAppointmentConfirmation, sendAppointmentCancellation } = require('../lib/resend');
 
+// Validates the optional caller-supplied {subject, body} that overrides the
+// generated confirmation/cancellation email text. Returns an error string,
+// or null when `email` is absent/valid. Length caps guard against a leaked
+// API key being used to push oversized content through OTA's sending domain.
+function validateEmailOverride(email) {
+  if (email === undefined || email === null) return null;
+  if (typeof email !== 'object' || Array.isArray(email)) return 'email must be an object';
+  const { subject, body } = email;
+  if (typeof body !== 'string' || !body.trim()) return 'email.body is required and must be a non-empty string';
+  if (body.length > 5000) return 'email.body must be 5000 characters or fewer';
+  if (subject !== undefined && (typeof subject !== 'string' || subject.length > 200)) {
+    return 'email.subject must be a string of 200 characters or fewer';
+  }
+  return null;
+}
+
 // Steps a 'YYYY-MM-DD' string forward by whole days via UTC epoch math --
 // `new Date(str); d.setDate(d.getDate() + 1)` looks equivalent but
 // setDate() operates in the Node process's LOCAL timezone, so the date
@@ -637,7 +653,7 @@ async function getFullAppointmentForEmail(appointmentId) {
 // createAppointment and updateAppointment's cancellation path. Never throws
 // -- every failure is caught and logged, matching the existing Ably
 // .catch() convention in this file.
-async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawInsertedRow) {
+async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawInsertedRow, emailOverride) {
   publishNewAppointment(spaId, rawInsertedRow).catch((err) => console.error('Ably publish failed:', err.message));
 
   const full = await getFullAppointmentForEmail(appointmentId).catch((err) => {
@@ -652,7 +668,7 @@ async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawI
     .catch((err) => console.error('Ably publish failed:', err.message));
 
   if (full.contact_email) {
-    sendAppointmentConfirmation(full, full.property_name)
+    sendAppointmentConfirmation(full, full.property_name, emailOverride)
       .then((emailId) => pool.query('UPDATE spa_appointment SET confirmation_resend_email_id = $1 WHERE id = $2', [emailId, appointmentId]))
       .catch((err) => console.error('Confirmation email failed:', err.message));
   }
@@ -746,7 +762,7 @@ async function getAppointment(req, res, next) {
 // appointment -- slot-based or computed -- has them.
 async function createAppointmentFromSlot(req, res, next) {
   const { spa_id } = req.params;
-  const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes } = req.body;
+  const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, email } = req.body;
 
   const client = await pool.connect();
   try {
@@ -787,7 +803,7 @@ async function createAppointmentFromSlot(req, res, next) {
     );
 
     await client.query('COMMIT');
-    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0]);
+    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0], email);
     res.status(201).json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -841,7 +857,7 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // cleverness).
 async function createAppointmentFromAvailability(req, res, next) {
   const { spa_id } = req.params;
-  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes } = req.body;
+  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, email } = req.body;
 
   if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
   if (!isValidTime(time)) return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
@@ -912,7 +928,7 @@ async function createAppointmentFromAvailability(req, res, next) {
     );
 
     await client.query('COMMIT');
-    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0]);
+    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0], email);
     res.status(201).json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -923,12 +939,15 @@ async function createAppointmentFromAvailability(req, res, next) {
 }
 
 async function createAppointment(req, res, next) {
-  const { slot_id, treatment_id, date, time, contact_name } = req.body;
+  const { slot_id, treatment_id, date, time, contact_name, email } = req.body;
 
   if (slot_id && treatment_id) {
     return res.status(400).json({ error: 'Provide either slot_id or treatment_id, not both' });
   }
   if (!contact_name) return res.status(400).json({ error: 'contact_name is required' });
+
+  const emailError = validateEmailOverride(email);
+  if (emailError) return res.status(400).json({ error: emailError });
 
   if (slot_id) return createAppointmentFromSlot(req, res, next);
 
@@ -941,7 +960,10 @@ async function createAppointment(req, res, next) {
 async function updateAppointment(req, res, next) {
   try {
     const { spa_id, id } = req.params;
-    const { status, notes } = req.body;
+    const { status, notes, email } = req.body;
+
+    const emailError = validateEmailOverride(email);
+    if (emailError) return res.status(400).json({ error: emailError });
 
     const beforeRes = await pool.query(
       `SELECT sa.status FROM spa_appointment sa
@@ -985,7 +1007,7 @@ async function updateAppointment(req, res, next) {
           .catch((err) => console.error('Ably publish failed:', err.message));
 
         if (rows[0].status === 'cancelled' && full.contact_email) {
-          sendAppointmentCancellation(full, full.property_name)
+          sendAppointmentCancellation(full, full.property_name, email)
             .catch((err) => console.error('Cancellation email failed:', err.message));
         }
       }

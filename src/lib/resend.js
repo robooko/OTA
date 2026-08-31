@@ -110,25 +110,35 @@ function formatAppointmentDate(appointmentDate) {
 
 // Shared by sendAppointmentConfirmation/sendAppointmentCancellation. `verb`
 // is 'confirmed' or 'cancelled'; `extraLines` go after the booking details,
-// before the address/phone block.
-async function sendAppointmentEmail(appointment, propertyName, verb, extraLines) {
+// before the address/phone block. `override` (caller-supplied {subject,
+// body}) replaces the generated text wholesale when present -- the booking
+// site holds the treatment/therapist/price copy already, so OTA doesn't
+// need to re-derive it. Sender identity/address is never overridable.
+async function sendAppointmentEmail(appointment, propertyName, verb, extraLines, override) {
   if (!client) throw new Error('Resend not configured');
   const dateLabel = formatAppointmentDate(appointment.appointment_date);
   const timeLabel = appointment.start_time.slice(0, 5);
   const price = formatMoney(appointment.price, appointment.property_currency);
-  const subject = `Booking ${verb} — ${appointment.treatment_name}, ${dateLabel} at ${timeLabel}`;
+  const defaultSubject = `Booking ${verb} — ${appointment.treatment_name}, ${dateLabel} at ${timeLabel}`;
 
-  const lines = [
-    `Hi ${appointment.contact_name},`,
-    '',
-    `${appointment.treatment_name} with ${appointment.therapist_name}`,
-    `${dateLabel} at ${timeLabel} (${appointment.duration_mins} mins) — ${price}`,
-    '',
-    ...extraLines,
-  ];
-  if (appointment.spa_address) lines.push(appointment.spa_address);
-  if (appointment.spa_phone) lines.push(appointment.spa_phone);
-  const text = lines.join('\n');
+  let subject = defaultSubject;
+  let text;
+  if (override?.body) {
+    subject = override.subject || defaultSubject;
+    text = override.body;
+  } else {
+    const lines = [
+      `Hi ${appointment.contact_name},`,
+      '',
+      `${appointment.treatment_name} with ${appointment.therapist_name}`,
+      `${dateLabel} at ${timeLabel} (${appointment.duration_mins} mins) — ${price}`,
+      '',
+      ...extraLines,
+    ];
+    if (appointment.spa_address) lines.push(appointment.spa_address);
+    if (appointment.spa_phone) lines.push(appointment.spa_phone);
+    text = lines.join('\n');
+  }
 
   const { data, error } = await client.emails.send({
     from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
@@ -146,18 +156,18 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines)
 // sa.* plus therapist_name, treatment_name, duration_mins, price, spa_address,
 // spa_phone, spa_contact_email, property_currency. Never throws for a missing
 // contact_email -- callers only invoke this when one is present.
-function sendAppointmentConfirmation(appointment, propertyName) {
+function sendAppointmentConfirmation(appointment, propertyName, override) {
   return sendAppointmentEmail(appointment, propertyName, 'confirmed', [
     'Need to change or cancel? Just give us a call.',
     '',
-  ]);
+  ], override);
 }
 
-function sendAppointmentCancellation(appointment, propertyName) {
+function sendAppointmentCancellation(appointment, propertyName, override) {
   return sendAppointmentEmail(appointment, propertyName, 'cancelled', [
     'This booking has been cancelled. Get in touch if that was a mistake, or to book another time.',
     '',
-  ]);
+  ], override);
 }
 
 function verifyInboundWebhook(payload, headers) {
