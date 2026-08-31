@@ -704,6 +704,7 @@ CREATE TABLE IF NOT EXISTS event_inquiry (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id   UUID         NOT NULL REFERENCES property(id),
   restaurant_id UUID         REFERENCES restaurant(id),
+  spa_id        UUID         REFERENCES spa(id), -- mirrors restaurant_id: optional, which module (if any) this enquiry is about
   name          VARCHAR(100) NOT NULL,
   email         VARCHAR(255) NOT NULL,
   phone         VARCHAR(30),
@@ -717,6 +718,7 @@ CREATE TABLE IF NOT EXISTS event_inquiry (
   created_at    TIMESTAMPTZ  DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_event_inquiry_property ON event_inquiry(property_id);
+CREATE INDEX IF NOT EXISTS idx_event_inquiry_spa      ON event_inquiry(spa_id);
 
 -- ── Event Inquiry Messages ──────────────────────────────────────────────────
 

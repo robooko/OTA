@@ -59,13 +59,16 @@ async function supersedePendingDrafts(inquiryId, { exceptDraftId = null } = {}) 
 async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) {
   await supersedePendingDrafts(inquiry.id);
 
-  const [{ rows: thread }, { rows: restaurantRows }] = await Promise.all([
+  const [{ rows: thread }, { rows: restaurantRows }, { rows: spaRows }] = await Promise.all([
     pool.query(
       'SELECT direction, body, created_at FROM event_inquiry_message WHERE event_inquiry_id = $1 ORDER BY created_at ASC',
       [inquiry.id]
     ),
     inquiry.restaurant_id
       ? pool.query('SELECT name, description FROM restaurant WHERE id = $1', [inquiry.restaurant_id])
+      : Promise.resolve({ rows: [] }),
+    inquiry.spa_id
+      ? pool.query('SELECT name, description FROM spa WHERE id = $1', [inquiry.spa_id])
       : Promise.resolve({ rows: [] }),
   ]);
 
@@ -75,6 +78,7 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
       property: { name: inquiry.property_name, ai_reply_instructions: inquiry.ai_reply_instructions },
       inquiry,
       restaurant: restaurantRows[0] ?? null,
+      spa: spaRows[0] ?? null,
       thread,
       triggerType,
     });

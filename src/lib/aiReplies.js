@@ -110,7 +110,7 @@ THREAD
 // tags early. Only the exact closing sequences are neutralised, so ordinary
 // punctuation ("<3", "a < b") survives untouched.
 function neutraliseTags(text) {
-  return String(text ?? '').replace(/<\/?(inquiry|thread|message|field|venue_instructions|venue|restaurant|trigger)\b/gi, (m) => m.replace('<', '‹'));
+  return String(text ?? '').replace(/<\/?(inquiry|thread|message|field|venue_instructions|venue|restaurant|spa|trigger)\b/gi, (m) => m.replace('<', '‹'));
 }
 
 function field(name, value) {
@@ -120,12 +120,17 @@ function field(name, value) {
 
 // Per-property block. Stable between calls for the same property (instructions
 // only change when an admin edits them), so it's the second cached segment.
-function buildPropertyBlock(property, restaurant) {
+function buildPropertyBlock(property, restaurant, spa) {
   let text = `<venue name="${neutraliseTags(property.name)}">\n`;
   if (restaurant) {
     text += `  <restaurant name="${neutraliseTags(restaurant.name)}">`;
     if (restaurant.description) text += neutraliseTags(restaurant.description);
     text += '</restaurant>\n';
+  }
+  if (spa) {
+    text += `  <spa name="${neutraliseTags(spa.name)}">`;
+    if (spa.description) text += neutraliseTags(spa.description);
+    text += '</spa>\n';
   }
   text += '</venue>\n\n<venue_instructions>\n';
   text += property.ai_reply_instructions?.trim()
@@ -188,7 +193,7 @@ function findCorruption(text) {
 // model, usage: { input_tokens, output_tokens, cache_read_input_tokens } } or
 // throws AiReplyError. Callers persist failures rather than letting them
 // escape into a request path.
-async function generateInquiryReply({ property, inquiry, restaurant = null, thread = [], triggerType = 'manual', today }) {
+async function generateInquiryReply({ property, inquiry, restaurant = null, spa = null, thread = [], triggerType = 'manual', today }) {
   if (!client) throw new AiReplyError('AI replies are not configured (ANTHROPIC_API_KEY is unset)', { kind: 'not_configured' });
   today = today || new Date().toISOString().slice(0, 10);
 
@@ -197,7 +202,7 @@ async function generateInquiryReply({ property, inquiry, restaurant = null, thre
     max_tokens: MAX_TOKENS,
     system: [
       { type: 'text', text: BASE_SYSTEM_PROMPT },
-      { type: 'text', text: buildPropertyBlock(property, restaurant), cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: buildPropertyBlock(property, restaurant, spa), cache_control: { type: 'ephemeral' } },
     ],
     messages: [{ role: 'user', content: buildUserMessage({ inquiry, thread, triggerType, today }) }],
     // Opus 5 runs adaptive thinking by default -- no `thinking` param needed.

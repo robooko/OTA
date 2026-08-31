@@ -127,6 +127,28 @@ async function publishInquiryUpdated(propertyId, inquiry) {
   await channel.publish('inquiry-updated', inquiry);
 }
 
+// Same event names/payload shapes as the property-wide trio above, mirrored
+// onto a spa:{id}:inquiries channel -- for the spa dashboard's own feed,
+// which shouldn't show every other module's inquiries. Only published when
+// an inquiry actually has spa_id set (see eventInquiries.js/inquiryReplies.js).
+async function publishNewInquiryForSpa(spaId, inquiry) {
+  if (!client) return;
+  const channel = client.channels.get(`spa:${spaId}:inquiries`);
+  await channel.publish('new-inquiry', inquiry);
+}
+
+async function publishInquiryUpdatedForSpa(spaId, inquiry) {
+  if (!client) return;
+  const channel = client.channels.get(`spa:${spaId}:inquiries`);
+  await channel.publish('inquiry-updated', inquiry);
+}
+
+async function publishNewReplyForSpa(spaId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`spa:${spaId}:inquiries`);
+  await channel.publish('new-reply', payload);
+}
+
 // AI-drafted replies share the inquiries channel -- same audience (staff
 // watching this property's inquiries). 'ai-draft-ready' fires when a new
 // draft lands (pending, or failed = needs a human); 'ai-draft-updated' on
@@ -258,6 +280,9 @@ module.exports = {
   publishSpaBookingStatusChangedForProperty,
   publishNewSpaBookingForSpa,
   publishSpaBookingStatusChangedForSpa,
+  publishNewInquiryForSpa,
+  publishInquiryUpdatedForSpa,
+  publishNewReplyForSpa,
   publishNewGolfBookingForProperty,
   publishGolfBookingStatusChangedForProperty,
   publishProshopItemAdded,

@@ -8,7 +8,7 @@
 // src/lib/aiReplyPipeline.js without a lib -> controller dependency.
 const pool = require('../db');
 const { sendReply } = require('./resend');
-const { publishNewReply, publishInquiryUpdated } = require('./ably');
+const { publishNewReply, publishInquiryUpdated, publishNewReplyForSpa, publishInquiryUpdatedForSpa } = require('./ably');
 
 // Inquiry joined to its property, including the property's AI-reply
 // settings. propertyId is optional: request handlers pass req.property_id
@@ -60,6 +60,9 @@ async function sendOutboundReply({ inquiry, body, sender = null, aiDraftId = nul
     );
     updatedInquiry = statusRows[0];
     publishInquiryUpdated(inquiry.property_id, updatedInquiry).catch((err) => console.error('Ably publish failed:', err.message));
+    if (inquiry.spa_id) {
+      publishInquiryUpdatedForSpa(inquiry.spa_id, updatedInquiry).catch((err) => console.error('Ably publish failed:', err.message));
+    }
   }
 
   // Same payload shape as the inbound-webhook publish, so feed clients
@@ -67,6 +70,10 @@ async function sendOutboundReply({ inquiry, body, sender = null, aiDraftId = nul
   // carries direction, sender attribution and ai_draft_id.
   publishNewReply(inquiry.property_id, { inquiry_id: inquiry.id, name: inquiry.name, message })
     .catch((err) => console.error('Ably publish failed:', err.message));
+  if (inquiry.spa_id) {
+    publishNewReplyForSpa(inquiry.spa_id, { inquiry_id: inquiry.id, name: inquiry.name, message })
+      .catch((err) => console.error('Ably publish failed:', err.message));
+  }
 
   return { message, inquiry: updatedInquiry };
 }

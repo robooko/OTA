@@ -2,7 +2,15 @@ const { createClerkClient } = require('@clerk/backend');
 const EmailReplyParser = require('email-reply-parser').default;
 const pool = require('../db');
 const { isValidDate, isValidUuid, isValidTime } = require('../middleware/validate');
-const { publishNewInquiry, publishNewReply, publishInquiryUpdated, publishAiDraftUpdated } = require('../lib/ably');
+const {
+  publishNewInquiry,
+  publishNewReply,
+  publishInquiryUpdated,
+  publishAiDraftUpdated,
+  publishNewInquiryForSpa,
+  publishInquiryUpdatedForSpa,
+  publishNewReplyForSpa,
+} = require('../lib/ably');
 const { verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
 const { loadInquiryWithProperty, sendOutboundReply } = require('../lib/inquiryReplies');
 const { isConfigured: aiConfigured } = require('../lib/aiReplies');
@@ -23,12 +31,18 @@ async function listInquiries(req, res, next) {
     // no way to know who actually sent those.
     // pending_ai_draft_id lets the feed badge rows with an AI draft awaiting
     // approval without a second request; null when nothing is waiting.
+    const { spa_id } = req.query;
+    const params = [req.property_id];
+    let spaFilter = '';
+    if (spa_id) { params.push(spa_id); spaFilter = ` AND ei.spa_id = $${params.length}`; }
+
     const { rows } = await pool.query(
-      `SELECT ei.*, r.name AS restaurant_name, lrm.direction AS last_reply_direction,
+      `SELECT ei.*, r.name AS restaurant_name, s.name AS spa_name, lrm.direction AS last_reply_direction,
               lrm.sent_by_name AS last_reply_by_name, lrm.sent_by_avatar_url AS last_reply_avatar_url,
               pad.id AS pending_ai_draft_id
        FROM event_inquiry ei
        LEFT JOIN restaurant r ON r.id = ei.restaurant_id
+       LEFT JOIN spa s ON s.id = ei.spa_id
        LEFT JOIN LATERAL (
          SELECT direction, sent_by_name, sent_by_avatar_url FROM event_inquiry_message m
          WHERE m.event_inquiry_id = ei.id
@@ -39,8 +53,8 @@ async function listInquiries(req, res, next) {
          WHERE d.event_inquiry_id = ei.id AND d.status = 'pending'
          ORDER BY d.created_at DESC LIMIT 1
        ) pad ON true
-       WHERE ei.property_id = $1 ORDER BY ei.created_at DESC`,
-      [req.property_id]
+       WHERE ei.property_id = $1${spaFilter} ORDER BY ei.created_at DESC`,
+      params
     );
     res.json(rows);
   } catch (err) { next(err); }
@@ -55,9 +69,17 @@ async function validateRestaurantId(restaurant_id, property_id) {
   return rows.length > 0;
 }
 
+// Mirrors validateRestaurantId, for the spa side of the same optional tag.
+async function validateSpaId(spa_id, property_id) {
+  if (spa_id == null) return true;
+  if (!isValidUuid(spa_id)) return false;
+  const { rows } = await pool.query('SELECT 1 FROM spa WHERE id = $1 AND property_id = $2', [spa_id, property_id]);
+  return rows.length > 0;
+}
+
 async function createInquiry(req, res, next) {
   try {
-    const { name, email, phone, event_date, guests, event_type, format, message, restaurant_id } = req.body;
+    const { name, email, phone, event_date, guests, event_type, format, message, restaurant_id, spa_id } = req.body;
     if (!name || !email) {
       return res.status(400).json({ error: 'name and email are required' });
     }
@@ -67,14 +89,20 @@ async function createInquiry(req, res, next) {
     if (!(await validateRestaurantId(restaurant_id, req.property_id))) {
       return res.status(400).json({ error: 'restaurant_id must belong to this property' });
     }
+    if (!(await validateSpaId(spa_id, req.property_id))) {
+      return res.status(400).json({ error: 'spa_id must belong to this property' });
+    }
 
     const { rows } = await pool.query(
-      `INSERT INTO event_inquiry (property_id, restaurant_id, name, email, phone, event_date, guests, event_type, format, message)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [req.property_id, restaurant_id || null, name, email, phone || null, event_date ?? null, guests || null, event_type || null, format || null, message || null]
+      `INSERT INTO event_inquiry (property_id, restaurant_id, spa_id, name, email, phone, event_date, guests, event_type, format, message)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [req.property_id, restaurant_id || null, spa_id || null, name, email, phone || null, event_date ?? null, guests || null, event_type || null, format || null, message || null]
     );
 
     publishNewInquiry(req.property_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
+    if (rows[0].spa_id) {
+      publishNewInquiryForSpa(rows[0].spa_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
+    }
     // Fire-and-forget like the Ably publish: drafting takes tens of seconds
     // and the inquiry is already safely stored, so the caller (usually the
     // property's public website) gets its 201 immediately. The pipeline
@@ -88,9 +116,12 @@ async function createInquiry(req, res, next) {
 
 async function updateInquiry(req, res, next) {
   try {
-    const { status, restaurant_id, event_date, event_time, guests, name, email, phone } = req.body;
+    const { status, restaurant_id, spa_id, event_date, event_time, guests, name, email, phone } = req.body;
     if (restaurant_id !== undefined && !(await validateRestaurantId(restaurant_id, req.property_id))) {
       return res.status(400).json({ error: 'restaurant_id must belong to this property' });
+    }
+    if (spa_id !== undefined && !(await validateSpaId(spa_id, req.property_id))) {
+      return res.status(400).json({ error: 'spa_id must belong to this property' });
     }
     if (event_date !== undefined && event_date !== null && !isValidDate(event_date)) {
       return res.status(400).json({ error: 'Invalid event_date format' });
@@ -111,18 +142,22 @@ async function updateInquiry(req, res, next) {
       `UPDATE event_inquiry SET
          status        = COALESCE($1, status),
          restaurant_id = COALESCE($2, restaurant_id),
-         event_date    = COALESCE($3, event_date),
-         event_time    = COALESCE($4, event_time),
-         guests        = COALESCE($5, guests),
-         name          = COALESCE($6, name),
-         email         = COALESCE($7, email),
-         phone         = COALESCE($8, phone)
-       WHERE id = $9 AND property_id = $10 RETURNING *`,
-      [status, restaurant_id, event_date, event_time, guests, name, email, phone, req.params.id, req.property_id]
+         spa_id        = COALESCE($3, spa_id),
+         event_date    = COALESCE($4, event_date),
+         event_time    = COALESCE($5, event_time),
+         guests        = COALESCE($6, guests),
+         name          = COALESCE($7, name),
+         email         = COALESCE($8, email),
+         phone         = COALESCE($9, phone)
+       WHERE id = $10 AND property_id = $11 RETURNING *`,
+      [status, restaurant_id, spa_id, event_date, event_time, guests, name, email, phone, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Inquiry not found' });
 
     publishInquiryUpdated(req.property_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
+    if (rows[0].spa_id) {
+      publishInquiryUpdatedForSpa(rows[0].spa_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
+    }
 
     res.json(rows[0]);
   } catch (err) { next(err); }
@@ -247,6 +282,10 @@ async function handleResendInboundWebhook(req, res, next) {
 
     publishNewReply(inquiry.property_id, { inquiry_id: inquiry.id, name: inquiry.name, message: rows[0] })
       .catch((err) => console.error('Ably publish failed:', err.message));
+    if (inquiry.spa_id) {
+      publishNewReplyForSpa(inquiry.spa_id, { inquiry_id: inquiry.id, name: inquiry.name, message: rows[0] })
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    }
     // Fire-and-forget: Resend retries deliveries that don't get a prompt
     // 200, and a retry would re-enter this handler -- the 23505 guard above
     // dedupes the row, but the model call must never sit on the webhook's
