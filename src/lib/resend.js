@@ -134,11 +134,33 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
   if (appointment.spa_phone) lines.push(appointment.spa_phone);
   const text = lines.join('\n');
 
+  // HTML version: same content as `text`, laid out as header / greeting /
+  // details card / note / muted footer. Plain-text part above stays the
+  // single source of the wording.
   const accentColor = branding?.brand_color || '#e0e0e0';
   const logoHtml = branding?.logo_url
-    ? `<div style="margin-bottom:20px;padding-bottom:16px;border-bottom:3px solid ${accentColor};">
-        <img src="${escapeHtml(branding.logo_url)}" alt="${escapeHtml(propertyName)}" style="max-height:48px;max-width:220px;display:block;">
+    ? `<div style="text-align:center;margin-bottom:24px;padding-bottom:18px;border-bottom:3px solid ${accentColor};">
+        <img src="${escapeHtml(branding.logo_url)}" alt="${escapeHtml(propertyName)}" style="max-height:64px;max-width:260px;display:inline-block;">
       </div>`
+    : '';
+
+  const detailsHtml = `
+    <div style="background:#f6f6f4;border-radius:8px;padding:18px 20px;margin:0 0 16px;">
+      <div style="font-size:16px;font-weight:600;margin:0 0 4px;">${escapeHtml(appointment.treatment_name)} with ${escapeHtml(appointment.therapist_name)}</div>
+      <div style="font-size:14px;color:#555;">${escapeHtml(dateLabel)} at ${escapeHtml(timeLabel)} (${appointment.duration_mins} mins)</div>
+      <div style="font-size:15px;font-weight:600;margin-top:10px;">${escapeHtml(price)}</div>
+    </div>`;
+
+  const noteHtml = extraLines
+    .filter(Boolean)
+    .map((l) => `<p style="margin:0 0 12px;">${escapeHtml(l)}</p>`)
+    .join('');
+
+  const footerParts = [];
+  if (appointment.spa_address) footerParts.push(escapeHtml(appointment.spa_address));
+  if (appointment.spa_phone) footerParts.push(escapeHtml(appointment.spa_phone));
+  const footerHtml = footerParts.length
+    ? `<div style="margin-top:24px;padding-top:14px;border-top:1px solid #e0e0e0;font-size:12px;color:#888;line-height:1.7;">${footerParts.join('<br>')}</div>`
     : '';
 
   const { data, error } = await client.emails.send({
@@ -147,7 +169,13 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
     ...(appointment.spa_contact_email ? { replyTo: appointment.spa_contact_email } : {}),
     subject,
     text,
-    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;">${logoHtml}${textToHtmlParagraphs(text)}</div>`,
+    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;margin:0 auto;">
+      ${logoHtml}
+      <p style="margin:0 0 16px;">Hi ${escapeHtml(appointment.contact_name)},</p>
+      ${detailsHtml}
+      ${noteHtml}
+      ${footerHtml}
+    </div>`,
   });
   if (error) throw new Error(error.message);
   return data.id;
