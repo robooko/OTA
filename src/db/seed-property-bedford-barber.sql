@@ -21,14 +21,12 @@ SELECT
   'GBP',
   'Europe/London',
   'draft',
+  -- Policy and tone only: address, phone, services, prices and hours are
+  -- injected into the prompt from the spa's own DB records (see OTA's
+  -- aiReplyPipeline loadSpaContext), so they are never duplicated here.
   E'Bedford Barber Co -- men''s barbershop, est. 2017, owned by Omar.\n'
-  '20C Miller Rd, Bedford MK42 9NZ. Phone 07429 153 339.\n'
-  'Hours: Mon and Wed-Fri 10am-8pm. Sat 9am-6pm. Sun 11:30am-4pm. Tue closed.\n'
-  'Prices: Haircut £20. Skin Fade £25. Haircut + Beard £25. Skin Fade + Beard £30. '
-  'Beard Trim £8. Wet Shave + Foam Steam £15. Kids under 12: Haircut £15, Skin Fade £20. '
-  'Senior Citizens £10. Only mention prices the guest asked about.\n'
-  'Individual appointments: check live availability and offer open times. '
-  'The guest replies to confirm a slot and Omar books it in.\n'
+  'Only mention prices the guest asked about.\n'
+  'Individual appointments: check live availability and offer open times.\n'
   'Group bookings (4 or more): arranged by phone or by replying to this email. '
   'Never confirm a group time; say Omar will confirm.\n'
   'Style: friendly and short, no exclamation marks. Sign off as Omar.'

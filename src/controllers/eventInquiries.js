@@ -329,8 +329,12 @@ async function listInquiryAiDrafts(req, res, next) {
     );
     if (!inquiryRows.length) return res.status(404).json({ error: 'Inquiry not found' });
 
+    // ::text casts win over the bare columns from * (later duplicate name
+    // wins in node-pg's row builder) -- a raw DATE serialises through JSON
+    // as a UTC-shifted timestamp, which can land on the wrong day.
     const { rows } = await pool.query(
-      'SELECT * FROM event_inquiry_ai_draft WHERE event_inquiry_id = $1 ORDER BY created_at DESC',
+      `SELECT *, proposed_date::text AS proposed_date, proposed_time::text AS proposed_time
+       FROM event_inquiry_ai_draft WHERE event_inquiry_id = $1 ORDER BY created_at DESC`,
       [req.params.id]
     );
     res.json(rows);

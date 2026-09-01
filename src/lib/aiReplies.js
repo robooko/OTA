@@ -75,7 +75,7 @@ const ReplyAssessment = z.object({
 const BASE_SYSTEM_PROMPT = `You draft email replies on behalf of a hospitality business (a hotel, restaurant, venue, salon or similar) to people who have sent an enquiry -- about holding a private event, making a group booking, or a general question about what the business offers. You return a JSON object matching the provided schema: a summary, the reply body, whether a human must take over, and a quality score.
 
 FACTS
-- The only facts you may state about the venue -- capacity, spaces, menus, packages, prices, minimum spends, availability, opening days, policies, deposits, contact details -- are those given in <venue_instructions>. Never invent, estimate or "typically" a fact that is not there.
+- The only facts you may state about the venue -- capacity, spaces, menus, packages, prices, minimum spends, availability, opening days, policies, deposits, contact details -- are those given in <venue_instructions> or in the structured data inside <venue> (services with durations and prices, contact details, working hours). Never invent, estimate or "typically" a fact that is not there. Where the two disagree, <venue_instructions> wins.
 - If the guest asks something the instructions do not cover, do not guess: acknowledge the question, say the team will confirm, and set requires_human to true if that missing fact is essential to a useful reply.
 - Never quote or agree a price unless the instructions explicitly state it.
 
@@ -143,8 +143,21 @@ function field(name, value) {
   return `  <field name="${name}">${neutraliseTags(value)}</field>\n`;
 }
 
-// Per-property block. Stable between calls for the same property (instructions
-// only change when an admin edits them), so it's the second cached segment.
+const CURRENCY_SYMBOLS = { GBP: '£', USD: '$', EUR: '€' };
+
+function money(amount, currency) {
+  const symbol = CURRENCY_SYMBOLS[currency];
+  const value = Number(amount).toFixed(2).replace(/\.00$/, '');
+  return symbol ? `${symbol}${value}` : `${value} ${currency ?? ''}`.trim();
+}
+
+const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']; // ISODOW 1-7
+
+// Per-property block. Stable between calls for the same property (it only
+// changes when an admin edits instructions, the menu, or working hours), so
+// it's the second cached segment. A spa's services, prices, contact details
+// and hours are rendered here from the DB -- the model's fact source for
+// them, so ai_reply_instructions doesn't have to duplicate the database.
 function buildPropertyBlock(property, restaurant, spa) {
   let text = `<venue name="${neutraliseTags(property.name)}">\n`;
   if (restaurant) {
@@ -153,9 +166,27 @@ function buildPropertyBlock(property, restaurant, spa) {
     text += '</restaurant>\n';
   }
   if (spa) {
-    text += `  <spa name="${neutraliseTags(spa.name)}">`;
-    if (spa.description) text += neutraliseTags(spa.description);
-    text += '</spa>\n';
+    text += `  <spa name="${neutraliseTags(spa.name)}">\n`;
+    if (spa.description) text += `    ${neutraliseTags(spa.description)}\n`;
+    if (spa.address) text += `    Address: ${neutraliseTags(spa.address)}\n`;
+    if (spa.phone) text += `    Phone: ${neutraliseTags(spa.phone)}\n`;
+    if (spa.treatments?.length) {
+      text += '    Services (duration, price):\n';
+      for (const t of spa.treatments) {
+        text += `      ${neutraliseTags(t.name)} -- ${t.duration_mins} min -- ${money(t.price, property.currency)}\n`;
+      }
+    }
+    if (spa.hours?.length) {
+      const byTherapist = new Map();
+      for (const h of spa.hours) {
+        if (!byTherapist.has(h.therapist_name)) byTherapist.set(h.therapist_name, []);
+        byTherapist.get(h.therapist_name).push(`${DAY_NAMES[h.day_of_week - 1]} ${h.start_time.slice(0, 5)}-${h.end_time.slice(0, 5)}`);
+      }
+      for (const [name, days] of byTherapist) {
+        text += `    Hours (${neutraliseTags(name)}): ${days.join('; ')}. Other days closed.\n`;
+      }
+    }
+    text += '  </spa>\n';
   }
   text += '</venue>\n\n<venue_instructions>\n';
   text += property.ai_reply_instructions?.trim()

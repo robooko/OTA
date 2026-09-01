@@ -52,6 +52,29 @@ function publishUpdated(propertyId, inquiryId, draft) {
     .catch((err) => console.error('Ably publish failed:', err.message));
 }
 
+// Everything the model may state as fact about a spa venue -- menu with
+// durations and prices, contact details, per-therapist working hours --
+// loaded fresh per draft so drafts always quote the current data. This is
+// what lets a property's ai_reply_instructions stay policy-and-tone only
+// instead of duplicating (and drifting from) the DB.
+async function loadSpaContext(spaId) {
+  const [{ rows: [spa] }, { rows: treatments }, { rows: hours }] = await Promise.all([
+    pool.query('SELECT name, description, phone, address FROM spa WHERE id = $1', [spaId]),
+    pool.query(
+      "SELECT name, duration_mins, price FROM spa_treatment WHERE spa_id = $1 AND status = 'active' ORDER BY name",
+      [spaId]
+    ),
+    pool.query(
+      `SELECT t.name AS therapist_name, h.day_of_week, h.start_time::text AS start_time, h.end_time::text AS end_time
+       FROM spa_therapist t JOIN spa_therapist_hours h ON h.therapist_id = t.id
+       WHERE t.spa_id = $1 AND t.status = 'active'
+       ORDER BY t.name, h.day_of_week`,
+      [spaId]
+    ),
+  ]);
+  return spa ? { ...spa, treatments, hours } : null;
+}
+
 // A pending draft is stale the moment anything newer happens on the thread:
 // a fresh draft, or a human reply. Marks them superseded and tells the feed.
 async function supersedePendingDrafts(inquiryId, { exceptDraftId = null } = {}) {
@@ -74,7 +97,7 @@ async function supersedePendingDrafts(inquiryId, { exceptDraftId = null } = {}) 
 async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) {
   await supersedePendingDrafts(inquiry.id);
 
-  const [{ rows: thread }, { rows: restaurantRows }, { rows: spaRows }] = await Promise.all([
+  const [{ rows: thread }, { rows: restaurantRows }, spaContext] = await Promise.all([
     pool.query(
       'SELECT direction, body, created_at FROM event_inquiry_message WHERE event_inquiry_id = $1 ORDER BY created_at ASC',
       [inquiry.id]
@@ -82,18 +105,16 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
     inquiry.restaurant_id
       ? pool.query('SELECT name, description FROM restaurant WHERE id = $1', [inquiry.restaurant_id])
       : Promise.resolve({ rows: [] }),
-    inquiry.spa_id
-      ? pool.query('SELECT name, description FROM spa WHERE id = $1', [inquiry.spa_id])
-      : Promise.resolve({ rows: [] }),
+    inquiry.spa_id ? loadSpaContext(inquiry.spa_id) : Promise.resolve(null),
   ]);
 
   let draftRow;
   try {
     const result = await generateInquiryReply({
-      property: { name: inquiry.property_name, ai_reply_instructions: inquiry.ai_reply_instructions },
+      property: { name: inquiry.property_name, currency: inquiry.currency, ai_reply_instructions: inquiry.ai_reply_instructions },
       inquiry,
       restaurant: restaurantRows[0] ?? null,
-      spa: spaRows[0] ?? null,
+      spa: spaContext,
       thread,
       triggerType,
     });

@@ -15,7 +15,7 @@ const { publishNewReply, publishInquiryUpdated, publishNewReplyForSpa, publishIn
 // for tenant scoping; the pipeline (already holding a trusted id) omits it.
 async function loadInquiryWithProperty(inquiryId, propertyId = null) {
   const { rows } = await pool.query(
-    `SELECT ei.*, p.name AS property_name,
+    `SELECT ei.*, p.name AS property_name, p.currency,
             p.ai_reply_mode, p.ai_reply_instructions, p.ai_reply_auto_send_min_score
      FROM event_inquiry ei
      JOIN property p ON p.id = ei.property_id
