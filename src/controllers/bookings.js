@@ -1,6 +1,7 @@
 const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
 const { publishNewBooking, publishBookingStatusChanged } = require('../lib/ably');
+const { computeFolio, toCents } = require('../lib/folio');
 
 function isValidMetadata(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -318,6 +319,16 @@ async function updateBooking(req, res, next) {
     ]);
     if (!beforeRes.rows.length) return res.status(404).json({ error: 'Booking not found' });
     const statusBefore = beforeRes.rows[0].status;
+
+    // Soft check-out gate: an outstanding folio balance blocks the
+    // transition unless the caller explicitly forces it (comps/disputes
+    // are the property's call). See the guest-folio spec.
+    if (status === 'checked_out' && statusBefore !== 'checked_out' && req.body.force !== true) {
+      const folio = await computeFolio(req.params.id, req.property_id);
+      if (folio && toCents(folio.balance) > 0) {
+        return res.status(409).json({ error: 'Outstanding folio balance', balance: folio.balance });
+      }
+    }
 
     const { rows } = await pool.query(
       `UPDATE booking SET
