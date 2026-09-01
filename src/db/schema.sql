@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS payment (
   amount      NUMERIC(10,2) NOT NULL,
   method      VARCHAR(30),
   status      VARCHAR(20)   DEFAULT 'pending',
+  stripe_payment_intent_id VARCHAR(255),
   paid_at     TIMESTAMPTZ
 );
 
@@ -167,6 +168,18 @@ CREATE INDEX IF NOT EXISTS idx_room_availability_property_date ON room_availabil
 CREATE INDEX IF NOT EXISTS idx_booking_room_dates         ON booking(property_id, room_id, check_in, check_out);
 CREATE INDEX IF NOT EXISTS idx_booking_guest              ON booking(property_id, guest_id);
 CREATE INDEX IF NOT EXISTS idx_payment_property           ON payment(property_id);
+
+-- Folio adjustments (manual guest-bill lines; positive = charge, negative = credit)
+CREATE TABLE IF NOT EXISTS folio_adjustment (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID          NOT NULL REFERENCES property(id),
+  booking_id  UUID          NOT NULL REFERENCES booking(id),
+  description VARCHAR(200)  NOT NULL,
+  amount      NUMERIC(10,2) NOT NULL,
+  created_at  TIMESTAMPTZ   DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_folio_adjustment_booking ON folio_adjustment(booking_id);
 
 -- Materialised view
 CREATE MATERIALIZED VIEW IF NOT EXISTS room_type_availability AS
