@@ -1,5 +1,14 @@
 const { z } = require('zod');
 
+// Optional email styling accepted by spa appointment create/update and by
+// create_event_inquiry. Values come from the venue's website; OTA relays
+// them (or keeps them on the enquiry row until the thread is done).
+const BRANDING_SCHEMA = z.object({
+  logo_url: z.string().optional().describe('http(s) image URL shown at the top of the email'),
+  brand_color: z.string().optional().describe('Hex accent colour, e.g. #c9a85c'),
+  header_bg: z.string().optional().describe('Hex background behind the logo, e.g. #ffffff -- keeps dark logos visible in dark mode'),
+}).optional();
+
 function createTools(apiRequest) {
   return [
   {
@@ -427,6 +436,9 @@ function createTools(apiRequest) {
       format: z.string().optional(),
       message: z.string().optional(),
       restaurant_id: z.string().optional(),
+      spa_id: z.string().optional().describe('Which spa this enquiry is about; needed for the AI reply to propose and book a slot'),
+      branding: BRANDING_SCHEMA.describe('Styles the confirmation email if the AI reply books a slot; kept only for this enquiry'),
+      cancel_url: z.string().optional().describe('http(s) URL for the guest to cancel; may contain {id}, filled in when booked'),
     },
     run: (args) => apiRequest('POST', '/api/event-inquiries', { body: args }),
   },
@@ -712,6 +724,8 @@ function createTools(apiRequest) {
       contact_email: z.string().optional(),
       contact_phone: z.string().optional(),
       notes: z.string().optional(),
+      branding: BRANDING_SCHEMA.describe('Styles the confirmation email; relayed, never stored'),
+      cancel_url: z.string().optional().describe('http(s) URL for the guest to cancel; may contain {id}'),
     },
     run: ({ spa_id, ...body }) => apiRequest('POST', `/api/spa/${spa_id}/appointments`, { body }),
   },
@@ -723,6 +737,7 @@ function createTools(apiRequest) {
       id: z.string(),
       status: z.string().optional(),
       notes: z.string().optional(),
+      branding: BRANDING_SCHEMA.describe('Styles the cancellation email when status becomes "cancelled"; relayed, never stored'),
     },
     run: ({ spa_id, id, ...body }) => apiRequest('PUT', `/api/spa/${spa_id}/appointments/${id}`, { body }),
   },

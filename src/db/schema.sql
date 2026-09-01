@@ -715,6 +715,12 @@ CREATE TABLE IF NOT EXISTS event_inquiry (
   format        VARCHAR(50),
   message       TEXT,
   status        VARCHAR(20)  NOT NULL DEFAULT 'new',
+  -- Email styling for a booking made later from this thread's AI reply --
+  -- see migrate-2026-09-01-event-inquiry-branding.sql. Supplied by the
+  -- website with the enquiry; the only place OTA keeps branding, and only
+  -- for the life of the thread. cancel_url may contain {id} (appointment id).
+  branding      JSONB,
+  cancel_url    TEXT,
   created_at    TIMESTAMPTZ  DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_event_inquiry_property ON event_inquiry(property_id);

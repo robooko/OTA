@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { isValidDate, isValidTime, isValidUrl } = require('../middleware/validate');
+const { isValidDate, isValidTime, validateBranding, validateCancelUrl } = require('../middleware/validate');
 const {
   publishNewAppointment,
   publishAppointmentStatusChanged,
@@ -10,28 +10,6 @@ const {
   client: ablyClient,
 } = require('../lib/ably');
 const { sendAppointmentConfirmation, sendAppointmentCancellation } = require('../lib/resend');
-
-const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i;
-
-// Validates the optional caller-supplied {logo_url, brand_color, header_bg}
-// used to style the confirmation/cancellation email header. Passed straight
-// through per-request -- never persisted -- so OTA doesn't need to hold a
-// copy of the property's branding. header_bg paints behind the logo so a
-// dark-ink logo stays legible in dark-mode email clients. Returns an error
-// string, or null when `branding` is absent/valid.
-function validateBranding(branding) {
-  if (branding === undefined || branding === null) return null;
-  if (typeof branding !== 'object' || Array.isArray(branding)) return 'branding must be an object';
-  const { logo_url, brand_color, header_bg } = branding;
-  if (logo_url !== undefined && !isValidUrl(logo_url)) return 'branding.logo_url must be a valid http(s) URL';
-  if (brand_color !== undefined && !HEX_COLOR_RE.test(brand_color)) {
-    return 'branding.brand_color must be a hex color, e.g. #1a1a1a';
-  }
-  if (header_bg !== undefined && !HEX_COLOR_RE.test(header_bg)) {
-    return 'branding.header_bg must be a hex color, e.g. #ffffff';
-  }
-  return null;
-}
 
 // Steps a 'YYYY-MM-DD' string forward by whole days via UTC epoch math --
 // `new Date(str); d.setDate(d.getDate() + 1)` looks equivalent but
@@ -996,9 +974,8 @@ async function createAppointment(req, res, next) {
   const brandingError = validateBranding(branding);
   if (brandingError) return res.status(400).json({ error: brandingError });
 
-  if (cancel_url !== undefined && !isValidUrl(cancel_url)) {
-    return res.status(400).json({ error: 'cancel_url must be a valid http(s) URL' });
-  }
+  const cancelUrlError = validateCancelUrl(cancel_url);
+  if (cancelUrlError) return res.status(400).json({ error: cancelUrlError });
 
   if (slot_id) return createAppointmentFromSlot(req, res, next);
 

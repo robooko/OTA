@@ -174,6 +174,10 @@ async function bookProposedSlot(claimedDraft, inquiry) {
     contact_email: inquiry.email,
     contact_phone: inquiry.phone,
     notes: `Booked from AI reply (draft ${claimedDraft.id})`,
+    // Supplied by the website with the enquiry (validated on the way in);
+    // the confirmation email then matches a direct website booking's.
+    branding: inquiry.branding ?? undefined,
+    cancel_url: inquiry.cancel_url ?? undefined,
   });
   if (!result.ok) {
     const why = result.code === 'unavailable'

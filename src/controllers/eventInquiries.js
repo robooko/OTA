@@ -1,7 +1,7 @@
 const { createClerkClient } = require('@clerk/backend');
 const EmailReplyParser = require('email-reply-parser').default;
 const pool = require('../db');
-const { isValidDate, isValidUuid, isValidTime } = require('../middleware/validate');
+const { isValidDate, isValidUuid, isValidTime, validateBranding, validateCancelUrl } = require('../middleware/validate');
 const {
   publishNewInquiry,
   publishNewReply,
@@ -79,13 +79,19 @@ async function validateSpaId(spa_id, property_id) {
 
 async function createInquiry(req, res, next) {
   try {
-    const { name, email, phone, event_date, guests, event_type, format, message, restaurant_id, spa_id } = req.body;
+    const { name, email, phone, event_date, guests, event_type, format, message, restaurant_id, spa_id, branding, cancel_url } = req.body;
     if (!name || !email) {
       return res.status(400).json({ error: 'name and email are required' });
     }
     // event_date is optional -- a general enquiry ("do you do X?") has no
     // date. When given it must still be a real date.
     if (event_date != null && !isValidDate(event_date)) return res.status(400).json({ error: 'Invalid date format' });
+    // Kept on the row so a booking made later from this thread's AI reply
+    // sends the same branded confirmation as a direct website booking.
+    const brandingError = validateBranding(branding);
+    if (brandingError) return res.status(400).json({ error: brandingError });
+    const cancelUrlError = validateCancelUrl(cancel_url);
+    if (cancelUrlError) return res.status(400).json({ error: cancelUrlError });
     if (!(await validateRestaurantId(restaurant_id, req.property_id))) {
       return res.status(400).json({ error: 'restaurant_id must belong to this property' });
     }
@@ -94,9 +100,10 @@ async function createInquiry(req, res, next) {
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO event_inquiry (property_id, restaurant_id, spa_id, name, email, phone, event_date, guests, event_type, format, message)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-      [req.property_id, restaurant_id || null, spa_id || null, name, email, phone || null, event_date ?? null, guests || null, event_type || null, format || null, message || null]
+      `INSERT INTO event_inquiry (property_id, restaurant_id, spa_id, name, email, phone, event_date, guests, event_type, format, message, branding, cancel_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+      [req.property_id, restaurant_id || null, spa_id || null, name, email, phone || null, event_date ?? null, guests || null, event_type || null, format || null, message || null,
+        branding ? JSON.stringify(branding) : null, cancel_url || null]
     );
 
     publishNewInquiry(req.property_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
