@@ -17,7 +17,7 @@ async function loadInquiryWithProperty(inquiryId, propertyId = null) {
   const { rows } = await pool.query(
     `SELECT ei.*, p.name AS property_name, p.currency,
             p.ai_reply_mode, p.ai_reply_instructions, p.ai_reply_auto_send_min_score,
-            p.fallback_email
+            p.fallback_email, p.email_branding
      FROM event_inquiry ei
      JOIN property p ON p.id = ei.property_id
      WHERE ei.id = $1 AND ($2::uuid IS NULL OR ei.property_id = $2)`,
@@ -39,7 +39,10 @@ async function sendOutboundReply({ inquiry, body, sender = null, aiDraftId = nul
 
   // Send first, persist second: a Resend failure here means nothing was
   // sent and nothing is recorded, so the caller can simply retry.
-  const emailId = await sendReply(inquiry, inquiry.property_name, body, priorMessages);
+  // Branding: the enquiry's own per-request value wins, else the property's
+  // Settings -> Branding default -- same precedence as spa booking emails.
+  const branding = inquiry.branding ?? inquiry.email_branding ?? undefined;
+  const emailId = await sendReply(inquiry, inquiry.property_name, body, priorMessages, branding);
 
   const { rows } = await pool.query(
     `INSERT INTO event_inquiry_message (event_inquiry_id, direction, body, resend_email_id, sent_by_user_id, sent_by_name, sent_by_avatar_url, ai_draft_id)
@@ -50,9 +53,9 @@ async function sendOutboundReply({ inquiry, body, sender = null, aiDraftId = nul
 
   // The returned inquiry keeps the shape createReply always responded with:
   // the bare updated row after a status flip, otherwise the loaded row --
-  // minus the property's AI settings, which are joined in for the pipeline
-  // and have no business in a reply response.
-  const { ai_reply_mode, ai_reply_instructions, ai_reply_auto_send_min_score, ...publicInquiry } = inquiry;
+  // minus the property's AI settings and email branding, which are joined
+  // in for the pipeline/send and have no business in a reply response.
+  const { ai_reply_mode, ai_reply_instructions, ai_reply_auto_send_min_score, email_branding, ...publicInquiry } = inquiry;
   let updatedInquiry = publicInquiry;
   if (inquiry.status === 'new') {
     const { rows: statusRows } = await pool.query(

@@ -70,7 +70,11 @@ function buildHistoryText(entries) {
   return `\n\n---\nPrevious messages:\n\n${items}`;
 }
 
-async function sendReply(inquiry, propertyName, body, priorMessages = []) {
+// `branding` ({logo_url, brand_color, header_bg}, already validated on the
+// way into the DB) only adds the logo header above the reply text -- the
+// wording itself is untouched, and no branding means the plain email that
+// always went out.
+async function sendReply(inquiry, propertyName, body, priorMessages = [], branding = undefined) {
   if (!client) throw new Error('Resend not configured');
   const history = buildHistoryEntries(inquiry, priorMessages);
   const { data, error } = await client.emails.send({
@@ -81,9 +85,10 @@ async function sendReply(inquiry, propertyName, body, priorMessages = []) {
     // enquiries (see 2026-08-30-general-inquiries-design.md).
     subject: `Re: Your enquiry to ${propertyName}`,
     text: `${body}${buildHistoryText(history)}`,
-    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.5;max-width:600px;">${textToHtmlParagraphs(
-      body
-    )}${buildHistoryHtml(history)}</div>`,
+    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.5;max-width:600px;">${brandingHeaderHtml(
+      branding,
+      propertyName
+    )}${textToHtmlParagraphs(body)}${buildHistoryHtml(history)}</div>`,
   });
   if (error) throw new Error(error.message);
   return data.id;
@@ -148,6 +153,21 @@ function formatAppointmentDate(appointmentDate) {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 }
 
+// Logo header shared by appointment emails and enquiry replies. header_bg
+// paints a box behind the logo so dark-ink logos survive dark-mode clients
+// (which otherwise leave them on a dark ground); brand_color underlines the
+// header. No branding (or no logo_url) -> '' and the email renders plain.
+function brandingHeaderHtml(branding, propertyName) {
+  if (!branding?.logo_url) return '';
+  const accentColor = branding.brand_color || '#e0e0e0';
+  const headerBoxStyle = branding.header_bg
+    ? `background:${branding.header_bg};padding:18px;border-radius:8px;`
+    : 'padding-bottom:18px;';
+  return `<div style="text-align:center;margin-bottom:24px;${headerBoxStyle}border-bottom:3px solid ${accentColor};">
+        <img src="${escapeHtml(branding.logo_url)}" alt="${escapeHtml(propertyName)}" style="max-height:64px;max-width:260px;display:inline-block;">
+      </div>`;
+}
+
 // Shared by sendAppointmentConfirmation/sendAppointmentCancellation. `verb`
 // is 'confirmed' or 'cancelled'; `extraLines` go after the booking details,
 // before the address/phone block. Booking text is always generated here --
@@ -178,17 +198,7 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
   // HTML version: same content as `text`, laid out as header / greeting /
   // details card / note / cancel button / muted footer. Plain-text part
   // above stays the single source of the wording.
-  const accentColor = branding?.brand_color || '#e0e0e0';
-  // header_bg paints a box behind the logo so dark-ink logos survive
-  // dark-mode clients (which otherwise leave them on a dark ground).
-  const headerBoxStyle = branding?.header_bg
-    ? `background:${branding.header_bg};padding:18px;border-radius:8px;`
-    : 'padding-bottom:18px;';
-  const logoHtml = branding?.logo_url
-    ? `<div style="text-align:center;margin-bottom:24px;${headerBoxStyle}border-bottom:3px solid ${accentColor};">
-        <img src="${escapeHtml(branding.logo_url)}" alt="${escapeHtml(propertyName)}" style="max-height:64px;max-width:260px;display:inline-block;">
-      </div>`
-    : '';
+  const logoHtml = brandingHeaderHtml(branding, propertyName);
 
   const detailsHtml = `
     <div style="background:#f6f6f4;border-radius:8px;padding:18px 20px;margin:0 0 16px;">
@@ -274,6 +284,7 @@ async function getReceivedEmail(emailId) {
 }
 
 module.exports = {
+  brandingHeaderHtml,
   sendReply,
   sendInquiryForward,
   sendAppointmentConfirmation,
