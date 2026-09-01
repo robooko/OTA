@@ -19,6 +19,7 @@ const swaggerSpec = {
     { name: 'Availability' },
     { name: 'Bookings' },
     { name: 'Payments' },
+    { name: 'Folio' },
     { name: 'Restaurant' },
     { name: 'Spa' },
     { name: 'Beach Club' },
@@ -326,7 +327,7 @@ const swaggerSpec = {
     },
     '/api/bookings/{id}': {
       get: { tags: ['Bookings'], summary: 'Get booking by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Booking with guest and room details' } } },
-      put: { tags: ['Bookings'], summary: 'Update booking', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['confirmed', 'cancelled', 'checked_in', 'checked_out'] }, guests: { type: 'integer' }, metadata: { type: 'object', additionalProperties: true, example: { pickup_location: 'Conrad Base' } } } } } } }, responses: { 200: { description: 'Updated' } } },
+      put: { tags: ['Bookings'], summary: 'Update booking', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['confirmed', 'cancelled', 'checked_in', 'checked_out'] }, guests: { type: 'integer' }, metadata: { type: 'object', additionalProperties: true, example: { pickup_location: 'Conrad Base' } }, force: { type: 'boolean', description: 'Override the folio-balance check-out gate' } } } } } }, responses: { 200: { description: 'Updated' }, 409: { description: 'Outstanding folio balance blocks checked_out (pass force: true to override)' } } },
       delete: { tags: ['Bookings'], summary: 'Cancel booking — restores availability', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Cancelled' } } },
     },
 
@@ -339,6 +340,23 @@ const swaggerSpec = {
     },
     '/api/payments/{id}': {
       put: { tags: ['Payments'], summary: 'Update payment status', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'completed', 'refunded'] } } } } } }, responses: { 200: { description: 'Updated' } } },
+    },
+
+    // ── Folio ────────────────────────────────────────────────────────────────
+    '/api/bookings/{id}/folio': {
+      get: { tags: ['Folio'], summary: "The booking's folio: computed line items (room, extras, room service, adjustments), payments, and balance", security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'items, charges_total, payments, payments_total, balance (completed payments only reduce the balance)' }, 404: { description: 'Booking not found' } } },
+    },
+    '/api/bookings/{id}/folio/adjustments': {
+      post: { tags: ['Folio'], summary: 'Add a manual folio line (positive = charge, negative = credit/comp)', security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['description', 'amount'], properties: { description: { type: 'string', maxLength: 200 }, amount: { type: 'number', description: 'Non-zero; negative for credits' } } } } } }, responses: { 201: { description: 'Adjustment created' }, 400: { description: 'Missing description or zero amount' }, 404: { description: 'Booking not found' } } },
+    },
+    '/api/bookings/{id}/folio/adjustments/{adjustment_id}': {
+      delete: { tags: ['Folio'], summary: 'Remove a manual folio line', security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'adjustment_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 204: { description: 'Removed' }, 404: { description: 'Adjustment not found on this booking' } } },
+    },
+    '/api/bookings/{id}/folio/payment-intent': {
+      post: { tags: ['Folio'], summary: 'Create (or reuse) a Tap to Pay PaymentIntent for the folio balance', description: "Amount defaults to the outstanding balance; must be > 0 and ≤ balance. Retries reuse the booking's pending card payment row and its intent; a succeeded-but-unconfirmed intent settles that row instead of charging twice.", security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { amount: { type: 'number', description: 'Optional partial amount; defaults to the full balance' } } } } } }, responses: { 200: { description: 'client_secret, payment_intent_id, amount — or already_paid: true after crash-window recovery' }, 404: { description: 'Booking not found' }, 409: { description: 'No Stripe key, cancelled booking, nothing to pay, or amount exceeds balance' }, 502: { description: 'Stripe API error' } } },
+    },
+    '/api/bookings/{id}/folio/confirm-payment': {
+      post: { tags: ['Folio'], summary: "Confirm a succeeded Tap to Pay intent, completing the booking's pending card payment", security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['stripe_payment_intent_id'], properties: { stripe_payment_intent_id: { type: 'string' } } } } } }, responses: { 200: { description: 'The completed payment row' }, 400: { description: 'stripe_payment_intent_id missing' }, 404: { description: 'Booking not found' }, 409: { description: 'Intent does not match, has not succeeded, or amount mismatch' }, 502: { description: 'Stripe API error' } } },
     },
 
     // ── Restaurant ───────────────────────────────────────────────────────────
