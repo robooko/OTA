@@ -13,5 +13,7 @@ router.delete('/:id', authenticateOrApiKey, ctrl.cancelBooking);
 router.get('/:id/folio', authenticate, folio.getFolio);
 router.post('/:id/folio/adjustments', authenticate, folio.addAdjustment);
 router.delete('/:id/folio/adjustments/:adjustment_id', authenticate, folio.removeAdjustment);
+router.post('/:id/folio/payment-intent', authenticate, folio.createFolioPaymentIntent);
+router.post('/:id/folio/confirm-payment', authenticate, folio.confirmFolioPayment);
 
 module.exports = router;
