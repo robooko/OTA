@@ -11,6 +11,21 @@ const { publishAiDraftReady, publishAiDraftUpdated } = require('./ably');
 const { isConfigured, generateInquiryReply, AiReplyError, MODEL } = require('./aiReplies');
 const { loadInquiryWithProperty, sendOutboundReply } = require('./inquiryReplies');
 const { bookFromAvailability } = require('../controllers/spa');
+const tokens = require('./tokens');
+const { sendInquiryForward } = require('./resend');
+
+// Thrown by generateDraft when the property has no token for the model
+// call. runAiReply turns it into the free fallback (forward to the venue's
+// inbox); the manual endpoint maps it to 402.
+class InsufficientTokensError extends Error {
+  constructor(balance, cost) {
+    super(`Not enough tokens for an AI reply (balance ${balance}, cost ${cost})`);
+    this.name = 'InsufficientTokensError';
+    this.status = 402;
+    this.balance = balance;
+    this.cost = cost;
+  }
+}
 
 // Hard cap on unreviewed sends per inquiry. Defends against an auto-responder
 // on the guest's side (out-of-office bouncing our reply back, each bounce
@@ -95,6 +110,11 @@ async function supersedePendingDrafts(inquiryId, { exceptDraftId = null } = {}) 
 // the useful outcome for staff, and the caller (webhook, createInquiry, or
 // the manual endpoint) doesn't have to care why the model didn't answer.
 async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) {
+  // Charged up front so a concurrent trigger can't double-spend on the same
+  // balance; refunded below if the model call itself fails.
+  const spent = await tokens.spend(inquiry.property_id, 'ai_reply', inquiry.id);
+  if (!spent.ok) throw new InsufficientTokensError(spent.balance, spent.cost);
+
   await supersedePendingDrafts(inquiry.id);
 
   const [{ rows: thread }, { rows: restaurantRows }, spaContext] = await Promise.all([
@@ -146,6 +166,9 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
         err.kind === 'refusal' ? 'The model declined to draft this reply' : 'Draft generation failed',
         MODEL, err.message]
     ));
+    // Don't charge for a draft nobody got.
+    await tokens.credit(inquiry.property_id, spent.cost, 'ai_reply_refund', { refId: draftRow.id })
+      .catch((refundErr) => console.error(`Token refund failed for draft ${draftRow.id}:`, refundErr.message));
   }
 
   publishReady(inquiry, draftRow);
@@ -279,7 +302,26 @@ async function runAiReply({ inquiryId, triggerType, triggerMessageId = null }) {
   // a human to notice, not for the model to reopen.
   if (inquiry.status === 'closed') return null;
 
-  const draft = await generateDraft({ inquiry, triggerType, triggerMessageId });
+  let draft;
+  try {
+    draft = await generateDraft({ inquiry, triggerType, triggerMessageId });
+  } catch (err) {
+    if (!(err instanceof InsufficientTokensError)) throw err;
+    // Out of tokens: the free alternative is the venue's own inbox. Without
+    // a fallback_email the enquiry still sits in the dashboard queue, which
+    // is exactly what an 'off' property gets.
+    console.warn(`AI reply skipped for inquiry ${inquiry.id}: ${err.message}`);
+    if (inquiry.fallback_email) {
+      let latestMessage = null;
+      if (triggerMessageId) {
+        const { rows } = await pool.query('SELECT body FROM event_inquiry_message WHERE id = $1', [triggerMessageId]);
+        latestMessage = rows[0]?.body ?? null;
+      }
+      await sendInquiryForward(inquiry, inquiry.property_name, inquiry.fallback_email, latestMessage)
+        .catch((sendErr) => console.error(`Fallback forward failed for inquiry ${inquiry.id}:`, sendErr.message));
+    }
+    return null;
+  }
 
   if (draft.status !== 'pending' || inquiry.ai_reply_mode !== 'auto') return draft;
   if (draft.requires_human || draft.quality_score < inquiry.ai_reply_auto_send_min_score) return draft;
@@ -307,5 +349,5 @@ async function runAiReply({ inquiryId, triggerType, triggerMessageId = null }) {
 
 module.exports = {
   runAiReply, generateDraft, sendDraft, supersedePendingDrafts,
-  DraftNotPendingError, ProposedBookingError, MAX_AUTO_SENT_PER_INQUIRY,
+  DraftNotPendingError, ProposedBookingError, InsufficientTokensError, MAX_AUTO_SENT_PER_INQUIRY,
 };

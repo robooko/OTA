@@ -32,10 +32,28 @@ CREATE TABLE IF NOT EXISTS property (
   -- branding/cancel_url (website booking, event_inquiry.branding) overrides.
   email_branding   JSONB, -- {logo_url, brand_color, header_bg}
   email_cancel_url TEXT,  -- may contain {id} (appointment id)
+  -- Prepaid platform-usage tokens -- see migrate-2026-09-01-property-token-billing.sql
+  -- and lib/tokens.js. Changed only via spend()/credit(), which also write the ledger.
+  token_balance      INT NOT NULL DEFAULT 0,
+  stripe_customer_id VARCHAR(255), -- on the PLATFORM's Stripe account (token purchases), not the venue's
+  fallback_email     VARCHAR(255), -- where enquiries go when there's no token for an AI draft
   created_at       TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT property_ai_reply_mode_check CHECK (ai_reply_mode IN ('off', 'draft', 'auto')),
   CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100)
 );
+
+-- Every token_balance change, as a receipt -- see migrate-2026-09-01-property-token-billing.sql.
+CREATE TABLE IF NOT EXISTS property_token_ledger (
+  id                         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id                UUID NOT NULL REFERENCES property(id),
+  delta                      INT NOT NULL,
+  balance_after              INT NOT NULL,
+  reason                     VARCHAR(40) NOT NULL, -- 'starter' | 'purchase' | 'ai_reply' | 'ai_reply_refund'
+  ref_id                     TEXT,                 -- what it was for: inquiry id, payment intent id, ...
+  stripe_checkout_session_id VARCHAR(255) UNIQUE,  -- purchases only; the idempotency key
+  created_at                 TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_property_token_ledger_property ON property_token_ledger(property_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS property_website (
   id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),

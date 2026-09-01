@@ -89,6 +89,46 @@ async function sendReply(inquiry, propertyName, body, priorMessages = []) {
   return data.id;
 }
 
+// The out-of-tokens fallback for an AI reply: hand the enquiry to the venue's
+// own inbox instead. Reply-To is the guest, so answering from the mail
+// client goes straight to them -- that reply never passes through OTA, which
+// is the "poor alternative" a token would have bought them out of.
+// `latestMessage` is the inbound guest reply that triggered this (null on a
+// brand-new enquiry, whose text is inquiry.message).
+async function sendInquiryForward(inquiry, propertyName, toEmail, latestMessage = null) {
+  if (!client) throw new Error('Resend not configured');
+  const details = [
+    ['Name', inquiry.name],
+    ['Email', inquiry.email],
+    ['Phone', inquiry.phone],
+    ['Date', inquiry.event_date ? formatAppointmentDate(inquiry.event_date) : null],
+    ['Time', inquiry.event_time ? String(inquiry.event_time).slice(0, 5) : null],
+    ['Guests', inquiry.guests],
+    ['Type', [inquiry.event_type, inquiry.format].filter(Boolean).join(' / ') || null],
+  ].filter(([, v]) => v != null && v !== '');
+  const body = latestMessage ?? inquiry.message ?? '';
+  const heading = latestMessage ? `${inquiry.name} replied to their enquiry` : `New enquiry from ${inquiry.name}`;
+  const note = 'This was sent to you because your Forge account is out of AI reply tokens. Reply to this email to answer the guest directly, or top up under Settings > Billing to have replies drafted for you.';
+
+  const { data, error } = await client.emails.send({
+    from: `Forge <inquiries@hotal.forge-build.co.uk>`,
+    to: toEmail,
+    replyTo: inquiry.email,
+    subject: `${heading} — ${propertyName}`,
+    text: `${heading}\n\n${details.map(([k, v]) => `${k}: ${v}`).join('\n')}\n\n${body}\n\n---\n${note}`,
+    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.5;max-width:600px;">
+      <h2 style="font-size:16px;margin:0 0 12px;">${escapeHtml(heading)}</h2>
+      <table style="border-collapse:collapse;margin:0 0 16px;font-size:13px;">${details
+        .map(([k, v]) => `<tr><td style="padding:2px 12px 2px 0;color:#666;">${escapeHtml(k)}</td><td style="padding:2px 0;">${escapeHtml(v)}</td></tr>`)
+        .join('')}</table>
+      ${textToHtmlParagraphs(body)}
+      <p style="margin:24px 0 0;padding-top:12px;border-top:1px solid #e0e0e0;font-size:12px;color:#888;">${escapeHtml(note)}</p>
+    </div>`,
+  });
+  if (error) throw new Error(error.message);
+  return data.id;
+}
+
 function formatMoney(amount, currency) {
   try {
     return new Intl.NumberFormat('en-GB', { style: 'currency', currency: currency || 'GBP' }).format(amount);
@@ -235,6 +275,7 @@ async function getReceivedEmail(emailId) {
 
 module.exports = {
   sendReply,
+  sendInquiryForward,
   sendAppointmentConfirmation,
   sendAppointmentCancellation,
   verifyInboundWebhook,

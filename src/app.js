@@ -25,10 +25,12 @@ const proshopRoutes = require('./routes/proshop');
 const propertyRoutes = require('./routes/property');
 const eventInquiryRoutes = require('./routes/eventInquiries');
 const mcpRoutes = require('./routes/mcp');
+const billingRoutes = require('./routes/billing');
 
 const app = express();
 
 const { handleResendInboundWebhook } = require('./controllers/eventInquiries');
+const { handleStripeWebhook } = require('./controllers/billing');
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
@@ -39,6 +41,12 @@ app.post(
   '/api/event-inquiries/webhooks/resend-inbound',
   express.raw({ type: 'application/json' }),
   handleResendInboundWebhook
+);
+// Same reason: Stripe signature verification needs the raw body.
+app.post(
+  '/api/billing/webhooks/stripe',
+  express.raw({ type: 'application/json' }),
+  handleStripeWebhook
 );
 
 app.use(express.json());
@@ -66,6 +74,7 @@ app.use('/api/proshop', proshopRoutes);
 app.use('/api/property', propertyRoutes);
 app.use('/api/event-inquiries', eventInquiryRoutes);
 app.use('/api/mcp', mcpRoutes);
+app.use('/api/billing', billingRoutes);
 
 app.use(errorHandler);
 

@@ -1,6 +1,7 @@
 const { createClerkClient, verifyToken } = require('@clerk/backend');
 const pool = require('../db');
 const { apiKeyRateLimiter } = require('./rateLimiter');
+const { grantStarter } = require('../lib/tokens');
 
 if (!process.env.CLERK_SECRET_KEY) {
   throw new Error('CLERK_SECRET_KEY is required');
@@ -47,6 +48,9 @@ async function authenticate(req, res, next) {
         [org.name.slice(0, 100), orgId]
       );
       propertyId = rows[0].id;
+      // Free starter tokens so the metered features work before anyone is
+      // asked for a card. Not fatal: a failed grant just means zero balance.
+      await grantStarter(propertyId).catch((err) => console.error(`Starter token grant failed for property ${propertyId}:`, err.message));
     }
 
     req.property_id = propertyId;
