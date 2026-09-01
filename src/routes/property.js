@@ -26,6 +26,9 @@ router.post('/stripe/key/clear', authenticate, requireRole('admin'), ctrl.clearS
 router.get('/ai-replies', authenticate, ctrl.getAiReplySettings);
 router.put('/ai-replies', authenticate, requireRole('admin'), ctrl.updateAiReplySettings);
 
+router.get('/email-branding', authenticate, ctrl.getEmailBranding);
+router.put('/email-branding', authenticate, requireRole('admin'), ctrl.updateEmailBranding);
+
 router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
 router.post('/websites', authenticate, ctrl.createWebsite);
 router.put('/websites/:id', authenticate, ctrl.updateWebsite);

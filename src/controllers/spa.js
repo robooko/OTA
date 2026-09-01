@@ -643,12 +643,31 @@ async function getFullAppointmentForEmail(appointmentId) {
   return rows[0] || null;
 }
 
+// A request's own branding / cancel_url wins; otherwise the property's
+// defaults (Settings -> Branding, property.email_branding/email_cancel_url)
+// apply -- so bookings made from the dashboard or by an AI reply are branded
+// without every caller having to resend the same values. undefined means
+// "not supplied"; an explicit null is honoured as "plain".
+async function resolveEmailBranding(propertyId, branding, cancelUrl) {
+  if (branding !== undefined && cancelUrl !== undefined) return { branding, cancelUrl };
+  const { rows: [p] } = await pool.query('SELECT email_branding, email_cancel_url FROM property WHERE id = $1', [propertyId]);
+  return {
+    branding: branding !== undefined ? branding : p?.email_branding ?? undefined,
+    cancelUrl: cancelUrl !== undefined ? cancelUrl : p?.email_cancel_url ?? undefined,
+  };
+}
+
 // Fire-and-forget publish + (optional) email after a commit, shared by
 // createAppointment and updateAppointment's cancellation path. Never throws
 // -- every failure is caught and logged, matching the existing Ably
 // .catch() convention in this file.
-async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawInsertedRow, branding, cancelUrl) {
+async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawInsertedRow, requestBranding, requestCancelUrl) {
   publishNewAppointment(spaId, rawInsertedRow).catch((err) => console.error('Ably publish failed:', err.message));
+
+  const { branding, cancelUrl } = await resolveEmailBranding(propertyId, requestBranding, requestCancelUrl).catch((err) => {
+    console.error('Failed to load property email branding:', err.message);
+    return { branding: requestBranding, cancelUrl: requestCancelUrl };
+  });
 
   const full = await getFullAppointmentForEmail(appointmentId).catch((err) => {
     console.error('Failed to load full appointment for Ably/email:', err.message);
@@ -1035,7 +1054,8 @@ async function updateAppointment(req, res, next) {
           .catch((err) => console.error('Ably publish failed:', err.message));
 
         if (rows[0].status === 'cancelled' && full.contact_email) {
-          sendAppointmentCancellation(full, full.property_name, branding)
+          resolveEmailBranding(req.property_id, branding, null)
+            .then(({ branding: resolved }) => sendAppointmentCancellation(full, full.property_name, resolved))
             .catch((err) => console.error('Cancellation email failed:', err.message));
         }
       }

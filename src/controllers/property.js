@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const pool = require('../db');
-const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate } = require('../middleware/validate');
+const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate, validateBranding, validateCancelUrl } = require('../middleware/validate');
 const { isConfigured: aiConfigured, MODEL: AI_MODEL } = require('../lib/aiReplies');
 
 const AI_REPLY_MODES = ['off', 'draft', 'auto'];
@@ -473,7 +473,70 @@ async function updateAiReplySettings(req, res, next) {
   }
 }
 
+// ── Email branding ────────────────────────────────────────────────────────
+// Default {logo_url, brand_color, header_bg} + cancel_url for booking emails
+// (see migrate-2026-09-01-property-email-branding.sql). Flattened to one
+// object for the API/UI; stored as email_branding JSONB + email_cancel_url.
+
+const BRANDING_KEYS = ['logo_url', 'brand_color', 'header_bg'];
+
+function emailBrandingResponse(row) {
+  const b = row.email_branding ?? {};
+  return {
+    logo_url: b.logo_url ?? null,
+    brand_color: b.brand_color ?? null,
+    header_bg: b.header_bg ?? null,
+    cancel_url: row.email_cancel_url ?? null,
+  };
+}
+
+async function getEmailBranding(req, res, next) {
+  try {
+    const { rows } = await pool.query('SELECT email_branding, email_cancel_url FROM property WHERE id = $1', [req.property_id]);
+    res.json(emailBrandingResponse(rows[0]));
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Per field: omit = unchanged, null or '' = clear. Validation reuses the
+// per-request rules so a value accepted here is exactly what a website could
+// have sent with a booking.
+async function updateEmailBranding(req, res, next) {
+  try {
+    const body = req.body ?? {};
+    const { rows: [current] } = await pool.query('SELECT email_branding, email_cancel_url FROM property WHERE id = $1', [req.property_id]);
+    const branding = { ...(current.email_branding ?? {}) };
+    for (const key of BRANDING_KEYS) {
+      if (body[key] === undefined) continue;
+      const value = typeof body[key] === 'string' ? body[key].trim() : body[key];
+      if (value === null || value === '') delete branding[key];
+      else branding[key] = value;
+    }
+    const brandingError = validateBranding(branding);
+    if (brandingError) return res.status(400).json({ error: brandingError });
+
+    let cancelUrl = current.email_cancel_url;
+    if (body.cancel_url !== undefined) {
+      const value = typeof body.cancel_url === 'string' ? body.cancel_url.trim() : body.cancel_url;
+      cancelUrl = value === null || value === '' ? null : value;
+      const cancelUrlError = validateCancelUrl(cancelUrl);
+      if (cancelUrlError) return res.status(400).json({ error: cancelUrlError });
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE property SET email_branding = $1, email_cancel_url = $2 WHERE id = $3
+       RETURNING email_branding, email_cancel_url`,
+      [Object.keys(branding).length ? JSON.stringify(branding) : null, cancelUrl, req.property_id]
+    );
+    res.json(emailBrandingResponse(rows[0]));
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
+  getEmailBranding, updateEmailBranding,
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,

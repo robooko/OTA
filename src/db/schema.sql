@@ -27,6 +27,11 @@ CREATE TABLE IF NOT EXISTS property (
   ai_reply_mode                VARCHAR(10) NOT NULL DEFAULT 'off',
   ai_reply_instructions        TEXT, -- venue knowledge/tone/limits; the ONLY facts the model may state
   ai_reply_auto_send_min_score INT NOT NULL DEFAULT 80,
+  -- Default email branding for booking confirmations/cancellations -- see
+  -- migrate-2026-09-01-property-email-branding.sql. A request's own
+  -- branding/cancel_url (website booking, event_inquiry.branding) overrides.
+  email_branding   JSONB, -- {logo_url, brand_color, header_bg}
+  email_cancel_url TEXT,  -- may contain {id} (appointment id)
   created_at       TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT property_ai_reply_mode_check CHECK (ai_reply_mode IN ('off', 'draft', 'auto')),
   CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100)
