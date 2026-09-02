@@ -501,6 +501,18 @@ function createTools(apiRequest) {
     run: ({ id, draft_id, reason }) => apiRequest('POST', `/api/event-inquiries/${id}/ai-drafts/${draft_id}/reject`, { body: reason ? { reason } : {} }),
   },
   {
+    name: 'get_ai_reply_settings',
+    description: "The property's AI enquiry-reply settings: mode (off/draft/auto), instructions, auto_send_min_score, and whether the feature is configured on this server",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/property/ai-replies'),
+  },
+  {
+    name: 'set_ai_reply_instructions',
+    description: 'Set the venue knowledge the AI may state facts from when drafting enquiry replies -- capacities, packages, pricing, policies, tone (max 8000 chars; null clears). Replaces the whole text, so read get_ai_reply_settings first and merge. Mode and the auto-send threshold are dashboard-admin only.',
+    inputSchema: { instructions: z.string().nullable().describe('The full replacement instructions text, or null to clear') },
+    run: ({ instructions }) => apiRequest('PUT', '/api/property/ai-replies/instructions', { body: { instructions } }),
+  },
+  {
     name: 'list_spas',
     description: 'List spas for this property',
     inputSchema: {},

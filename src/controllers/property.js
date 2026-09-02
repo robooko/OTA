@@ -535,6 +535,33 @@ async function updateEmailBranding(req, res, next) {
   }
 }
 
+// Instructions-only write for the API-key rail (MCP set_ai_reply_instructions):
+// venue automation may tune what the AI is told about the venue, but mode and
+// the auto-send threshold -- the knobs that decide whether emails leave
+// unsupervised -- stay bearer+admin (updateAiReplySettings above).
+async function updateAiReplyInstructions(req, res, next) {
+  try {
+    const { instructions } = req.body ?? {};
+    if (instructions === undefined) {
+      return res.status(400).json({ error: 'instructions is required (a string, or null to clear)' });
+    }
+    if (instructions !== null) {
+      if (typeof instructions !== 'string') return res.status(400).json({ error: 'instructions must be a string or null' });
+      if (instructions.length > AI_INSTRUCTIONS_MAX_LENGTH) {
+        return res.status(400).json({ error: `instructions must be at most ${AI_INSTRUCTIONS_MAX_LENGTH} characters` });
+      }
+    }
+    const { rows } = await pool.query(
+      `UPDATE property SET ai_reply_instructions = $1 WHERE id = $2
+       RETURNING ai_reply_mode, ai_reply_instructions, ai_reply_auto_send_min_score`,
+      [instructions?.trim() || null, req.property_id]
+    );
+    res.json(aiReplySettingsResponse(rows[0]));
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getEmailBranding, updateEmailBranding,
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
@@ -542,5 +569,5 @@ module.exports = {
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,
   setVercelPat, clearVercelPat,
   getStripeStatus, setStripeKey, clearStripeKey,
-  getAiReplySettings, updateAiReplySettings,
+  getAiReplySettings, updateAiReplySettings, updateAiReplyInstructions,
 };

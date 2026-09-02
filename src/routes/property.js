@@ -23,8 +23,12 @@ router.get('/stripe/status', authenticate, ctrl.getStripeStatus);
 router.put('/stripe/key', authenticate, requireRole('admin'), ctrl.setStripeKey);
 router.post('/stripe/key/clear', authenticate, requireRole('admin'), ctrl.clearStripeKey);
 
-router.get('/ai-replies', authenticate, ctrl.getAiReplySettings);
+// GET and the instructions-only PUT are on the API-key rail too, so the MCP
+// tools (get_ai_reply_settings / set_ai_reply_instructions) can guide a
+// venue's setup; mode and auto_send_min_score stay bearer+admin.
+router.get('/ai-replies', authenticateOrApiKey, ctrl.getAiReplySettings);
 router.put('/ai-replies', authenticate, requireRole('admin'), ctrl.updateAiReplySettings);
+router.put('/ai-replies/instructions', authenticateOrApiKey, ctrl.updateAiReplyInstructions);
 
 router.get('/email-branding', authenticate, ctrl.getEmailBranding);
 router.put('/email-branding', authenticate, requireRole('admin'), ctrl.updateEmailBranding);
