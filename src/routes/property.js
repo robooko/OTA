@@ -2,7 +2,9 @@ const router = require('express').Router();
 const ctrl = require('../controllers/property');
 const { authenticate, authenticateOrApiKey, requireRole } = require('../middleware/auth');
 
-router.get('/me', authenticate, ctrl.getCurrentProperty);
+// Read-only identity (id, name, currency, timezone) is on the API-key rail
+// too, so the MCP get_property tool can confirm which venue it operates for.
+router.get('/me', authenticateOrApiKey, ctrl.getCurrentProperty);
 router.put('/me', authenticate, requireRole('admin'), ctrl.updateCurrentProperty);
 
 router.get('/api-key', authenticate, requireRole('admin'), ctrl.getApiKey);

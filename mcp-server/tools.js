@@ -501,6 +501,12 @@ function createTools(apiRequest) {
     run: ({ id, draft_id, reason }) => apiRequest('POST', `/api/event-inquiries/${id}/ai-drafts/${draft_id}/reject`, { body: reason ? { reason } : {} }),
   },
   {
+    name: 'get_property',
+    description: 'The property (venue/org) this API key operates for: id, name, currency, timezone',
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/property/me'),
+  },
+  {
     name: 'get_ai_reply_settings',
     description: "The property's AI enquiry-reply settings: mode (off/draft/auto), instructions, auto_send_min_score, and whether the feature is configured on this server",
     inputSchema: {},
