@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS property (
   token_balance      INT NOT NULL DEFAULT 0,
   stripe_customer_id VARCHAR(255), -- on the PLATFORM's Stripe account (token purchases), not the venue's
   fallback_email     VARCHAR(255), -- where enquiries go when there's no token for an AI draft
+  -- Google Business Profile place id for the live-reviews endpoint -- see
+  -- migrate-2026-09-02-property-google-reviews.sql.
+  google_place_id  TEXT,
   created_at       TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT property_ai_reply_mode_check CHECK (ai_reply_mode IN ('off', 'draft', 'auto')),
   CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100)
@@ -54,6 +57,14 @@ CREATE TABLE IF NOT EXISTS property_token_ledger (
   created_at                 TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_property_token_ledger_property ON property_token_ledger(property_id, created_at DESC);
+
+-- Cached Places API payload per property -- see
+-- migrate-2026-09-02-property-google-reviews.sql.
+CREATE TABLE IF NOT EXISTS google_reviews_cache (
+  property_id UUID PRIMARY KEY REFERENCES property(id) ON DELETE CASCADE,
+  payload     JSONB NOT NULL,
+  fetched_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS property_website (
   id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),

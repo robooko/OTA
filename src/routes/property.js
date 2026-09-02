@@ -32,6 +32,11 @@ router.get('/ai-replies', authenticateOrApiKey, ctrl.getAiReplySettings);
 router.put('/ai-replies', authenticate, requireRole('admin'), ctrl.updateAiReplySettings);
 router.put('/ai-replies/instructions', authenticateOrApiKey, ctrl.updateAiReplyInstructions);
 
+// Both on the API-key rail: the venue site's server proxy reads the cached
+// reviews, and onboarding tooling/MCP sets the place id.
+router.get('/google-reviews', authenticateOrApiKey, ctrl.getGoogleReviews);
+router.put('/google-place-id', authenticateOrApiKey, ctrl.setGooglePlaceId);
+
 router.get('/email-branding', authenticate, ctrl.getEmailBranding);
 router.put('/email-branding', authenticate, requireRole('admin'), ctrl.updateEmailBranding);
 
