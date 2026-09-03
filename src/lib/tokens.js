@@ -9,8 +9,27 @@ const pool = require('../db');
 
 // What each metered action costs. The key doubles as the ledger reason.
 const TOKEN_COSTS = {
-  ai_reply: 1, // one AI-drafted enquiry reply (Anthropic call)
+  ai_reply: 1,   // one AI-drafted enquiry reply (Anthropic call)
+  reply_send: 1, // one outbound reply email (Resend call) -- charged whether
+                 // the body was hand-typed or an approved AI draft, since
+                 // sending costs the same either way. Separate from ai_reply:
+                 // drafting and sending are two different real costs.
 };
+
+// Thrown by spend()'s callers when a metered action can't proceed on the
+// current balance. Controllers map it to 402 automatically (status is read
+// generically by middleware/errorHandler); the dashboard treats 402 on a
+// reply-send as "open the guest's own email client instead" rather than a
+// bare error.
+class InsufficientTokensError extends Error {
+  constructor(balance, cost) {
+    super(`Not enough tokens (balance ${balance}, need ${cost})`);
+    this.name = 'InsufficientTokensError';
+    this.status = 402;
+    this.balance = balance;
+    this.cost = cost;
+  }
+}
 
 // Granted once to every new property so the paid features get tried before
 // anyone is asked for a card. The migration grants the same to existing ones.
@@ -107,4 +126,4 @@ async function listLedger(propertyId, limit = 50) {
   return rows;
 }
 
-module.exports = { TOKEN_COSTS, STARTER_BALANCE, getBalance, spend, credit, grantStarter, listLedger };
+module.exports = { TOKEN_COSTS, STARTER_BALANCE, InsufficientTokensError, getBalance, spend, credit, grantStarter, listLedger };

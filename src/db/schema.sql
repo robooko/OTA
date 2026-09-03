@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS property_token_ledger (
   property_id                UUID NOT NULL REFERENCES property(id),
   delta                      INT NOT NULL,
   balance_after              INT NOT NULL,
-  reason                     VARCHAR(40) NOT NULL, -- 'starter' | 'purchase' | 'ai_reply' | 'ai_reply_refund'
+  reason                     VARCHAR(40) NOT NULL, -- 'starter' | 'purchase' | 'ai_reply' | 'ai_reply_refund' | 'reply_send'
   ref_id                     TEXT,                 -- what it was for: inquiry id, payment intent id, ...
   stripe_checkout_session_id VARCHAR(255) UNIQUE,  -- purchases only; the idempotency key
   created_at                 TIMESTAMPTZ DEFAULT now()

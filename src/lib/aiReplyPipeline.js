@@ -12,20 +12,8 @@ const { isConfigured, generateInquiryReply, AiReplyError, MODEL } = require('./a
 const { loadInquiryWithProperty, sendOutboundReply } = require('./inquiryReplies');
 const { bookFromAvailability } = require('../controllers/spa');
 const tokens = require('./tokens');
+const { InsufficientTokensError } = tokens;
 const { sendInquiryForward } = require('./resend');
-
-// Thrown by generateDraft when the property has no token for the model
-// call. runAiReply turns it into the free fallback (forward to the venue's
-// inbox); the manual endpoint maps it to 402.
-class InsufficientTokensError extends Error {
-  constructor(balance, cost) {
-    super(`Not enough tokens for an AI reply (balance ${balance}, cost ${cost})`);
-    this.name = 'InsufficientTokensError';
-    this.status = 402;
-    this.balance = balance;
-    this.cost = cost;
-  }
-}
 
 // Hard cap on unreviewed sends per inquiry. Defends against an auto-responder
 // on the guest's side (out-of-office bouncing our reply back, each bounce

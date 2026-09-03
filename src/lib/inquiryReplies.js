@@ -9,6 +9,8 @@
 const pool = require('../db');
 const { sendReply } = require('./resend');
 const { publishNewReply, publishInquiryUpdated, publishNewReplyForSpa, publishInquiryUpdatedForSpa } = require('./ably');
+const tokens = require('./tokens');
+const { InsufficientTokensError } = tokens;
 
 // Inquiry joined to its property, including the property's AI-reply
 // settings. propertyId is optional: request handlers pass req.property_id
@@ -32,6 +34,16 @@ async function loadInquiryWithProperty(inquiryId, propertyId = null) {
 // aiDraftId: links the message back to the AI draft it came from, if any.
 // Returns { message, inquiry } where inquiry reflects any status flip.
 async function sendOutboundReply({ inquiry, body, sender = null, aiDraftId = null }) {
+  // Charged before anything else: a hand-typed reply and an approved AI
+  // draft both end up sending one real Resend email, so both pay for it
+  // here rather than only the AI-drafted path paying (at generateDraft) and
+  // manual replies going out for free forever. Not caught below on purpose
+  // -- every caller (createReply, sendDraft) already propagates via
+  // next(err)/its own catch, and the 402 is what tells the dashboard to
+  // fall back to the guest's own email client instead of Resend.
+  const spent = await tokens.spend(inquiry.property_id, 'reply_send', inquiry.id);
+  if (!spent.ok) throw new InsufficientTokensError(spent.balance, spent.cost);
+
   const { rows: priorMessages } = await pool.query(
     'SELECT direction, body, sent_by_name, created_at FROM event_inquiry_message WHERE event_inquiry_id = $1 ORDER BY created_at ASC',
     [inquiry.id]
