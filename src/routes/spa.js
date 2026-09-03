@@ -7,6 +7,7 @@ const { authenticateOrApiKey } = require('../middleware/auth');
 // dashboard action -- the appointment id is the capability. Must not sit
 // behind authenticateOrApiKey.
 router.get('/review-opt-out/:appointment_id', ctrl.reviewOptOut);
+router.get('/reminder-opt-out/:appointment_id/:channel', ctrl.reminderOptOut);
 
 // Spas
 router.get('/', authenticateOrApiKey, ctrl.listSpas);

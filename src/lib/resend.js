@@ -168,14 +168,15 @@ function brandingHeaderHtml(branding, propertyName) {
       </div>`;
 }
 
-// Muted address/phone footer shared by every appointment-shaped email.
-// `extraHtml` (e.g. sendReviewRequest's unsubscribe link) renders as one
-// more line below address/phone; the wrapper only appears when there's
-// something to show.
-function addressFooterHtml(appointment, extraHtml = '') {
+// Muted address/phone footer shared by every booking-shaped email (spa
+// appointments, restaurant reservations). `extraHtml` (e.g. an unsubscribe
+// link) renders as one more line below address/phone; the wrapper only
+// appears when there's something to show. `address` is optional -- a
+// restaurant has no address column, only phone.
+function addressFooterHtml({ address, phone }, extraHtml = '') {
   const parts = [];
-  if (appointment.spa_address) parts.push(escapeHtml(appointment.spa_address));
-  if (appointment.spa_phone) parts.push(escapeHtml(appointment.spa_phone));
+  if (address) parts.push(escapeHtml(address));
+  if (phone) parts.push(escapeHtml(phone));
   if (extraHtml) parts.push(extraHtml);
   return parts.length
     ? `<div style="margin-top:24px;padding-top:14px;border-top:1px solid #e0e0e0;font-size:12px;color:#888;line-height:1.7;">${parts.join('<br>')}</div>`
@@ -189,7 +190,7 @@ function addressFooterHtml(appointment, extraHtml = '') {
 // by spa.js's validateBranding) only affects the HTML header's logo/colors,
 // and `cancelUrl` (validated http(s) URL) only adds a cancel link/button --
 // neither is persisted, and neither can touch the booking text itself.
-async function sendAppointmentEmail(appointment, propertyName, verb, extraLines, branding, cancelUrl) {
+async function sendAppointmentEmail(appointment, propertyName, verb, extraLines, branding, cancelUrl, extraFooterHtml = '', extraFooterLines = []) {
   if (!client) throw new Error('Resend not configured');
   const dateLabel = formatAppointmentDate(appointment.appointment_date);
   const timeLabel = appointment.start_time.slice(0, 5);
@@ -205,6 +206,11 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
     ...extraLines,
   ];
   if (cancelUrl) lines.push(`Cancel your booking: ${cancelUrl}`, '');
+  // Footer-only content (e.g. an unsubscribe URL): appended once here for
+  // the text part, and separately as extraFooterHtml for the HTML part --
+  // extraLines above would otherwise render it twice in HTML (once as a
+  // plain paragraph, once properly linked in the footer).
+  lines.push(...extraFooterLines);
   if (appointment.spa_address) lines.push(appointment.spa_address);
   if (appointment.spa_phone) lines.push(appointment.spa_phone);
   const text = lines.join('\n');
@@ -232,7 +238,7 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
       </div>`
     : '';
 
-  const footerHtml = addressFooterHtml(appointment);
+  const footerHtml = addressFooterHtml({ address: appointment.spa_address, phone: appointment.spa_phone }, extraFooterHtml);
 
   const { data, error } = await client.emails.send({
     from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
@@ -273,6 +279,76 @@ function sendAppointmentCancellation(appointment, propertyName, branding) {
   ], branding);
 }
 
+// Sent once, ~reminder_hours_before an appointment's start time (see
+// src/lib/reminders.js). Reuses sendAppointmentEmail's whole skeleton --
+// "Booking reminder — Skin Fade, 5 Sept at 11:00" reads exactly like the
+// confirmation/cancellation subjects either side of it -- with an
+// unsubscribe link appended to the footer, since a reminder (unlike a
+// confirmation) is something a guest can reasonably opt out of.
+function sendSpaReminder(appointment, propertyName, branding, optOutUrl) {
+  const unsubscribeHtml = `<a href="${escapeHtml(optOutUrl)}" style="color:#888;text-decoration:underline;">Don't want these? Unsubscribe</a>`;
+  return sendAppointmentEmail(
+    appointment, propertyName, 'reminder',
+    ['We look forward to seeing you.', ''],
+    branding, null,
+    unsubscribeHtml,
+    [`Don't want these? Unsubscribe: ${optOutUrl}`, '']
+  );
+}
+
+// Restaurant has no confirmation-email path yet (unlike spa) to reuse, so
+// this is a new function -- same skeleton (header / greeting / details
+// card / footer) as sendAppointmentEmail, just without a treatment/price
+// (a reservation carries neither). `reservation` is the joined shape from
+// reminders.js's own query: rr.* plus restaurant_name, restaurant_phone.
+async function sendReservationReminder(reservation, propertyName, branding, optOutUrl) {
+  if (!client) throw new Error('Resend not configured');
+  const dateLabel = formatAppointmentDate(reservation.reservation_date);
+  const timeLabel = reservation.start_time.slice(0, 5);
+  const subject = `Reminder — your table at ${propertyName}, ${dateLabel} at ${timeLabel}`;
+  const note = 'We look forward to seeing you.';
+
+  const text = [
+    `Hi ${reservation.contact_name},`,
+    '',
+    `Table for ${reservation.party_size} at ${propertyName}`,
+    `${dateLabel} at ${timeLabel}`,
+    '',
+    note,
+    '',
+    `Don't want these? Unsubscribe: ${optOutUrl}`,
+    '',
+    reservation.restaurant_phone,
+  ]
+    .filter((line) => line !== undefined && line !== null)
+    .join('\n');
+
+  const logoHtml = brandingHeaderHtml(branding, propertyName);
+  const detailsHtml = `
+    <div style="background:#f6f6f4;border-radius:8px;padding:18px 20px;margin:0 0 16px;">
+      <div style="font-size:16px;font-weight:600;margin:0 0 4px;">Table for ${reservation.party_size}</div>
+      <div style="font-size:14px;color:#555;">${escapeHtml(dateLabel)} at ${escapeHtml(timeLabel)}</div>
+    </div>`;
+  const unsubscribeHtml = `<a href="${escapeHtml(optOutUrl)}" style="color:#888;text-decoration:underline;">Don't want these? Unsubscribe</a>`;
+  const footerHtml = addressFooterHtml({ phone: reservation.restaurant_phone }, unsubscribeHtml);
+
+  const { data, error } = await client.emails.send({
+    from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
+    to: reservation.contact_email,
+    subject,
+    text,
+    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;margin:0 auto;">
+      ${logoHtml}
+      <p style="margin:0 0 16px;">Hi ${escapeHtml(reservation.contact_name)},</p>
+      ${detailsHtml}
+      <p style="margin:0 0 20px;">${escapeHtml(note)}</p>
+      ${footerHtml}
+    </div>`,
+  });
+  if (error) throw new Error(error.message);
+  return data.id;
+}
+
 // Sent once, ~review_request_delay_mins after an appointment ends (see
 // src/lib/reviewRequester.js) -- never gated on rating, tip, or repeat
 // status; every eligible attendee gets the same words, per Google's review
@@ -307,7 +383,7 @@ async function sendReviewRequest(appointment, propertyName, branding, reviewUrl,
       <a href="${escapeHtml(reviewUrl)}" style="display:inline-block;background:${branding?.brand_color || '#1a1a1a'};color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:6px;">Leave a Google review</a>
     </div>`;
   const unsubscribeHtml = `<a href="${escapeHtml(optOutUrl)}" style="color:#888;text-decoration:underline;">Don't want these? Unsubscribe</a>`;
-  const footerHtml = addressFooterHtml(appointment, unsubscribeHtml);
+  const footerHtml = addressFooterHtml({ address: appointment.spa_address, phone: appointment.spa_phone }, unsubscribeHtml);
 
   const { data, error } = await client.emails.send({
     from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
@@ -348,11 +424,14 @@ async function getReceivedEmail(emailId) {
 
 module.exports = {
   escapeHtml,
+  formatAppointmentDate,
   brandingHeaderHtml,
   sendReply,
   sendInquiryForward,
   sendAppointmentConfirmation,
   sendAppointmentCancellation,
+  sendSpaReminder,
+  sendReservationReminder,
   sendReviewRequest,
   verifyInboundWebhook,
   getReceivedEmail,

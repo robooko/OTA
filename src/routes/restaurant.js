@@ -2,6 +2,10 @@ const router = require('express').Router();
 const ctrl = require('../controllers/restaurant');
 const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
 
+// Unauthenticated: a link in the reminder email/text itself, not a
+// dashboard action -- the reservation id is the capability.
+router.get('/reminder-opt-out/:reservation_id/:channel', ctrl.reminderOptOut);
+
 // Restaurants
 router.get('/', authenticateOrApiKey, ctrl.listRestaurants);
 router.post('/', authenticateOrApiKey, ctrl.createRestaurant);

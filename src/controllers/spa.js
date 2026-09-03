@@ -1094,8 +1094,9 @@ async function updateAppointment(req, res, next) {
 // GET, unauthenticated -- the appointment UUID is the capability (unguessable,
 // only ever in that customer's own review-request email), same reasoning as
 // the {id} cancel link. Idempotent: a mail client prefetching the link is
-// harmless. Registered on the allow-list in app.js alongside the Resend
-// inbound webhook.
+// harmless. Just skips authenticateOrApiKey in routes/spa.js -- no raw body
+// needed, so unlike the Resend webhook it has no reason to be in app.js's
+// pre-express.json() allow-list.
 async function reviewOptOut(req, res, next) {
   try {
     const { appointment_id } = req.params;
@@ -1120,6 +1121,38 @@ async function reviewOptOut(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// GET, unauthenticated -- same capability-in-the-URL reasoning as
+// reviewOptOut above. `channel` is 'email' or 'sms' since a reminder text
+// and a reminder email are opted out of independently (an SMS "STOP" reply
+// shouldn't silence a guest's reminder emails too, and vice versa).
+async function reminderOptOut(req, res, next) {
+  try {
+    const { appointment_id, channel } = req.params;
+    if (channel !== 'email' && channel !== 'sms') return res.status(400).send('<p>Invalid link.</p>');
+
+    const { rows } = await pool.query(
+      `SELECT sa.property_id, sa.contact_email, sa.contact_phone, p.name AS property_name
+       FROM spa_appointment sa JOIN property p ON p.id = sa.property_id
+       WHERE sa.id = $1`,
+      [appointment_id]
+    );
+    const appointment = rows[0];
+    if (!appointment) return res.status(404).send('<p>That link is no longer valid.</p>');
+
+    const contact = channel === 'email' ? appointment.contact_email : appointment.contact_phone;
+    if (contact) {
+      await pool.query(
+        `INSERT INTO reminder_opt_out (property_id, channel, contact) VALUES ($1, $2, lower($3))
+         ON CONFLICT DO NOTHING`,
+        [appointment.property_id, channel, contact]
+      );
+    }
+
+    const noun = channel === 'sms' ? 'texts' : 'emails';
+    res.send(`<p>You won't get reminder ${noun} from ${escapeHtml(appointment.property_name)} again.</p>`);
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   listSpas, getSpa, createSpa, updateSpa,
   listTreatments, createTreatment, updateTreatment,
@@ -1136,4 +1169,5 @@ module.exports = {
   getFullAppointmentForEmail,
   resolveEmailBranding,
   reviewOptOut,
+  reminderOptOut,
 };

@@ -46,6 +46,13 @@ CREATE TABLE IF NOT EXISTS property (
   review_url                   TEXT,
   review_request_delay_mins    INT NOT NULL DEFAULT 120,
   review_request_cooldown_days INT NOT NULL DEFAULT 90,
+  -- Pre-visit reminders (spa appointments + restaurant reservations) -- see
+  -- migrate-2026-09-04-booking-reminders.sql. Email on by default once
+  -- reminder_enabled is flipped; SMS needs Twilio env vars set too.
+  reminder_enabled       BOOLEAN NOT NULL DEFAULT false,
+  reminder_email_enabled BOOLEAN NOT NULL DEFAULT true,
+  reminder_sms_enabled   BOOLEAN NOT NULL DEFAULT false,
+  reminder_hours_before  INT NOT NULL DEFAULT 24,
   created_at       TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT property_ai_reply_mode_check CHECK (ai_reply_mode IN ('off', 'draft', 'auto')),
   CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100)
@@ -346,8 +353,17 @@ CREATE TABLE IF NOT EXISTS restaurant_reservation (
   notes            TEXT,
   metadata         JSONB        NOT NULL DEFAULT '{}',
   stripe_payment_intent_id VARCHAR(255),
+  -- Pre-visit reminder send record -- see migrate-2026-09-04-booking-reminders.sql.
+  reminder_sent_at         TIMESTAMPTZ,
+  reminder_email_resend_id TEXT,
+  reminder_sms_sid         TEXT,
+  reminder_attempts        SMALLINT NOT NULL DEFAULT 0,
   created_at       TIMESTAMPTZ  DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_restaurant_reservation_reminder_pending
+  ON restaurant_reservation (property_id, reservation_date)
+  WHERE reminder_sent_at IS NULL AND status = 'confirmed';
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_restaurant_reservation_payment_intent
   ON restaurant_reservation(stripe_payment_intent_id) WHERE stripe_payment_intent_id IS NOT NULL;
@@ -495,6 +511,11 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
   review_request_sent_at         TIMESTAMPTZ,
   review_request_resend_email_id TEXT,
   review_request_attempts        SMALLINT NOT NULL DEFAULT 0,
+  -- Pre-visit reminder send record -- see migrate-2026-09-04-booking-reminders.sql.
+  reminder_sent_at         TIMESTAMPTZ,
+  reminder_email_resend_id TEXT,
+  reminder_sms_sid         TEXT,
+  reminder_attempts        SMALLINT NOT NULL DEFAULT 0,
   created_at                    TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT spa_appointment_payment_status CHECK (payment_status IN ('unpaid', 'paid'))
 );
@@ -509,6 +530,17 @@ CREATE TABLE IF NOT EXISTS review_request_opt_out (
   PRIMARY KEY (property_id, email)
 );
 
+-- Per-channel: opting out of reminder texts doesn't silence reminder
+-- emails, and vice versa. See migrate-2026-09-04-booking-reminders.sql.
+CREATE TABLE IF NOT EXISTS reminder_opt_out (
+  property_id UUID NOT NULL REFERENCES property(id),
+  channel     VARCHAR(10) NOT NULL,
+  contact     VARCHAR(255) NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (property_id, channel, contact),
+  CONSTRAINT reminder_opt_out_channel_check CHECK (channel IN ('email', 'sms'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_spa_treatment_spa       ON spa_treatment(spa_id);
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_spa       ON spa_therapist(spa_id);
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_clerk_user ON spa_therapist(clerk_user_id);
@@ -520,6 +552,9 @@ CREATE INDEX IF NOT EXISTS idx_spa_appointment_therapist_date ON spa_appointment
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_review_pending
   ON spa_appointment (property_id, appointment_date)
   WHERE review_request_sent_at IS NULL AND status = 'confirmed' AND contact_email IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_spa_appointment_reminder_pending
+  ON spa_appointment (property_id, appointment_date)
+  WHERE reminder_sent_at IS NULL AND status = 'confirmed';
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_hours_property   ON spa_therapist_hours(property_id);
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_hours_therapist  ON spa_therapist_hours(therapist_id, day_of_week);
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_time_off_therapist ON spa_therapist_time_off(therapist_id, start_date, end_date);

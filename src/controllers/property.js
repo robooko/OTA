@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const pool = require('../db');
 const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate, validateBranding, validateCancelUrl } = require('../middleware/validate');
 const { isConfigured: aiConfigured, MODEL: AI_MODEL } = require('../lib/aiReplies');
+const twilio = require('../lib/twilio');
 const googleReviews = require('../lib/googleReviews');
 
 // One Places call per property per window; stale cache always beats an
@@ -650,6 +651,65 @@ async function updateEmailBranding(req, res, next) {
   }
 }
 
+// ── Booking reminders ────────────────────────────────────────────────────
+// Pre-visit reminder email/SMS for spa appointments and restaurant
+// reservations -- see migrate-2026-09-04-booking-reminders.sql and
+// src/lib/reminders.js (the sweep that actually sends them).
+
+const REMINDER_FIELDS = 'reminder_enabled, reminder_email_enabled, reminder_sms_enabled, reminder_hours_before';
+
+function reminderSettingsResponse(row) {
+  return {
+    reminder_enabled: row.reminder_enabled,
+    reminder_email_enabled: row.reminder_email_enabled,
+    reminder_sms_enabled: row.reminder_sms_enabled,
+    reminder_hours_before: row.reminder_hours_before,
+    // Whether Twilio env vars are actually set on this deployment -- so the
+    // dashboard can explain why flipping reminder_sms_enabled on does
+    // nothing yet, same shape as ai-replies' `configured` for ANTHROPIC_API_KEY.
+    sms_configured: twilio.isConfigured(),
+  };
+}
+
+async function getReminderSettings(req, res, next) {
+  try {
+    const { rows } = await pool.query(`SELECT ${REMINDER_FIELDS} FROM property WHERE id = $1`, [req.property_id]);
+    res.json(reminderSettingsResponse(rows[0]));
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateReminderSettings(req, res, next) {
+  try {
+    const body = req.body ?? {};
+    const { rows: [current] } = await pool.query(`SELECT ${REMINDER_FIELDS} FROM property WHERE id = $1`, [req.property_id]);
+
+    const enabled = body.reminder_enabled !== undefined ? !!body.reminder_enabled : current.reminder_enabled;
+    const emailEnabled = body.reminder_email_enabled !== undefined ? !!body.reminder_email_enabled : current.reminder_email_enabled;
+    const smsEnabled = body.reminder_sms_enabled !== undefined ? !!body.reminder_sms_enabled : current.reminder_sms_enabled;
+
+    let hoursBefore = current.reminder_hours_before;
+    if (body.reminder_hours_before !== undefined) {
+      hoursBefore = Number(body.reminder_hours_before);
+      if (!Number.isInteger(hoursBefore) || hoursBefore < 1 || hoursBefore > 168) {
+        return res.status(400).json({ error: 'reminder_hours_before must be an integer between 1 and 168' });
+      }
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE property SET reminder_enabled = $1, reminder_email_enabled = $2,
+              reminder_sms_enabled = $3, reminder_hours_before = $4
+       WHERE id = $5
+       RETURNING ${REMINDER_FIELDS}`,
+      [enabled, emailEnabled, smsEnabled, hoursBefore, req.property_id]
+    );
+    res.json(reminderSettingsResponse(rows[0]));
+  } catch (err) {
+    next(err);
+  }
+}
+
 // Instructions-only write for the API-key rail (MCP set_ai_reply_instructions):
 // venue automation may tune what the AI is told about the venue, but mode and
 // the auto-send threshold -- the knobs that decide whether emails leave
@@ -679,6 +739,7 @@ async function updateAiReplyInstructions(req, res, next) {
 
 module.exports = {
   getEmailBranding, updateEmailBranding,
+  getReminderSettings, updateReminderSettings,
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,

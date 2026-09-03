@@ -2,6 +2,7 @@ const pool = require('../db');
 const { isValidDate, isValidTime, isValidCurrencyCode, isValidTimezone } = require('../middleware/validate');
 const { publishNewReservation, publishReservationStatusChanged, publishTableSessionOpened } = require('../lib/ably');
 const { generateJoinCode } = require('../lib/joinCode');
+const { escapeHtml } = require('../lib/resend');
 
 function addMinutesToTime(timeStr, minutesToAdd) {
   const [h, m] = timeStr.split(':').map(Number);
@@ -884,6 +885,38 @@ async function cancelReservation(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// GET, unauthenticated -- same capability-in-the-URL reasoning as
+// spa.js's reminderOptOut (the reservation UUID is unguessable and only
+// ever appears in that guest's own reminder). `channel` is 'email' or 'sms'
+// so a text "opt out" doesn't silence reminder emails and vice versa.
+async function reminderOptOut(req, res, next) {
+  try {
+    const { reservation_id, channel } = req.params;
+    if (channel !== 'email' && channel !== 'sms') return res.status(400).send('<p>Invalid link.</p>');
+
+    const { rows } = await pool.query(
+      `SELECT rr.property_id, rr.contact_email, rr.contact_phone, p.name AS property_name
+       FROM restaurant_reservation rr JOIN property p ON p.id = rr.property_id
+       WHERE rr.id = $1`,
+      [reservation_id]
+    );
+    const reservation = rows[0];
+    if (!reservation) return res.status(404).send('<p>That link is no longer valid.</p>');
+
+    const contact = channel === 'email' ? reservation.contact_email : reservation.contact_phone;
+    if (contact) {
+      await pool.query(
+        `INSERT INTO reminder_opt_out (property_id, channel, contact) VALUES ($1, $2, lower($3))
+         ON CONFLICT DO NOTHING`,
+        [reservation.property_id, channel, contact]
+      );
+    }
+
+    const noun = channel === 'sms' ? 'texts' : 'emails';
+    res.send(`<p>You won't get reminder ${noun} from ${escapeHtml(reservation.property_name)} again.</p>`);
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   listRestaurants, getRestaurant, createRestaurant, updateRestaurant,
   listTables, createTable, updateTable,
@@ -894,4 +927,5 @@ module.exports = {
   listReservations, getReservation, createReservation, updateReservation, seatReservation,
   cancelReservation,
   getReservationPaymentIntent,
+  reminderOptOut,
 };

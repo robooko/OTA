@@ -40,6 +40,9 @@ router.put('/google-place-id', authenticateOrApiKey, ctrl.setGooglePlaceId);
 router.get('/email-branding', authenticate, ctrl.getEmailBranding);
 router.put('/email-branding', authenticate, requireRole('admin'), ctrl.updateEmailBranding);
 
+router.get('/reminders', authenticate, ctrl.getReminderSettings);
+router.put('/reminders', authenticate, requireRole('admin'), ctrl.updateReminderSettings);
+
 router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
 router.post('/websites', authenticate, ctrl.createWebsite);
 router.put('/websites/:id', authenticate, ctrl.updateWebsite);
