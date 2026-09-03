@@ -438,8 +438,14 @@ CREATE TABLE IF NOT EXISTS spa_therapist_time_off (
   therapist_id UUID NOT NULL REFERENCES spa_therapist(id),
   start_date   DATE NOT NULL,
   end_date     DATE NOT NULL,
+  -- Both null: the whole day(s) above. Both set: just that window on each
+  -- day in the range -- a single-hour block, not a whole-day one.
+  start_time   TIME,
+  end_time     TIME,
   reason       VARCHAR(100),
-  CHECK (start_date <= end_date)
+  CHECK (start_date <= end_date),
+  CHECK ((start_time IS NULL) = (end_time IS NULL)),
+  CHECK (start_time IS NULL OR start_time < end_time)
 );
 
 CREATE TABLE IF NOT EXISTS spa_slot (

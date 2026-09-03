@@ -292,7 +292,7 @@ async function listTherapistTimeOff(req, res, next) {
     );
     if (!therapistRes.rows.length) return res.status(404).json({ error: 'Therapist not found' });
 
-    let query = 'SELECT id, start_date, end_date, reason FROM spa_therapist_time_off WHERE therapist_id = $1';
+    let query = 'SELECT id, start_date, end_date, start_time, end_time, reason FROM spa_therapist_time_off WHERE therapist_id = $1';
     const params = [id];
     if (from) { params.push(from); query += ` AND end_date >= $${params.length}`; }
     if (to) { params.push(to); query += ` AND start_date <= $${params.length}`; }
@@ -305,10 +305,17 @@ async function listTherapistTimeOff(req, res, next) {
 async function createTherapistTimeOff(req, res, next) {
   try {
     const { spa_id, id } = req.params;
-    const { start_date, end_date, reason } = req.body;
+    const { start_date, end_date, start_time, end_time, reason } = req.body;
     if (!start_date || !end_date) return res.status(400).json({ error: 'start_date and end_date are required' });
     if (!isValidDate(start_date) || !isValidDate(end_date)) return res.status(400).json({ error: 'Invalid date format' });
     if (start_date > end_date) return res.status(400).json({ error: 'start_date must be before or equal to end_date' });
+    // Both given (a specific window each day in the range) or neither (the
+    // whole day) -- never one without the other, matching the table's own
+    // CHECK constraint, but rejected here with a real error instead of a
+    // raw constraint-violation 500.
+    if (!!start_time !== !!end_time) return res.status(400).json({ error: 'start_time and end_time must be given together' });
+    if (start_time && (!isValidTime(start_time) || !isValidTime(end_time))) return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
+    if (start_time && start_time >= end_time) return res.status(400).json({ error: 'start_time must be before end_time' });
 
     const therapistRes = await pool.query(
       'SELECT id FROM spa_therapist WHERE id = $1 AND spa_id = $2 AND property_id = $3',
@@ -317,9 +324,9 @@ async function createTherapistTimeOff(req, res, next) {
     if (!therapistRes.rows.length) return res.status(404).json({ error: 'Therapist not found' });
 
     const { rows } = await pool.query(
-      `INSERT INTO spa_therapist_time_off (property_id, therapist_id, start_date, end_date, reason)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id, start_date, end_date, reason`,
-      [req.property_id, id, start_date, end_date, reason ?? null]
+      `INSERT INTO spa_therapist_time_off (property_id, therapist_id, start_date, end_date, start_time, end_time, reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, start_date, end_date, start_time, end_time, reason`,
+      [req.property_id, id, start_date, end_date, start_time || null, end_time || null, reason ?? null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -388,8 +395,12 @@ async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = n
            AND t.status = 'active'
            AND ($5::uuid IS NULL OR t.id = $5)
            AND NOT EXISTS (
+             -- Whole-day rows only (start_time IS NULL) -- a partial-day row
+             -- doesn't rule the therapist out of the date entirely, it just
+             -- blocks its own window, checked per-candidate-time below.
              SELECT 1 FROM spa_therapist_time_off tof
              WHERE tof.therapist_id = t.id AND cd.avail_date BETWEEN tof.start_date AND tof.end_date
+               AND tof.start_time IS NULL
            )
        )
        SELECT to_char(c.avail_date, 'YYYY-MM-DD') AS avail_date, c.start_time, c.therapist_id, c.therapist_name
@@ -402,6 +413,14 @@ async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = n
            AND sa.status != 'cancelled'
            AND sa.start_time < c.start_time + (r.duration_mins || ' minutes')::interval
            AND sa.end_time   > c.start_time
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM spa_therapist_time_off tof
+         WHERE tof.therapist_id = c.therapist_id
+           AND c.avail_date BETWEEN tof.start_date AND tof.end_date
+           AND tof.start_time IS NOT NULL
+           AND tof.start_time < c.start_time + (r.duration_mins || ' minutes')::interval
+           AND tof.end_time   > c.start_time
        )
        AND (
          c.avail_date > (now() AT TIME ZONE r.timezone)::date
