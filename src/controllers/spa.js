@@ -721,7 +721,7 @@ async function listAppointmentsForProperty(req, res, next) {
 async function listAppointments(req, res, next) {
   try {
     const { spa_id } = req.params;
-    const { date, status, guest_id, clerk_user_id, therapist_id } = req.query;
+    const { date, from, to, status, guest_id, clerk_user_id, therapist_id } = req.query;
     let query = `
       SELECT sa.*, st.name AS therapist_name, tr.name AS treatment_name, tr.price
       FROM spa_appointment sa
@@ -731,6 +731,10 @@ async function listAppointments(req, res, next) {
     `;
     const params = [spa_id, req.property_id];
     if (date) { params.push(date); query += ` AND sa.appointment_date = $${params.length}`; }
+    // from/to is an inclusive date range -- for a calendar month view, not
+    // meant to combine with the exact-match `date` above.
+    if (from) { params.push(from); query += ` AND sa.appointment_date >= $${params.length}`; }
+    if (to) { params.push(to); query += ` AND sa.appointment_date <= $${params.length}`; }
     if (status) { params.push(status); query += ` AND sa.status = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND sa.guest_id = $${params.length}`; }
     if (clerk_user_id) { params.push(clerk_user_id); query += ` AND sa.clerk_user_id = $${params.length}`; }
