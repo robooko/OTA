@@ -694,7 +694,7 @@ async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawI
 
 async function listAppointmentsForProperty(req, res, next) {
   try {
-    const { cursor, limit, spa_id, therapist_id } = req.query;
+    const { cursor, limit, spa_id, therapist_id, date } = req.query;
     const take = Math.min(parseInt(limit, 10) || 30, 100);
     let query = `
       SELECT sa.*, st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
@@ -710,6 +710,9 @@ async function listAppointmentsForProperty(req, res, next) {
     // Optional -- a therapist linked to their own login sees just their own
     // appointments on the spa dashboard.
     if (therapist_id) { params.push(therapist_id); query += ` AND sa.therapist_id = $${params.length}`; }
+    // Optional -- the spa schedule page scopes this feed to whichever date
+    // is selected on its calendar, same as its own day-grid appointments.
+    if (date) { params.push(date); query += ` AND sa.appointment_date = $${params.length}`; }
     if (cursor) { params.push(cursor); query += ` AND sa.created_at < $${params.length}`; }
     params.push(take);
     query += ` ORDER BY sa.created_at DESC LIMIT $${params.length}`;
