@@ -168,6 +168,20 @@ function brandingHeaderHtml(branding, propertyName) {
       </div>`;
 }
 
+// Muted address/phone footer shared by every appointment-shaped email.
+// `extraHtml` (e.g. sendReviewRequest's unsubscribe link) renders as one
+// more line below address/phone; the wrapper only appears when there's
+// something to show.
+function addressFooterHtml(appointment, extraHtml = '') {
+  const parts = [];
+  if (appointment.spa_address) parts.push(escapeHtml(appointment.spa_address));
+  if (appointment.spa_phone) parts.push(escapeHtml(appointment.spa_phone));
+  if (extraHtml) parts.push(extraHtml);
+  return parts.length
+    ? `<div style="margin-top:24px;padding-top:14px;border-top:1px solid #e0e0e0;font-size:12px;color:#888;line-height:1.7;">${parts.join('<br>')}</div>`
+    : '';
+}
+
 // Shared by sendAppointmentConfirmation/sendAppointmentCancellation. `verb`
 // is 'confirmed' or 'cancelled'; `extraLines` go after the booking details,
 // before the address/phone block. Booking text is always generated here --
@@ -218,12 +232,7 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
       </div>`
     : '';
 
-  const footerParts = [];
-  if (appointment.spa_address) footerParts.push(escapeHtml(appointment.spa_address));
-  if (appointment.spa_phone) footerParts.push(escapeHtml(appointment.spa_phone));
-  const footerHtml = footerParts.length
-    ? `<div style="margin-top:24px;padding-top:14px;border-top:1px solid #e0e0e0;font-size:12px;color:#888;line-height:1.7;">${footerParts.join('<br>')}</div>`
-    : '';
+  const footerHtml = addressFooterHtml(appointment);
 
   const { data, error } = await client.emails.send({
     from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
@@ -264,6 +273,60 @@ function sendAppointmentCancellation(appointment, propertyName, branding) {
   ], branding);
 }
 
+// Sent once, ~review_request_delay_mins after an appointment ends (see
+// src/lib/reviewRequester.js) -- never gated on rating, tip, or repeat
+// status; every eligible attendee gets the same words, per Google's review
+// policy (docs/superpowers/specs/2026-09-01-spa-review-requests-design.md).
+// `reviewUrl` is the property's "Ask for reviews" short link
+// (https://g.page/r/…/review); `optOutUrl` is this appointment's own
+// unauthenticated opt-out link. `appointment` is the same joined shape
+// getFullAppointmentForEmail returns for the other two appointment emails.
+async function sendReviewRequest(appointment, propertyName, branding, reviewUrl, optOutUrl) {
+  if (!client) throw new Error('Resend not configured');
+  const dateLabel = formatAppointmentDate(appointment.appointment_date);
+  const subject = `How was your ${appointment.treatment_name}?`;
+  const note = `Thanks for coming in on ${dateLabel}. If you've got thirty seconds, a Google review makes a real difference to a small shop like ours.`;
+
+  const text = [
+    `Hi ${appointment.contact_name},`,
+    '',
+    note,
+    '',
+    `Leave a Google review: ${reviewUrl}`,
+    '',
+    `Don't want these? Unsubscribe: ${optOutUrl}`,
+    '',
+    appointment.spa_address,
+    appointment.spa_phone,
+  ]
+    .filter((line) => line !== undefined && line !== null)
+    .join('\n');
+
+  const logoHtml = brandingHeaderHtml(branding, propertyName);
+  const ctaHtml = `<div style="margin:20px 0;">
+      <a href="${escapeHtml(reviewUrl)}" style="display:inline-block;background:${branding?.brand_color || '#1a1a1a'};color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:6px;">Leave a Google review</a>
+    </div>`;
+  const unsubscribeHtml = `<a href="${escapeHtml(optOutUrl)}" style="color:#888;text-decoration:underline;">Don't want these? Unsubscribe</a>`;
+  const footerHtml = addressFooterHtml(appointment, unsubscribeHtml);
+
+  const { data, error } = await client.emails.send({
+    from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
+    to: appointment.contact_email,
+    ...(appointment.spa_contact_email ? { replyTo: appointment.spa_contact_email } : {}),
+    subject,
+    text,
+    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;margin:0 auto;">
+      ${logoHtml}
+      <p style="margin:0 0 16px;">Hi ${escapeHtml(appointment.contact_name)},</p>
+      <p style="margin:0 0 20px;">${escapeHtml(note)}</p>
+      ${ctaHtml}
+      ${footerHtml}
+    </div>`,
+  });
+  if (error) throw new Error(error.message);
+  return data.id;
+}
+
 function verifyInboundWebhook(payload, headers) {
   if (!client) throw new Error('Resend not configured');
   return client.webhooks.verify({
@@ -284,11 +347,13 @@ async function getReceivedEmail(emailId) {
 }
 
 module.exports = {
+  escapeHtml,
   brandingHeaderHtml,
   sendReply,
   sendInquiryForward,
   sendAppointmentConfirmation,
   sendAppointmentCancellation,
+  sendReviewRequest,
   verifyInboundWebhook,
   getReceivedEmail,
 };

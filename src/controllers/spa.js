@@ -9,7 +9,7 @@ const {
   publishSpaBookingStatusChangedForSpa,
   client: ablyClient,
 } = require('../lib/ably');
-const { sendAppointmentConfirmation, sendAppointmentCancellation } = require('../lib/resend');
+const { sendAppointmentConfirmation, sendAppointmentCancellation, escapeHtml } = require('../lib/resend');
 
 // Steps a 'YYYY-MM-DD' string forward by whole days via UTC epoch math --
 // `new Date(str); d.setDate(d.getDate() + 1)` looks equivalent but
@@ -1091,6 +1091,35 @@ async function updateAppointment(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// GET, unauthenticated -- the appointment UUID is the capability (unguessable,
+// only ever in that customer's own review-request email), same reasoning as
+// the {id} cancel link. Idempotent: a mail client prefetching the link is
+// harmless. Registered on the allow-list in app.js alongside the Resend
+// inbound webhook.
+async function reviewOptOut(req, res, next) {
+  try {
+    const { appointment_id } = req.params;
+    const { rows } = await pool.query(
+      `SELECT sa.property_id, sa.contact_email, p.name AS property_name
+       FROM spa_appointment sa JOIN property p ON p.id = sa.property_id
+       WHERE sa.id = $1`,
+      [appointment_id]
+    );
+    const appointment = rows[0];
+    if (!appointment) return res.status(404).send('<p>That link is no longer valid.</p>');
+
+    if (appointment.contact_email) {
+      await pool.query(
+        `INSERT INTO review_request_opt_out (property_id, email) VALUES ($1, lower($2))
+         ON CONFLICT DO NOTHING`,
+        [appointment.property_id, appointment.contact_email]
+      );
+    }
+
+    res.send(`<p>You won't be asked for a review by ${escapeHtml(appointment.property_name)} again.</p>`);
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   listSpas, getSpa, createSpa, updateSpa,
   listTreatments, createTreatment, updateTreatment,
@@ -1104,4 +1133,7 @@ module.exports = {
   listAppointments, getAppointment, createAppointment, updateAppointment,
   getSpaAblyToken,
   listAppointmentsForProperty,
+  getFullAppointmentForEmail,
+  resolveEmailBranding,
+  reviewOptOut,
 };

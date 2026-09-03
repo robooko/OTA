@@ -543,6 +543,7 @@ async function updateAiReplySettings(req, res, next) {
 // object for the API/UI; stored as email_branding JSONB + email_cancel_url.
 
 const BRANDING_KEYS = ['logo_url', 'brand_color', 'header_bg'];
+const REVIEW_REQUEST_FIELDS = 'email_branding, email_cancel_url, review_request_enabled, review_url, review_request_delay_mins, review_request_cooldown_days';
 
 function emailBrandingResponse(row) {
   const b = row.email_branding ?? {};
@@ -551,12 +552,18 @@ function emailBrandingResponse(row) {
     brand_color: b.brand_color ?? null,
     header_bg: b.header_bg ?? null,
     cancel_url: row.email_cancel_url ?? null,
+    // Post-visit Google review request (spa module) -- see
+    // migrate-2026-09-03-spa-review-requests.sql. Off until review_url is set.
+    review_request_enabled: row.review_request_enabled,
+    review_url: row.review_url ?? null,
+    review_request_delay_mins: row.review_request_delay_mins,
+    review_request_cooldown_days: row.review_request_cooldown_days,
   };
 }
 
 async function getEmailBranding(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT email_branding, email_cancel_url FROM property WHERE id = $1', [req.property_id]);
+    const { rows } = await pool.query(`SELECT ${REVIEW_REQUEST_FIELDS} FROM property WHERE id = $1`, [req.property_id]);
     res.json(emailBrandingResponse(rows[0]));
   } catch (err) {
     next(err);
@@ -569,7 +576,7 @@ async function getEmailBranding(req, res, next) {
 async function updateEmailBranding(req, res, next) {
   try {
     const body = req.body ?? {};
-    const { rows: [current] } = await pool.query('SELECT email_branding, email_cancel_url FROM property WHERE id = $1', [req.property_id]);
+    const { rows: [current] } = await pool.query(`SELECT ${REVIEW_REQUEST_FIELDS} FROM property WHERE id = $1`, [req.property_id]);
     const branding = { ...(current.email_branding ?? {}) };
     for (const key of BRANDING_KEYS) {
       if (body[key] === undefined) continue;
@@ -588,10 +595,54 @@ async function updateEmailBranding(req, res, next) {
       if (cancelUrlError) return res.status(400).json({ error: cancelUrlError });
     }
 
+    let reviewUrl = current.review_url;
+    if (body.review_url !== undefined) {
+      const value = typeof body.review_url === 'string' ? body.review_url.trim() : body.review_url;
+      reviewUrl = value === null || value === '' ? null : value;
+      if (reviewUrl !== null && !isValidUrl(reviewUrl)) {
+        return res.status(400).json({ error: 'review_url must be a valid http(s) URL' });
+      }
+    }
+
+    let reviewRequestEnabled = current.review_request_enabled;
+    if (body.review_request_enabled !== undefined) {
+      reviewRequestEnabled = !!body.review_request_enabled;
+    }
+    if (reviewRequestEnabled && !reviewUrl) {
+      return res.status(400).json({ error: 'review_url is required to enable review requests' });
+    }
+
+    let reviewDelayMins = current.review_request_delay_mins;
+    if (body.review_request_delay_mins !== undefined) {
+      reviewDelayMins = Number(body.review_request_delay_mins);
+      if (!Number.isInteger(reviewDelayMins) || reviewDelayMins < 0 || reviewDelayMins > 1440) {
+        return res.status(400).json({ error: 'review_request_delay_mins must be an integer between 0 and 1440' });
+      }
+    }
+
+    let reviewCooldownDays = current.review_request_cooldown_days;
+    if (body.review_request_cooldown_days !== undefined) {
+      reviewCooldownDays = Number(body.review_request_cooldown_days);
+      if (!Number.isInteger(reviewCooldownDays) || reviewCooldownDays < 0 || reviewCooldownDays > 365) {
+        return res.status(400).json({ error: 'review_request_cooldown_days must be an integer between 0 and 365' });
+      }
+    }
+
     const { rows } = await pool.query(
-      `UPDATE property SET email_branding = $1, email_cancel_url = $2 WHERE id = $3
-       RETURNING email_branding, email_cancel_url`,
-      [Object.keys(branding).length ? JSON.stringify(branding) : null, cancelUrl, req.property_id]
+      `UPDATE property SET email_branding = $1, email_cancel_url = $2,
+              review_request_enabled = $3, review_url = $4,
+              review_request_delay_mins = $5, review_request_cooldown_days = $6
+       WHERE id = $7
+       RETURNING ${REVIEW_REQUEST_FIELDS}`,
+      [
+        Object.keys(branding).length ? JSON.stringify(branding) : null,
+        cancelUrl,
+        reviewRequestEnabled,
+        reviewUrl,
+        reviewDelayMins,
+        reviewCooldownDays,
+        req.property_id,
+      ]
     );
     res.json(emailBrandingResponse(rows[0]));
   } catch (err) {

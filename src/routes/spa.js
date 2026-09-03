@@ -3,6 +3,11 @@ const ctrl = require('../controllers/spa');
 const payments = require('../controllers/spaPayments');
 const { authenticateOrApiKey } = require('../middleware/auth');
 
+// Unauthenticated: a link in the review-request email itself, not a
+// dashboard action -- the appointment id is the capability. Must not sit
+// behind authenticateOrApiKey.
+router.get('/review-opt-out/:appointment_id', ctrl.reviewOptOut);
+
 // Spas
 router.get('/', authenticateOrApiKey, ctrl.listSpas);
 // Property-wide, across every spa -- must come before /:id or Express would

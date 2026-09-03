@@ -40,6 +40,12 @@ CREATE TABLE IF NOT EXISTS property (
   -- Google Business Profile place id for the live-reviews endpoint -- see
   -- migrate-2026-09-02-property-google-reviews.sql.
   google_place_id  TEXT,
+  -- Post-visit review-request email (spa module only) -- see
+  -- migrate-2026-09-03-spa-review-requests.sql. Off until review_url is set.
+  review_request_enabled       BOOLEAN NOT NULL DEFAULT false,
+  review_url                   TEXT,
+  review_request_delay_mins    INT NOT NULL DEFAULT 120,
+  review_request_cooldown_days INT NOT NULL DEFAULT 90,
   created_at       TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT property_ai_reply_mode_check CHECK (ai_reply_mode IN ('off', 'draft', 'auto')),
   CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100)
@@ -483,8 +489,24 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
   payment_status                VARCHAR(20)  NOT NULL DEFAULT 'unpaid',
   paid_at                       TIMESTAMPTZ,
   stripe_payment_intent_id      VARCHAR(255),
+  -- Review-request send record -- see migrate-2026-09-03-spa-review-requests.sql.
+  -- sent_at is set in the same statement that claims the row (the sweep's
+  -- idempotency guarantee), so it is both the send record and the lock.
+  review_request_sent_at         TIMESTAMPTZ,
+  review_request_resend_email_id TEXT,
+  review_request_attempts        SMALLINT NOT NULL DEFAULT 0,
   created_at                    TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT spa_appointment_payment_status CHECK (payment_status IN ('unpaid', 'paid'))
+);
+
+-- Property-scoped: opting out of one venue's review request says nothing
+-- about another the same person visits. See
+-- migrate-2026-09-03-spa-review-requests.sql.
+CREATE TABLE IF NOT EXISTS review_request_opt_out (
+  property_id UUID NOT NULL REFERENCES property(id),
+  email       VARCHAR(255) NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (property_id, email)
 );
 
 CREATE INDEX IF NOT EXISTS idx_spa_treatment_spa       ON spa_treatment(spa_id);
@@ -495,6 +517,9 @@ CREATE INDEX IF NOT EXISTS idx_spa_slot_treatment      ON spa_slot(treatment_id)
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_slot    ON spa_appointment(slot_id);
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_clerk_user ON spa_appointment(clerk_user_id);
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_therapist_date ON spa_appointment(therapist_id, appointment_date);
+CREATE INDEX IF NOT EXISTS idx_spa_appointment_review_pending
+  ON spa_appointment (property_id, appointment_date)
+  WHERE review_request_sent_at IS NULL AND status = 'confirmed' AND contact_email IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_hours_property   ON spa_therapist_hours(property_id);
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_hours_therapist  ON spa_therapist_hours(therapist_id, day_of_week);
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_time_off_therapist ON spa_therapist_time_off(therapist_id, start_date, end_date);
