@@ -9,5 +9,7 @@ router.put('/', authenticate, requireRole('admin'), ctrl.updateBilling);
 router.get('/ledger', authenticate, ctrl.listLedger);
 router.post('/checkout', authenticate, requireRole('admin'), ctrl.createCheckout);
 router.post('/checkout/confirm', authenticate, requireRole('admin'), ctrl.confirmCheckout);
+router.post('/payment-intent', authenticate, requireRole('admin'), ctrl.createPaymentIntent);
+router.post('/payment-intent/confirm', authenticate, requireRole('admin'), ctrl.confirmPaymentIntent);
 
 module.exports = router;

@@ -17,6 +17,11 @@ function billingResponse(row) {
     costs: tokens.TOKEN_COSTS,
     currency: CURRENCY.toUpperCase(),
     packs: TOKEN_PACKS.map((p) => ({ id: p.id, tokens: p.tokens, amount: p.amount })),
+    // Set (with PLATFORM_STRIPE_PUBLISHABLE_KEY) to let the dashboard take
+    // payment in-page with Stripe Elements; when null it falls back to
+    // redirecting to Stripe Checkout. Must be the same account as the
+    // secret key or confirmPayment will reject the client_secret.
+    publishable_key: isBillingConfigured() ? process.env.PLATFORM_STRIPE_PUBLISHABLE_KEY || null : null,
   };
 }
 
@@ -121,6 +126,66 @@ async function createCheckout(req, res, next) {
   }
 }
 
+// The Elements path: the dashboard collects the card in-page against this
+// intent's client_secret instead of redirecting to Checkout. metadata
+// carries property_id/tokens just like a Checkout Session's does -- after
+// creation the two flows credit identically and nothing about the amount is
+// trusted from the client.
+async function createPaymentIntent(req, res, next) {
+  try {
+    if (!isBillingConfigured()) return res.status(503).json({ error: 'Billing is not configured on this server' });
+    const pack = getPack(req.body?.pack);
+    if (!pack) return res.status(400).json({ error: `pack must be one of ${TOKEN_PACKS.map((p) => p.id).join(', ')}` });
+
+    const customer = await ensureStripeCustomer(req.property_id);
+    const intent = await stripe.paymentIntents.create({
+      amount: pack.amount,
+      currency: CURRENCY,
+      customer,
+      metadata: { property_id: req.property_id, tokens: String(pack.tokens), pack: pack.id },
+      automatic_payment_methods: { enabled: true },
+      description: `${pack.tokens} tokens`,
+    });
+    res.status(201).json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount: pack.amount, tokens: pack.tokens });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Idempotent on the intent id -- stored in the ledger's unique
+// stripe_checkout_session_id column, which both purchase flows use as
+// "the Stripe object that paid" (cs_... or pi_...).
+async function creditFromIntent(intent) {
+  const propertyId = intent.metadata?.property_id;
+  const amount = Number.parseInt(intent.metadata?.tokens, 10);
+  if (!propertyId || !Number.isInteger(amount) || amount <= 0) {
+    throw new Error(`Payment intent ${intent.id} has no usable property_id/tokens metadata`);
+  }
+  return tokens.credit(propertyId, amount, 'purchase', { refId: intent.id, checkoutSessionId: intent.id });
+}
+
+// Called by the dashboard right after confirmPayment succeeds (or on the
+// return from a redirect-based payment method). Same belt-and-braces role
+// as confirmCheckout: idempotent against the webhook.
+async function confirmPaymentIntent(req, res, next) {
+  try {
+    if (!isBillingConfigured()) return res.status(503).json({ error: 'Billing is not configured on this server' });
+    const { payment_intent_id } = req.body ?? {};
+    if (typeof payment_intent_id !== 'string' || !payment_intent_id.startsWith('pi_')) {
+      return res.status(400).json({ error: 'payment_intent_id is required' });
+    }
+    const intent = await stripe.paymentIntents.retrieve(payment_intent_id);
+    if (intent.metadata?.property_id !== req.property_id) return res.status(404).json({ error: 'Payment not found' });
+    if (intent.status !== 'succeeded') {
+      return res.json({ credited: false, paid: false, balance: await tokens.getBalance(req.property_id) });
+    }
+    const result = await creditFromIntent(intent);
+    res.json({ ...result, paid: true, tokens: Number.parseInt(intent.metadata.tokens, 10) });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // Shared by the webhook and confirmCheckout. Idempotent on session.id.
 async function creditFromSession(session) {
   const propertyId = session.metadata?.property_id;
@@ -177,7 +242,22 @@ async function handleStripeWebhook(req, res) {
       }
     }
   }
+  // The Elements flow. Only intents we created carry tokens metadata --
+  // a Checkout purchase's underlying intent doesn't (its metadata lives on
+  // the session), so a Checkout payment can't credit twice via both events.
+  if (event.type === 'payment_intent.succeeded') {
+    const intent = event.data.object;
+    if (intent.metadata?.tokens) {
+      try {
+        const result = await creditFromIntent(intent);
+        if (result.credited) console.log(`Credited ${intent.metadata.tokens} tokens to property ${intent.metadata.property_id} (${intent.id})`);
+      } catch (err) {
+        console.error(`Failed to credit payment intent ${intent.id}:`, err.message);
+        return res.status(500).json({ error: 'Credit failed' }); // let Stripe retry
+      }
+    }
+  }
   res.json({ received: true });
 }
 
-module.exports = { getBilling, updateBilling, listLedger, createCheckout, confirmCheckout, handleStripeWebhook };
+module.exports = { getBilling, updateBilling, listLedger, createCheckout, confirmCheckout, createPaymentIntent, confirmPaymentIntent, handleStripeWebhook };
