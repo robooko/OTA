@@ -77,12 +77,22 @@ function isHttpUrl(value) {
 }
 
 // One Stripe Customer per property on the platform account, created on the
-// first purchase, so receipts and the Stripe dashboard group by venue.
+// first purchase, so receipts and the Stripe dashboard group by venue. A
+// stored id can be from the other Stripe mode (test key after a live-mode
+// purchase, or vice versa) -- verify it, and mint a replacement when the
+// current key can't see it rather than failing the purchase.
 async function ensureStripeCustomer(propertyId) {
   const { rows: [prop] } = await pool.query('SELECT name, stripe_customer_id FROM property WHERE id = $1', [propertyId]);
-  if (prop.stripe_customer_id) return prop.stripe_customer_id;
+  if (prop.stripe_customer_id) {
+    try {
+      const existing = await stripe.customers.retrieve(prop.stripe_customer_id);
+      if (!existing.deleted) return prop.stripe_customer_id;
+    } catch (err) {
+      if (err.code !== 'resource_missing') throw err;
+    }
+  }
   const customer = await stripe.customers.create({ name: prop.name, metadata: { property_id: propertyId } });
-  await pool.query('UPDATE property SET stripe_customer_id = $1 WHERE id = $2 AND stripe_customer_id IS NULL', [customer.id, propertyId]);
+  await pool.query('UPDATE property SET stripe_customer_id = $1 WHERE id = $2', [customer.id, propertyId]);
   return customer.id;
 }
 
