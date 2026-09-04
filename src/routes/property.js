@@ -2,10 +2,15 @@ const router = require('express').Router();
 const ctrl = require('../controllers/property');
 const { authenticate, authenticateOrApiKey, requireRole } = require('../middleware/auth');
 
-// Read-only identity (id, name, currency, timezone) is on the API-key rail
-// too, so the MCP get_property tool can confirm which venue it operates for.
+// Both on the API-key rail: identity is read-only content, and
+// currency/timezone are the same "safe config" category as ai-replies'
+// instructions-only PUT (updateCurrentProperty touches only those two
+// fields -- nothing that changes what runs unsupervised, unlike ai-replies'
+// mode/auto_send_min_score, which is why those stay bearer+admin). Lets the
+// MCP get_property/update_property tools work over a plain X-Api-Key
+// connection, which is how most MCP clients here actually authenticate.
 router.get('/me', authenticateOrApiKey, ctrl.getCurrentProperty);
-router.put('/me', authenticate, requireRole('admin'), ctrl.updateCurrentProperty);
+router.put('/me', authenticateOrApiKey, ctrl.updateCurrentProperty);
 
 router.get('/api-key', authenticate, requireRole('admin'), ctrl.getApiKey);
 router.post('/api-key/rotate', authenticate, requireRole('admin'), ctrl.rotateApiKey);

@@ -507,6 +507,15 @@ function createTools(apiRequest) {
     run: () => apiRequest('GET', '/api/property/me'),
   },
   {
+    name: 'update_property',
+    description: "Set the property's default currency and/or timezone. Both fields optional; omit one to leave it unchanged.",
+    inputSchema: {
+      currency: z.string().optional().describe('ISO 4217 code, e.g. GBP, USD, EUR'),
+      timezone: z.string().optional().describe('IANA timezone, e.g. Europe/London'),
+    },
+    run: (args) => apiRequest('PUT', '/api/property/me', { body: args }),
+  },
+  {
     name: 'get_ai_reply_settings',
     description: "The property's AI enquiry-reply settings: mode (off/draft/auto), instructions, auto_send_min_score, and whether the feature is configured on this server",
     inputSchema: {},
