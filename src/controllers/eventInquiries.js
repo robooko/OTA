@@ -2,6 +2,7 @@ const { createClerkClient } = require('@clerk/backend');
 const EmailReplyParser = require('email-reply-parser').default;
 const pool = require('../db');
 const { isValidDate, isValidUuid, isValidTime, validateBranding, validateCancelUrl } = require('../middleware/validate');
+const tokens = require('../lib/tokens');
 const {
   publishNewInquiry,
   publishNewReply,
@@ -97,6 +98,20 @@ async function createInquiry(req, res, next) {
     }
     if (!(await validateSpaId(spa_id, req.property_id))) {
       return res.status(400).json({ error: 'spa_id must belong to this property' });
+    }
+
+    // Nothing here could get a reply through OTA right now -- sending one,
+    // manual or AI, spends a token regardless (sendOutboundReply in
+    // inquiryReplies.js) -- so reject before ever storing it, and let the
+    // caller (the venue's own website) point the guest somewhere that will
+    // actually respond. Safe to reject outright here, unlike an inbound
+    // reply on an existing thread (handleResendInboundWebhook): this is a
+    // brand-new submission that doesn't exist anywhere yet, so nothing is
+    // lost -- an inbound email has already arrived and can only be stored
+    // or silently dropped, which is why that path isn't gated the same way.
+    const balance = await tokens.getBalance(req.property_id);
+    if (balance < tokens.TOKEN_COSTS.reply_send) {
+      return res.status(402).json({ error: 'This venue cannot currently respond to enquiries — please contact them directly' });
     }
 
     const { rows } = await pool.query(
