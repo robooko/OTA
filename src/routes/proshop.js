@@ -17,4 +17,12 @@ router.get('/booking/:booking_id', authenticateOrApiKey, ctrl.listBookingItems);
 router.post('/booking/:booking_id', authenticateOrApiKey, ctrl.addBookingItem);
 router.delete('/booking/:booking_id/:id', authenticateOrApiKey, ctrl.removeBookingItem);
 
+// Orders (guest self-checkout from the venue's website, no booking)
+router.get('/orders', authenticateOrApiKey, ctrl.listOrders);
+router.get('/orders/:id', authenticateOrApiKey, ctrl.getOrder);
+router.post('/orders', authenticateOrApiKey, ctrl.createOrder);
+router.put('/orders/:id', authenticateOrApiKey, ctrl.updateOrderStatus);
+router.post('/orders/:id/payment-intent', authenticateOrApiKey, ctrl.createOrderPaymentIntent);
+router.post('/orders/:id/confirm-payment', authenticateOrApiKey, ctrl.confirmOrderPayment);
+
 module.exports = router;
