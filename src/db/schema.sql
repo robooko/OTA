@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS property (
   -- 'auto' = send unreviewed when score >= ai_reply_auto_send_min_score and not requires_human.
   ai_reply_mode                VARCHAR(10) NOT NULL DEFAULT 'off',
   ai_reply_instructions        TEXT, -- venue knowledge/tone/limits; the ONLY facts the model may state
-  ai_reply_auto_send_min_score INT NOT NULL DEFAULT 80,
+  ai_reply_auto_send_min_score INT NOT NULL DEFAULT 90,
   -- Default email branding for booking confirmations/cancellations -- see
   -- migrate-2026-09-01-property-email-branding.sql. A request's own
   -- branding/cancel_url (website booking, event_inquiry.branding) overrides.
