@@ -21,7 +21,7 @@ router.delete('/booking/:booking_id/:id', authenticateOrApiKey, ctrl.removeBooki
 router.get('/orders', authenticateOrApiKey, ctrl.listOrders);
 router.get('/orders/:id', authenticateOrApiKey, ctrl.getOrder);
 router.post('/orders', authenticateOrApiKey, ctrl.createOrder);
-router.put('/orders/:id', authenticateOrApiKey, ctrl.updateOrderStatus);
+router.put('/orders/:id', authenticateOrApiKey, ctrl.updateOrder);
 router.post('/orders/:id/payment-intent', authenticateOrApiKey, ctrl.createOrderPaymentIntent);
 router.post('/orders/:id/confirm-payment', authenticateOrApiKey, ctrl.confirmOrderPayment);
 

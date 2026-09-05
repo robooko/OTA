@@ -215,12 +215,16 @@ async function getOrder(req, res, next) {
 
 // items: [{ item_id, quantity }]. Every price comes from the live catalogue
 // here, never from the request -- a tampered client-supplied price can't
-// change what gets charged.
+// change what gets charged. contact_name is optional here on purpose: a
+// website checkout (e.g. hotal-ui's <booking-checkout>) needs a
+// PaymentIntent to exist before its own contact-detail form even renders,
+// so the order is created from the cart alone first ("Website Guest" until
+// patched) and PUT /orders/:id fills in the real contact details once the
+// guest has entered them, right before confirm-payment.
 async function createOrder(req, res, next) {
   try {
     const { shop_id, contact_name, contact_email, contact_phone, shipping_address, shipping_cost, notes, items } = req.body ?? {};
     if (!shop_id) return res.status(400).json({ error: 'shop_id is required' });
-    if (!contact_name) return res.status(400).json({ error: 'contact_name is required' });
     if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'items must be a non-empty array of { item_id, quantity }' });
     const shippingCost = shipping_cost != null ? Number(shipping_cost) : 0;
     if (!Number.isFinite(shippingCost) || shippingCost < 0) return res.status(400).json({ error: 'shipping_cost must be a non-negative number' });
@@ -260,7 +264,7 @@ async function createOrder(req, res, next) {
         `INSERT INTO proshop_order
            (property_id, shop_id, contact_name, contact_email, contact_phone, shipping_address, shipping_cost, items_subtotal, total_price, notes)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [req.property_id, shop_id, contact_name, contact_email || null, contact_phone || null, shipping_address || null, shippingCost, itemsSubtotal, totalPrice, notes || null]
+        [req.property_id, shop_id, contact_name || 'Website Guest', contact_email || null, contact_phone || null, shipping_address || null, shippingCost, itemsSubtotal, totalPrice, notes || null]
       );
       const order = orderRows[0];
 
@@ -283,15 +287,27 @@ async function createOrder(req, res, next) {
   } catch (err) { next(err); }
 }
 
-async function updateOrderStatus(req, res, next) {
+// Per field: omit = unchanged. Covers both staff use (status only, e.g.
+// marking an order fulfilled/cancelled) and the checkout flow patching in
+// the real contact details once the guest has entered them, between the
+// PaymentIntent being created (from the cart alone, no contact info yet --
+// see createOrder) and confirm-payment.
+async function updateOrder(req, res, next) {
   try {
-    const { status } = req.body ?? {};
-    if (!['pending', 'paid', 'cancelled'].includes(status)) {
+    const { status, contact_name, contact_email, contact_phone, shipping_address, notes } = req.body ?? {};
+    if (status !== undefined && !['pending', 'paid', 'cancelled'].includes(status)) {
       return res.status(400).json({ error: "status must be 'pending', 'paid', or 'cancelled'" });
     }
     const { rows } = await pool.query(
-      `UPDATE proshop_order SET status = $1 WHERE id = $2 AND property_id = $3 RETURNING *`,
-      [status, req.params.id, req.property_id]
+      `UPDATE proshop_order SET
+         status           = COALESCE($1, status),
+         contact_name     = COALESCE($2, contact_name),
+         contact_email    = COALESCE($3, contact_email),
+         contact_phone    = COALESCE($4, contact_phone),
+         shipping_address = COALESCE($5, shipping_address),
+         notes            = COALESCE($6, notes)
+       WHERE id = $7 AND property_id = $8 RETURNING *`,
+      [status, contact_name, contact_email, contact_phone, shipping_address, notes, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
     res.json(rows[0]);
@@ -380,6 +396,6 @@ module.exports = {
   listShops, createShop, updateShop,
   listItems, createItem, updateItem,
   listBookingItems, addBookingItem, removeBookingItem,
-  listOrders, getOrder, createOrder, updateOrderStatus,
+  listOrders, getOrder, createOrder, updateOrder,
   createOrderPaymentIntent, confirmOrderPayment,
 };
