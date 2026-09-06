@@ -199,8 +199,26 @@ async function listOrders(req, res, next) {
     if (cursor) { params.push(cursor); query += ` AND created_at < $${params.length}`; }
     params.push(take);
     query += ` ORDER BY created_at DESC LIMIT $${params.length}`;
-    const { rows } = await pool.query(query, params);
-    res.json(rows);
+    const { rows: orders } = await pool.query(query, params);
+
+    // One extra query for every order on the page, not one per order --
+    // the dashboard's order list needs an item summary ("2x Golf Glove")
+    // without an N+1 round trip per row.
+    if (orders.length) {
+      const { rows: items } = await pool.query(
+        `SELECT order_id, item_id, item_name, unit_price, quantity, subtotal
+         FROM proshop_order_item WHERE order_id = ANY($1) ORDER BY item_name`,
+        [orders.map((o) => o.id)]
+      );
+      const itemsByOrder = new Map();
+      for (const item of items) {
+        if (!itemsByOrder.has(item.order_id)) itemsByOrder.set(item.order_id, []);
+        itemsByOrder.get(item.order_id).push(item);
+      }
+      for (const order of orders) order.items = itemsByOrder.get(order.id) ?? [];
+    }
+
+    res.json(orders);
   } catch (err) { next(err); }
 }
 
