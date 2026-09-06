@@ -1,5 +1,10 @@
 const pool = require('../db');
-const { publishProshopItemAdded, publishProshopItemRemoved } = require('../lib/ably');
+const {
+  publishProshopItemAdded,
+  publishProshopItemRemoved,
+  publishNewProshopOrder,
+  publishProshopOrderStatusChanged,
+} = require('../lib/ably');
 
 // ── Shops ─────────────────────────────────────────────────────────────────────
 
@@ -173,6 +178,13 @@ function orderWithItems(order, items) {
   return { ...order, items };
 }
 
+// The order row carries no fulfillment_method column of its own -- derived
+// here for @forgebuild/hotal-ui's <live-shop-orders-feed>, which renders a
+// pickup/shipping icon per order, from whether shipping_address was given.
+function forFeed(order) {
+  return { ...order, fulfillment_method: order.shipping_address ? 'shipping' : 'pickup' };
+}
+
 async function loadOrderWithItems(orderId, propertyId) {
   const { rows: orders } = await pool.query(
     `SELECT o.*, p.stripe_secret_key, p.currency
@@ -328,6 +340,10 @@ async function updateOrder(req, res, next) {
       [status, contact_name, contact_email, contact_phone, shipping_address, notes, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
+    if (status !== undefined) {
+      publishProshopOrderStatusChanged(req.property_id, { id: rows[0].id, status: rows[0].status, payment_status: rows[0].payment_status })
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    }
     res.json(rows[0]);
   } catch (err) { next(err); }
 }
@@ -355,7 +371,12 @@ async function createOrderPaymentIntent(req, res, next) {
         if (existing.amount !== amount) {
           return res.status(409).json({ error: 'A payment already succeeded for a different amount', payment_intent_id: existing.id });
         }
-        await pool.query(`UPDATE proshop_order SET status = 'paid', payment_status = 'paid' WHERE id = $1`, [order.id]);
+        const { rows: paidRows } = await pool.query(
+          `UPDATE proshop_order SET status = 'paid', payment_status = 'paid' WHERE id = $1 RETURNING *`,
+          [order.id]
+        );
+        publishNewProshopOrder(req.property_id, forFeed(orderWithItems(paidRows[0], order.items)))
+          .catch((err) => console.error('Ably publish failed:', err.message));
         return res.json({ already_paid: true, payment_intent_id: existing.id });
       }
       // canceled/failed -> fall through and mint a fresh intent
@@ -403,6 +424,8 @@ async function confirmOrderPayment(req, res, next) {
       `UPDATE proshop_order SET status = 'paid', payment_status = 'paid' WHERE id = $1 AND property_id = $2 RETURNING *`,
       [order.id, req.property_id]
     );
+    publishNewProshopOrder(req.property_id, forFeed(orderWithItems(rows[0], order.items)))
+      .catch((err) => console.error('Ably publish failed:', err.message));
     res.json(rows[0]);
   } catch (err) {
     if (err.type?.startsWith('Stripe')) return res.status(502).json({ error: `Stripe error: ${err.message}` });

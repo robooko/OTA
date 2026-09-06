@@ -257,6 +257,22 @@ async function publishProshopItemRemoved(propertyId, payload) {
   await channel.publish('item-removed', payload);
 }
 
+// Website-checkout pro shop orders -- a distinct channel from
+// property:{id}:proshop above (golf-booking-item add/remove), for
+// @forgebuild/hotal-ui's <live-shop-orders-feed>. Property-wide only: like
+// golf bookings, there's no per-shop channel to scope to.
+async function publishNewProshopOrder(propertyId, order) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:shop-orders`);
+  await channel.publish('new-order', order);
+}
+
+async function publishProshopOrderStatusChanged(propertyId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:shop-orders`);
+  await channel.publish('order-status-changed', payload);
+}
+
 module.exports = {
   publishNewInquiry,
   publishNewOrder,
@@ -287,5 +303,7 @@ module.exports = {
   publishGolfBookingStatusChangedForProperty,
   publishProshopItemAdded,
   publishProshopItemRemoved,
+  publishNewProshopOrder,
+  publishProshopOrderStatusChanged,
   client,
 };
