@@ -53,9 +53,18 @@ CREATE TABLE IF NOT EXISTS property (
   reminder_email_enabled BOOLEAN NOT NULL DEFAULT true,
   reminder_sms_enabled   BOOLEAN NOT NULL DEFAULT false,
   reminder_hours_before  INT NOT NULL DEFAULT 24,
+  -- Optional tax on website-checkout orders (pro shop + restaurant web
+  -- ordering) -- see migrate-2026-09-06-order-tax.sql. Off by default.
+  -- tax_inclusive true = displayed/charged prices already include tax
+  -- (tax_amount is backed out of them); false = tax is added at checkout.
+  tax_enabled   BOOLEAN NOT NULL DEFAULT false,
+  tax_rate      NUMERIC(5,2) NOT NULL DEFAULT 0,
+  tax_inclusive BOOLEAN NOT NULL DEFAULT true,
+  tax_id        TEXT,
   created_at       TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT property_ai_reply_mode_check CHECK (ai_reply_mode IN ('off', 'draft', 'auto')),
-  CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100)
+  CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100),
+  CONSTRAINT property_tax_rate_check CHECK (tax_rate >= 0 AND tax_rate <= 100)
 );
 
 -- Every token_balance change, as a receipt -- see migrate-2026-09-01-property-token-billing.sql.
@@ -793,6 +802,9 @@ CREATE TABLE IF NOT EXISTS restaurant_web_order (
   scheduled_for            TIMESTAMPTZ,
   notes                    TEXT,
   items_subtotal           NUMERIC(10,2) NOT NULL,
+  -- Snapshotted from property.tax_rate at order time -- see
+  -- migrate-2026-09-06-order-tax.sql. Zero unless tax_enabled was on.
+  tax_amount               NUMERIC(10,2) NOT NULL DEFAULT 0,
   total_price              NUMERIC(10,2) NOT NULL,
   status                   VARCHAR(20)   NOT NULL DEFAULT 'pending',
   payment_status           VARCHAR(20)   NOT NULL DEFAULT 'unpaid',
@@ -858,6 +870,9 @@ CREATE TABLE IF NOT EXISTS proshop_order (
   shipping_address         TEXT,
   shipping_cost            NUMERIC(10,2) NOT NULL DEFAULT 0,
   items_subtotal           NUMERIC(10,2) NOT NULL,
+  -- Snapshotted from property.tax_rate at order time -- see
+  -- migrate-2026-09-06-order-tax.sql. Zero unless tax_enabled was on.
+  tax_amount               NUMERIC(10,2) NOT NULL DEFAULT 0,
   total_price              NUMERIC(10,2) NOT NULL,
   status                   VARCHAR(20)   NOT NULL DEFAULT 'pending',
   payment_status           VARCHAR(20)   NOT NULL DEFAULT 'unpaid',

@@ -42,25 +42,42 @@ function generateApiKey() {
 
 async function getCurrentProperty(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT id, name, currency, timezone FROM property WHERE id = $1', [req.property_id]);
+    const { rows } = await pool.query(
+      'SELECT id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id FROM property WHERE id = $1',
+      [req.property_id]
+    );
     res.json(rows[0]);
   } catch (err) {
     next(err);
   }
 }
 
+// tax_* fields are optional and off by default -- see
+// migrate-2026-09-06-order-tax.sql. Only proshop_order/restaurant_web_order
+// (website checkout) apply them today.
 async function updateCurrentProperty(req, res, next) {
   try {
-    const { currency, timezone } = req.body;
+    const { currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id } = req.body;
     if (currency !== undefined && !isValidCurrencyCode(currency)) {
       return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP)' });
     }
     if (timezone !== undefined && !isValidTimezone(timezone)) {
       return res.status(400).json({ error: 'timezone must be a valid IANA timezone name (e.g. Europe/London)' });
     }
+    if (tax_rate !== undefined && (typeof tax_rate !== 'number' || !Number.isFinite(tax_rate) || tax_rate < 0 || tax_rate > 100)) {
+      return res.status(400).json({ error: 'tax_rate must be a number between 0 and 100' });
+    }
     const { rows } = await pool.query(
-      'UPDATE property SET currency = COALESCE($1, currency), timezone = COALESCE($2, timezone) WHERE id = $3 RETURNING id, name, currency, timezone',
-      [currency, timezone, req.property_id]
+      `UPDATE property SET
+         currency      = COALESCE($1, currency),
+         timezone      = COALESCE($2, timezone),
+         tax_enabled   = COALESCE($3, tax_enabled),
+         tax_rate      = COALESCE($4, tax_rate),
+         tax_inclusive = COALESCE($5, tax_inclusive),
+         tax_id        = COALESCE($6, tax_id)
+       WHERE id = $7
+       RETURNING id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id`,
+      [currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, req.property_id]
     );
     res.json(rows[0]);
   } catch (err) {

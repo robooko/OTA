@@ -5,6 +5,7 @@
 // proshop.js's order controller shape closely -- same idempotent
 // PaymentIntent pattern, same "never trust a client-supplied price" rule.
 const pool = require('../db');
+const { computeOrderTax } = require('../lib/tax');
 
 const VALID_STATUSES = ['pending', 'paid', 'preparing', 'ready', 'completed', 'cancelled'];
 
@@ -79,6 +80,10 @@ async function createOrder(req, res, next) {
       if (!tables.length) return res.status(404).json({ error: 'Table not found' });
     }
 
+    const { rows: properties } = await pool.query(
+      `SELECT tax_enabled, tax_rate, tax_inclusive FROM property WHERE id = $1`, [req.property_id]
+    );
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -109,13 +114,14 @@ async function createOrder(req, res, next) {
         lineItems.push({ item_id, item_name: menu[0].name, unit_price: unitPrice, quantity: qty, variant: variant || null, subtotal });
       }
       itemsSubtotal = Math.round(itemsSubtotal * 100) / 100;
-      const totalPrice = itemsSubtotal;
+      const { taxAmount, totalExtra } = computeOrderTax(properties[0], itemsSubtotal);
+      const totalPrice = Math.round((itemsSubtotal + totalExtra) * 100) / 100;
 
       const { rows: orderRows } = await client.query(
         `INSERT INTO restaurant_web_order
-           (property_id, restaurant_id, table_id, contact_name, contact_email, contact_phone, scheduled_for, notes, items_subtotal, total_price)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [req.property_id, restaurant_id, table_id || null, contact_name || 'Website Guest', contact_email || null, contact_phone || null, scheduled_for || null, notes || null, itemsSubtotal, totalPrice]
+           (property_id, restaurant_id, table_id, contact_name, contact_email, contact_phone, scheduled_for, notes, items_subtotal, tax_amount, total_price)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+        [req.property_id, restaurant_id, table_id || null, contact_name || 'Website Guest', contact_email || null, contact_phone || null, scheduled_for || null, notes || null, itemsSubtotal, taxAmount, totalPrice]
       );
       const order = orderRows[0];
 

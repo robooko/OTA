@@ -5,6 +5,7 @@ const {
   publishNewProshopOrder,
   publishProshopOrderStatusChanged,
 } = require('../lib/ably');
+const { computeOrderTax } = require('../lib/tax');
 
 // ── Shops ─────────────────────────────────────────────────────────────────────
 
@@ -262,6 +263,10 @@ async function createOrder(req, res, next) {
     const { rows: shops } = await pool.query(`SELECT id FROM shop WHERE id = $1 AND property_id = $2`, [shop_id, req.property_id]);
     if (!shops.length) return res.status(404).json({ error: 'Shop not found' });
 
+    const { rows: properties } = await pool.query(
+      `SELECT tax_enabled, tax_rate, tax_inclusive FROM property WHERE id = $1`, [req.property_id]
+    );
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -288,13 +293,14 @@ async function createOrder(req, res, next) {
         lineItems.push({ item_id, item_name: catalog[0].name, unit_price: unitPrice, quantity: qty, subtotal });
       }
       itemsSubtotal = Math.round(itemsSubtotal * 100) / 100;
-      const totalPrice = Math.round((itemsSubtotal + shippingCost) * 100) / 100;
+      const { taxAmount, totalExtra } = computeOrderTax(properties[0], itemsSubtotal);
+      const totalPrice = Math.round((itemsSubtotal + shippingCost + totalExtra) * 100) / 100;
 
       const { rows: orderRows } = await client.query(
         `INSERT INTO proshop_order
-           (property_id, shop_id, contact_name, contact_email, contact_phone, shipping_address, shipping_cost, items_subtotal, total_price, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [req.property_id, shop_id, contact_name || 'Website Guest', contact_email || null, contact_phone || null, shipping_address || null, shippingCost, itemsSubtotal, totalPrice, notes || null]
+           (property_id, shop_id, contact_name, contact_email, contact_phone, shipping_address, shipping_cost, items_subtotal, tax_amount, total_price, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+        [req.property_id, shop_id, contact_name || 'Website Guest', contact_email || null, contact_phone || null, shipping_address || null, shippingCost, itemsSubtotal, taxAmount, totalPrice, notes || null]
       );
       const order = orderRows[0];
 

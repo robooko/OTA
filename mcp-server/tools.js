@@ -584,10 +584,14 @@ function createTools(apiRequest) {
   },
   {
     name: 'update_property',
-    description: "Set the property's default currency and/or timezone. Both fields optional; omit one to leave it unchanged.",
+    description: "Set the property's default currency, timezone, and/or tax settings. All fields optional; omit one to leave it unchanged. Tax is off by default and only applies to website-checkout orders (pro shop + restaurant web ordering) today.",
     inputSchema: {
       currency: z.string().optional().describe('ISO 4217 code, e.g. GBP, USD, EUR'),
       timezone: z.string().optional().describe('IANA timezone, e.g. Europe/London'),
+      tax_enabled: z.boolean().optional().describe('Whether tax is applied to website-checkout orders'),
+      tax_rate: z.number().min(0).max(100).optional().describe('Tax rate as a percentage, e.g. 20 for 20%'),
+      tax_inclusive: z.boolean().optional().describe('true = displayed/charged prices already include tax; false = tax is added at checkout'),
+      tax_id: z.string().nullable().optional().describe('VAT/tax registration number printed on invoices, or null to clear'),
     },
     run: (args) => apiRequest('PUT', '/api/property/me', { body: args }),
   },
