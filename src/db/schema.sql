@@ -841,14 +841,21 @@ CREATE TABLE IF NOT EXISTS shop (
 );
 
 CREATE TABLE IF NOT EXISTS proshop_item (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  property_id UUID          NOT NULL REFERENCES property(id),
-  shop_id     UUID          REFERENCES shop(id),
-  name        VARCHAR(100)  NOT NULL,
-  description TEXT,
-  category    VARCHAR(50),
-  price       NUMERIC(10,2) NOT NULL,
-  status      VARCHAR(20)   DEFAULT 'active'
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id    UUID          NOT NULL REFERENCES property(id),
+  shop_id        UUID          REFERENCES shop(id),
+  name           VARCHAR(100)  NOT NULL,
+  description    TEXT,
+  category       VARCHAR(50),
+  price          NUMERIC(10,2) NOT NULL,
+  status         VARCHAR(20)   DEFAULT 'active',
+  -- Optional stock count -- see migrate-2026-09-06-proshop-stock.sql. NULL
+  -- (the default) means untracked/unlimited. Decremented when an order pays
+  -- (proshop.js's confirmOrderPayment) or a booking-item sale is made
+  -- (addBookingItem), restored on a paid-order cancellation or a
+  -- booking-item removal.
+  stock_quantity INT,
+  CONSTRAINT proshop_item_stock_quantity_check CHECK (stock_quantity IS NULL OR stock_quantity >= 0)
 );
 
 -- Standalone guest order from the venue's website -- not attached to any

@@ -64,11 +64,20 @@ async function listItems(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// stock_quantity: omit or null = untracked/unlimited (no check, no
+// decrement, ever). A number = tracked from here on.
+function isValidStockQuantity(value) {
+  return value === undefined || value === null || (Number.isInteger(value) && value >= 0);
+}
+
 async function createItem(req, res, next) {
   try {
-    const { name, description, category, price, shop_id } = req.body;
+    const { name, description, category, price, shop_id, stock_quantity } = req.body;
     if (!name || price == null) return res.status(400).json({ error: 'name and price are required' });
     if (!shop_id) return res.status(400).json({ error: 'shop_id is required' });
+    if (!isValidStockQuantity(stock_quantity)) {
+      return res.status(400).json({ error: 'stock_quantity must be a non-negative integer, or null/omitted for unlimited' });
+    }
 
     const { rows: shops } = await pool.query(
       `SELECT id FROM shop WHERE id = $1 AND property_id = $2`, [shop_id, req.property_id]
@@ -76,8 +85,8 @@ async function createItem(req, res, next) {
     if (!shops.length) return res.status(404).json({ error: 'Shop not found' });
 
     const { rows } = await pool.query(
-      `INSERT INTO proshop_item (property_id, shop_id, name, description, category, price) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.property_id, shop_id, name, description || null, category || null, price]
+      `INSERT INTO proshop_item (property_id, shop_id, name, description, category, price, stock_quantity) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.property_id, shop_id, name, description || null, category || null, price, stock_quantity ?? null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -85,16 +94,25 @@ async function createItem(req, res, next) {
 
 async function updateItem(req, res, next) {
   try {
-    const { name, description, category, price, status } = req.body;
+    const { name, description, category, price, status, stock_quantity } = req.body;
+    if (stock_quantity !== undefined && !isValidStockQuantity(stock_quantity)) {
+      return res.status(400).json({ error: 'stock_quantity must be a non-negative integer, or null for unlimited' });
+    }
+    // stock_quantity is nullable-on-purpose (untracked), so it can't use the
+    // same "COALESCE = omit" convention as the other fields here -- a
+    // present-but-null value must clear it to untracked, not leave the old
+    // count in place. undefined (the field wasn't sent at all) still means
+    // "leave unchanged".
     const { rows } = await pool.query(
       `UPDATE proshop_item SET
-         name        = COALESCE($1, name),
-         description = COALESCE($2, description),
-         category    = COALESCE($3, category),
-         price       = COALESCE($4, price),
-         status      = COALESCE($5, status)
-       WHERE id = $6 AND property_id = $7 RETURNING *`,
-      [name, description, category, price, status, req.params.id, req.property_id]
+         name           = COALESCE($1, name),
+         description    = COALESCE($2, description),
+         category       = COALESCE($3, category),
+         price          = COALESCE($4, price),
+         status         = COALESCE($5, status),
+         stock_quantity = CASE WHEN $6 THEN $7 ELSE stock_quantity END
+       WHERE id = $8 AND property_id = $9 RETURNING *`,
+      [name, description, category, price, status, stock_quantity !== undefined, stock_quantity ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Item not found' });
     res.json(rows[0]);
@@ -128,6 +146,9 @@ async function addBookingItem(req, res, next) {
       [item_id, req.property_id]
     );
     if (!items.length) return res.status(404).json({ error: 'Item not found' });
+    if (items[0].stock_quantity !== null && items[0].stock_quantity < quantity) {
+      return res.status(409).json({ error: `Only ${items[0].stock_quantity} of "${items[0].name}" left in stock` });
+    }
 
     const { rows: bookings } = await pool.query(
       `SELECT id FROM golf_booking WHERE id = $1 AND property_id = $2`, [booking_id, req.property_id]
@@ -139,6 +160,15 @@ async function addBookingItem(req, res, next) {
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
       [req.property_id, booking_id, item_id, items[0].name, quantity, items[0].price]
     );
+    // Racy against a concurrent sale of the same item (two staff members,
+    // same tee sheet) -- the WHERE guard means a loser here just leaves
+    // stock at 0 rather than going negative, sold or not.
+    if (items[0].stock_quantity !== null) {
+      await pool.query(
+        `UPDATE proshop_item SET stock_quantity = GREATEST(stock_quantity - $1, 0) WHERE id = $2 AND stock_quantity IS NOT NULL`,
+        [quantity, item_id]
+      );
+    }
     const created = { ...rows[0], total: rows[0].quantity * rows[0].unit_price };
 
     publishProshopItemAdded(req.property_id, created).catch((err) => console.error('Ably publish failed:', err.message));
@@ -150,10 +180,17 @@ async function addBookingItem(req, res, next) {
 async function removeBookingItem(req, res, next) {
   try {
     const { rows } = await pool.query(
-      `DELETE FROM golf_booking_item WHERE id = $1 AND booking_id = $2 AND property_id = $3 RETURNING id`,
+      `DELETE FROM golf_booking_item WHERE id = $1 AND booking_id = $2 AND property_id = $3 RETURNING id, item_id, quantity`,
       [req.params.id, req.params.booking_id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Item not found' });
+
+    if (rows[0].item_id) {
+      await pool.query(
+        `UPDATE proshop_item SET stock_quantity = stock_quantity + $1 WHERE id = $2 AND stock_quantity IS NOT NULL`,
+        [rows[0].quantity, rows[0].item_id]
+      );
+    }
 
     publishProshopItemRemoved(req.property_id, { id: rows[0].id, booking_id: req.params.booking_id })
       .catch((err) => console.error('Ably publish failed:', err.message));
@@ -184,6 +221,32 @@ function orderWithItems(order, items) {
 // pickup/shipping icon per order, from whether shipping_address was given.
 function forFeed(order) {
   return { ...order, fulfillment_method: order.shipping_address ? 'shipping' : 'pickup' };
+}
+
+// Only called once per order, guarded by the caller checking the
+// pre-update payment_status wasn't already 'paid' -- a retried
+// confirm-payment call (client retry after a dropped response, the
+// already-paid idempotency branch) must never decrement twice for the same
+// sale. stock_quantity IS NOT NULL guard: untracked items are skipped
+// entirely, cheaper than a no-op UPDATE per line.
+async function decrementStockForItems(items) {
+  for (const item of items) {
+    if (!item.item_id) continue;
+    await pool.query(
+      `UPDATE proshop_item SET stock_quantity = GREATEST(stock_quantity - $1, 0) WHERE id = $2 AND stock_quantity IS NOT NULL`,
+      [item.quantity, item.item_id]
+    );
+  }
+}
+
+async function restoreStockForItems(items) {
+  for (const item of items) {
+    if (!item.item_id) continue;
+    await pool.query(
+      `UPDATE proshop_item SET stock_quantity = stock_quantity + $1 WHERE id = $2 AND stock_quantity IS NOT NULL`,
+      [item.quantity, item.item_id]
+    );
+  }
 }
 
 async function loadOrderWithItems(orderId, propertyId) {
@@ -280,12 +343,16 @@ async function createOrder(req, res, next) {
           return res.status(400).json({ error: 'Each item needs a valid item_id and a positive integer quantity' });
         }
         const { rows: catalog } = await client.query(
-          `SELECT name, price FROM proshop_item WHERE id = $1 AND shop_id = $2 AND property_id = $3 AND status = 'active'`,
+          `SELECT name, price, stock_quantity FROM proshop_item WHERE id = $1 AND shop_id = $2 AND property_id = $3 AND status = 'active'`,
           [item_id, shop_id, req.property_id]
         );
         if (!catalog.length) {
           await client.query('ROLLBACK');
           return res.status(400).json({ error: `Item ${item_id} is not available in this shop` });
+        }
+        if (catalog[0].stock_quantity !== null && catalog[0].stock_quantity < qty) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: `Only ${catalog[0].stock_quantity} of "${catalog[0].name}" left in stock` });
         }
         const unitPrice = parseFloat(catalog[0].price);
         const subtotal = Math.round(unitPrice * qty * 100) / 100;
@@ -334,6 +401,18 @@ async function updateOrder(req, res, next) {
     if (status !== undefined && !['pending', 'paid', 'cancelled'].includes(status)) {
       return res.status(400).json({ error: "status must be 'pending', 'paid', or 'cancelled'" });
     }
+
+    // Only a paid order actually drew down stock, so only cancelling one
+    // that was paid should give it back -- fetched before the update below
+    // so it reflects the status this request is transitioning FROM.
+    let wasPaid = false;
+    if (status === 'cancelled') {
+      const { rows: before } = await pool.query(
+        `SELECT status FROM proshop_order WHERE id = $1 AND property_id = $2`, [req.params.id, req.property_id]
+      );
+      wasPaid = before[0]?.status === 'paid';
+    }
+
     const { rows } = await pool.query(
       `UPDATE proshop_order SET
          status           = COALESCE($1, status),
@@ -346,6 +425,12 @@ async function updateOrder(req, res, next) {
       [status, contact_name, contact_email, contact_phone, shipping_address, notes, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
+    if (wasPaid) {
+      const { rows: items } = await pool.query(
+        `SELECT item_id, quantity FROM proshop_order_item WHERE order_id = $1`, [rows[0].id]
+      );
+      await restoreStockForItems(items);
+    }
     if (status !== undefined) {
       publishProshopOrderStatusChanged(req.property_id, { id: rows[0].id, status: rows[0].status, payment_status: rows[0].payment_status })
         .catch((err) => console.error('Ably publish failed:', err.message));
@@ -381,6 +466,7 @@ async function createOrderPaymentIntent(req, res, next) {
           `UPDATE proshop_order SET status = 'paid', payment_status = 'paid' WHERE id = $1 RETURNING *`,
           [order.id]
         );
+        await decrementStockForItems(order.items);
         publishNewProshopOrder(req.property_id, forFeed(orderWithItems(paidRows[0], order.items)))
           .catch((err) => console.error('Ably publish failed:', err.message));
         return res.json({ already_paid: true, payment_intent_id: existing.id });
@@ -426,12 +512,20 @@ async function confirmOrderPayment(req, res, next) {
       return res.status(409).json({ error: 'Payment amount does not match the order total' });
     }
 
+    const alreadyPaid = order.payment_status === 'paid';
     const { rows } = await pool.query(
       `UPDATE proshop_order SET status = 'paid', payment_status = 'paid' WHERE id = $1 AND property_id = $2 RETURNING *`,
       [order.id, req.property_id]
     );
-    publishNewProshopOrder(req.property_id, forFeed(orderWithItems(rows[0], order.items)))
-      .catch((err) => console.error('Ably publish failed:', err.message));
+    // Guard against decrementing twice for one sale -- this endpoint has no
+    // "already paid" early-return (a client retry after a dropped response
+    // just re-confirms harmlessly), so the stock/feed side effects below
+    // must only fire on the actual first transition to paid.
+    if (!alreadyPaid) {
+      await decrementStockForItems(order.items);
+      publishNewProshopOrder(req.property_id, forFeed(orderWithItems(rows[0], order.items)))
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    }
     res.json(rows[0]);
   } catch (err) {
     if (err.type?.startsWith('Stripe')) return res.status(502).json({ error: `Stripe error: ${err.message}` });
