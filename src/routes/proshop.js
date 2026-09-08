@@ -28,6 +28,7 @@ router.post('/orders/:id/confirm-payment', authenticateOrApiKey, ctrl.confirmOrd
 
 // Returns (guest via website, or staff via dashboard) -- managed as enquiries
 router.get('/returns', authenticateOrApiKey, ctrl.listReturns);
+router.post('/returns', authenticateOrApiKey, ctrl.createReturn);
 router.get('/returns/:id', authenticateOrApiKey, ctrl.getReturn);
 router.put('/returns/:id', authenticateOrApiKey, ctrl.updateReturnStatus);
 

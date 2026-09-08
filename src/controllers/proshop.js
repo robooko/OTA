@@ -5,11 +5,15 @@ const {
   publishNewProshopOrder,
   publishProshopOrderStatusChanged,
   publishProshopReturnStatusChanged,
+  publishNewInquiry,
 } = require('../lib/ably');
 const {
-  RETURN_STATUSES, RETURN_TRANSITIONS,
+  RETURN_STATUSES, RETURN_TRANSITIONS, RETURN_EVENT_TYPE,
   findOrderByReferenceAndEmail, loadOrderLinesWithReturnable, loadReturnItems, loadReturn,
+  buildReturnMessage, ensureFirstReply,
 } = require('../lib/proshopReturns');
+const { validateBranding, isValidUuid } = require('../middleware/validate');
+const { runAiReply } = require('../lib/aiReplyPipeline');
 const { computeOrderTax } = require('../lib/tax');
 const { generateOrderReference } = require('../lib/orderReference');
 
@@ -638,6 +642,114 @@ async function updateReturnStatus(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Two body shapes: a guest (website, API key) sends { reference, email };
+// staff (dashboard, Clerk token) may send { order_id } instead. Everything
+// else is common: reason, items [{ order_item_id, quantity }], branding.
+// One transaction inserts the enquiry thread, the return and its lines,
+// with the order row locked so two simultaneous requests can't both pass
+// the quantity cap. No token gate (unlike createInquiry): the return must
+// be recorded regardless, and the fallback acknowledgement is free.
+async function createReturn(req, res, next) {
+  try {
+    const { reference, email, order_id, reason, items, branding } = req.body ?? {};
+    const staffRail = req.auth_method === 'bearer';
+    if (order_id !== undefined && !staffRail) {
+      return res.status(400).json({ error: 'order_id is only accepted from the dashboard; send reference and email' });
+    }
+    if (!Array.isArray(items) || !items.length) {
+      return res.status(400).json({ error: 'items must be a non-empty array of { order_item_id, quantity }' });
+    }
+    if (reason != null && (typeof reason !== 'string' || reason.length > 2000)) {
+      return res.status(400).json({ error: 'reason must be a string of at most 2000 characters' });
+    }
+    const brandingError = validateBranding(branding);
+    if (brandingError) return res.status(400).json({ error: brandingError });
+    const seen = new Set();
+    for (const line of items) {
+      const qty = Number(line?.quantity);
+      if (!line?.order_item_id || !isValidUuid(line.order_item_id) || !Number.isInteger(qty) || qty < 1) {
+        return res.status(400).json({ error: 'Each item needs a valid order_item_id and a positive integer quantity' });
+      }
+      if (seen.has(line.order_item_id)) return res.status(400).json({ error: `Duplicate order_item_id ${line.order_item_id}` });
+      seen.add(line.order_item_id);
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      let order;
+      if (order_id !== undefined) {
+        if (!isValidUuid(order_id)) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Order not found' }); }
+        ({ rows: [order] } = await client.query(
+          `SELECT * FROM proshop_order WHERE id = $1 AND property_id = $2
+             AND payment_status = 'paid' AND status <> 'cancelled' FOR UPDATE`,
+          [order_id, req.property_id]
+        ));
+      } else {
+        order = await findOrderByReferenceAndEmail(req.property_id, reference, email, client, { lock: true });
+      }
+      if (!order) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Order not found' }); }
+      if (!order.contact_email) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Order has no email address to reply to' });
+      }
+
+      const lines = await loadOrderLinesWithReturnable(order.id, client);
+      const byId = new Map(lines.map((l) => [l.id, l]));
+      const returnLines = [];
+      for (const { order_item_id, quantity } of items) {
+        const line = byId.get(order_item_id);
+        if (!line) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Item ${order_item_id} is not on this order` }); }
+        const qty = Number(quantity);
+        if (qty > line.returnable_quantity) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: `Only ${line.returnable_quantity} of "${line.item_name}" can still be returned` });
+        }
+        returnLines.push({ order_item_id, quantity: qty, item_name: line.item_name });
+      }
+
+      const message = buildReturnMessage(order.reference, returnLines, reason);
+      const { rows: [inquiry] } = await client.query(
+        `INSERT INTO event_inquiry (property_id, name, email, phone, event_type, message, branding)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [req.property_id, order.contact_name, order.contact_email, order.contact_phone, RETURN_EVENT_TYPE, message,
+          branding ? JSON.stringify(branding) : null]
+      );
+      const { rows: [ret] } = await client.query(
+        `INSERT INTO proshop_return (property_id, order_id, event_inquiry_id, reason, raised_by)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [req.property_id, order.id, inquiry.id, String(reason ?? '').trim() || null, staffRail ? 'staff' : 'guest']
+      );
+      for (const l of returnLines) {
+        await client.query(
+          `INSERT INTO proshop_return_item (return_id, order_item_id, quantity) VALUES ($1, $2, $3)`,
+          [ret.id, l.order_item_id, l.quantity]
+        );
+      }
+      await client.query('COMMIT');
+
+      const full = await loadReturn(ret.id, req.property_id);
+      const payload = { ...inquiry, return: full };
+      publishNewInquiry(req.property_id, payload).catch((err) => console.error('Ably publish failed:', err.message));
+      // Fire-and-forget like createInquiry: drafting takes tens of seconds.
+      // Whatever the pipeline does (auto-send, draft, off, out of tokens,
+      // failure), ensureFirstReply then guarantees the guest one reply.
+      runAiReply({ inquiryId: inquiry.id, triggerType: 'new_inquiry' })
+        .catch((err) => console.error('AI reply pipeline failed:', err.message))
+        .then(() => ensureFirstReply(inquiry.id))
+        .catch((err) => console.error(`Return acknowledgement failed for inquiry ${inquiry.id}:`, err.message));
+
+      res.status(201).json(payload);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   listShops, createShop, updateShop,
   listItems, createItem, updateItem,
@@ -645,4 +757,5 @@ module.exports = {
   listOrders, getOrder, createOrder, updateOrder,
   createOrderPaymentIntent, confirmOrderPayment,
   lookupOrder, listReturns, getReturn, updateReturnStatus,
+  createReturn,
 };
