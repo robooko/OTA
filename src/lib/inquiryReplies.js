@@ -56,6 +56,15 @@ async function sendOutboundReply({ inquiry, body, sender = null, aiDraftId = nul
   const branding = inquiry.branding ?? inquiry.email_branding ?? undefined;
   const emailId = await sendReply(inquiry, inquiry.property_name, body, priorMessages, branding);
 
+  return recordOutboundReply({ inquiry, body, emailId, sender, aiDraftId });
+}
+
+// The persistence half of an outbound reply, after the email has gone: the
+// message row, the new->contacted flip, and the Ably publishes. Shared by
+// sendOutboundReply and the free return acknowledgement
+// (proshopReturns.ensureFirstReply), which sends its own email and pays no
+// token. Returns { message, inquiry } where inquiry reflects any status flip.
+async function recordOutboundReply({ inquiry, body, emailId, sender = null, aiDraftId = null }) {
   const { rows } = await pool.query(
     `INSERT INTO event_inquiry_message (event_inquiry_id, direction, body, resend_email_id, sent_by_user_id, sent_by_name, sent_by_avatar_url, ai_draft_id)
      VALUES ($1, 'outbound', $2, $3, $4, $5, $6, $7) RETURNING *`,
@@ -67,7 +76,7 @@ async function sendOutboundReply({ inquiry, body, sender = null, aiDraftId = nul
   // the bare updated row after a status flip, otherwise the loaded row --
   // minus the property's AI settings and email branding, which are joined
   // in for the pipeline/send and have no business in a reply response.
-  const { ai_reply_mode, ai_reply_instructions, ai_reply_auto_send_min_score, email_branding, ...publicInquiry } = inquiry;
+  const { ai_reply_mode, ai_reply_instructions, ai_reply_auto_send_min_score, email_branding, return_instructions, ...publicInquiry } = inquiry;
   let updatedInquiry = publicInquiry;
   if (inquiry.status === 'new') {
     const { rows: statusRows } = await pool.query(
@@ -94,4 +103,4 @@ async function sendOutboundReply({ inquiry, body, sender = null, aiDraftId = nul
   return { message, inquiry: updatedInquiry };
 }
 
-module.exports = { loadInquiryWithProperty, sendOutboundReply };
+module.exports = { loadInquiryWithProperty, sendOutboundReply, recordOutboundReply };

@@ -94,6 +94,56 @@ async function sendReply(inquiry, propertyName, body, priorMessages = [], brandi
   return data.id;
 }
 
+// The guaranteed first reply on a return request when the AI pipeline
+// didn't send one itself (mode off, draft awaiting a human, out of tokens,
+// model failure). Free: no token is spent. `ret` is loadReturnForInquiry's
+// shape (reference, reason, items[{ item_name, quantity }]). Returns the
+// Resend id and the plain-text body, which the caller stores on the thread.
+async function sendReturnAcknowledgement(inquiry, ret, propertyName, instructions, branding = undefined) {
+  if (!client) throw new Error('Resend not configured');
+  const firstName = String(inquiry.name ?? '').trim().split(/\s+/)[0] || 'there';
+  const lineTexts = ret.items.map((i) => `${i.quantity} × ${i.item_name}`);
+  const reason = String(ret.reason ?? '').trim();
+  const nextSteps = String(instructions ?? '').trim() || "We'll be in touch with next steps.";
+
+  const lines = [
+    `Hi ${firstName},`,
+    '',
+    `We've received your return request for order ${ret.reference}.`,
+    '',
+    ...lineTexts,
+    '',
+    ...(reason ? [`Reason: ${reason}`, ''] : []),
+    nextSteps,
+    '',
+    `The team at ${propertyName}`,
+  ];
+  const text = lines.join('\n');
+
+  const html = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;margin:0 auto;">
+      ${brandingHeaderHtml(branding, propertyName)}
+      <p style="margin:0 0 16px;">Hi ${escapeHtml(firstName)},</p>
+      <p style="margin:0 0 16px;">We've received your return request for order <strong>${escapeHtml(ret.reference)}</strong>.</p>
+      <div style="background:#f6f6f4;border-radius:8px;padding:18px 20px;margin:0 0 16px;">
+        ${lineTexts.map((l) => `<div style="font-size:14px;">${escapeHtml(l)}</div>`).join('')}
+      </div>
+      ${reason ? `<p style="margin:0 0 16px;color:#555;">Reason: ${escapeHtml(reason)}</p>` : ''}
+      ${textToHtmlParagraphs(nextSteps)}
+      <p style="margin:16px 0 0;">The team at ${escapeHtml(propertyName)}</p>
+    </div>`;
+
+  const { data, error } = await client.emails.send({
+    from: `${propertyName} via Forge <inquiries@hotal.forge-build.co.uk>`,
+    to: inquiry.email,
+    replyTo: `inquiry+${inquiry.id}@${process.env.RESEND_REPLY_DOMAIN}`,
+    subject: `Return request received — ${propertyName}`,
+    text,
+    html,
+  });
+  if (error) throw new Error(error.message);
+  return { id: data.id, body: text };
+}
+
 // The out-of-tokens fallback for an AI reply: hand the enquiry to the venue's
 // own inbox instead. Reply-To is the guest, so answering from the mail
 // client goes straight to them -- that reply never passes through OTA, which
@@ -427,6 +477,7 @@ module.exports = {
   formatAppointmentDate,
   brandingHeaderHtml,
   sendReply,
+  sendReturnAcknowledgement,
   sendInquiryForward,
   sendAppointmentConfirmation,
   sendAppointmentCancellation,

@@ -4,6 +4,8 @@
 // 2026-09-08-proshop-returns-design.md.
 const pool = require('../db');
 const { normaliseReference } = require('./orderReference');
+const { loadInquiryWithProperty, recordOutboundReply } = require('./inquiryReplies');
+const { sendReturnAcknowledgement } = require('./resend');
 
 const RETURN_STATUSES = ['requested', 'approved', 'rejected', 'received', 'refunded', 'cancelled'];
 
@@ -98,8 +100,29 @@ function buildReturnMessage(reference, lines, reason) {
   return body.join('\n');
 }
 
+// Called once the AI pipeline has finished with a brand-new return enquiry.
+// If nothing has gone out to the guest (mode off, a draft still pending,
+// out of tokens, model failure), send the plain acknowledgement so the
+// guest always hears back at once. Recorded on the thread like an auto-sent
+// draft (no sender), so staff see it and the model reads it next time. A
+// pending draft is left pending -- staff can still approve it as a richer
+// follow-up.
+async function ensureFirstReply(inquiryId) {
+  const { rows: sent } = await pool.query(
+    `SELECT 1 FROM event_inquiry_message WHERE event_inquiry_id = $1 AND direction = 'outbound' LIMIT 1`,
+    [inquiryId]
+  );
+  if (sent.length) return null;
+  const [inquiry, ret] = await Promise.all([loadInquiryWithProperty(inquiryId), loadReturnForInquiry(inquiryId)]);
+  if (!inquiry || !ret) return null;
+  const branding = inquiry.branding ?? inquiry.email_branding ?? undefined;
+  const { id: emailId, body } = await sendReturnAcknowledgement(inquiry, ret, inquiry.property_name, inquiry.return_instructions, branding);
+  const { message } = await recordOutboundReply({ inquiry, body, emailId });
+  return message;
+}
+
 module.exports = {
   RETURN_STATUSES, RETURN_TRANSITIONS, RETURN_EVENT_TYPE,
   findOrderByReferenceAndEmail, loadOrderLinesWithReturnable, loadReturnItems,
-  loadReturn, loadReturnForInquiry, buildReturnMessage,
+  loadReturn, loadReturnForInquiry, buildReturnMessage, ensureFirstReply,
 };
