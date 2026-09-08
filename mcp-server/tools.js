@@ -462,6 +462,41 @@ function createTools(apiRequest) {
     run: ({ id, status }) => apiRequest('PUT', `/api/proshop/orders/${id}`, { body: { status } }),
   },
   {
+    name: 'lookup_proshop_order',
+    description: 'Find a paid shop order by its 6-character reference and the email on the order (both case-insensitive). Returns the order and its lines with returnable_quantity per line. The same not-found error for a wrong reference, wrong email, or an unpaid/cancelled order.',
+    inputSchema: { reference: z.string(), email: z.string() },
+    run: (args) => apiRequest('POST', '/api/proshop/orders/lookup', { body: args }),
+  },
+  {
+    name: 'create_proshop_return',
+    description: 'Request a return of items from a paid shop order, identified by reference + email. Creates the return and an enquiry thread (event_type "Return order items") where staff manage it; the guest gets a first reply (AI, or a plain acknowledgement with the property\'s return instructions). Per line, quantity cannot exceed what was bought minus what is already on returns not rejected/cancelled.',
+    inputSchema: {
+      reference: z.string(),
+      email: z.string(),
+      reason: z.string().max(2000).optional(),
+      items: z.array(z.object({ order_item_id: z.string(), quantity: z.number().int().min(1) })),
+      branding: BRANDING_SCHEMA,
+    },
+    run: (args) => apiRequest('POST', '/api/proshop/returns', { body: args }),
+  },
+  {
+    name: 'list_proshop_returns',
+    description: 'List shop returns, newest first, each with its order reference, enquiry id, status and lines',
+    inputSchema: {
+      status: z.enum(['requested', 'approved', 'rejected', 'received', 'refunded', 'cancelled']).optional(),
+      order_id: z.string().optional(),
+      cursor: z.string().optional().describe('created_at of the last item from the previous page'),
+      limit: z.number().int().optional(),
+    },
+    run: (args) => apiRequest('GET', '/api/proshop/returns', { query: args }),
+  },
+  {
+    name: 'update_proshop_return_status',
+    description: "Move a return along its flow: requested→approved|rejected|cancelled, approved→received|cancelled, received→refunded|cancelled. 'received' restores stock. Refunds are manual in Stripe; 'refunded' just records that.",
+    inputSchema: { id: z.string(), status: z.enum(['requested', 'approved', 'rejected', 'received', 'refunded', 'cancelled']) },
+    run: ({ id, status }) => apiRequest('PUT', `/api/proshop/returns/${id}`, { body: { status } }),
+  },
+  {
     name: 'list_event_inquiries',
     description: 'List event inquiries for this property',
     inputSchema: {},
