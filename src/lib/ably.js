@@ -273,6 +273,14 @@ async function publishProshopOrderStatusChanged(propertyId, payload) {
   await channel.publish('order-status-changed', payload);
 }
 
+// Same shop-orders channel as orders. <live-shop-orders-feed> subscribes
+// by event name and ignores this one until a hotal-ui release consumes it.
+async function publishProshopReturnStatusChanged(propertyId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:shop-orders`);
+  await channel.publish('return-status-changed', payload);
+}
+
 module.exports = {
   publishNewInquiry,
   publishNewOrder,
@@ -305,5 +313,6 @@ module.exports = {
   publishProshopItemRemoved,
   publishNewProshopOrder,
   publishProshopOrderStatusChanged,
+  publishProshopReturnStatusChanged,
   client,
 };
