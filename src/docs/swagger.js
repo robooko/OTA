@@ -539,7 +539,7 @@ const swaggerSpec = {
 
     // ── Event Inquiries ─────────────────────────────────────────────────────
     '/api/event-inquiries': {
-      get: { tags: ['Event Inquiries'], summary: 'List event inquiries', responses: { 200: { description: "Array of inquiries, newest first. Each includes last_reply_direction ('inbound'/'outbound'/null) for the feed's avatar-vs-status-badge display." } } },
+      get: { tags: ['Event Inquiries'], summary: 'List event inquiries', responses: { 200: { description: "Array of inquiries, newest first. Each includes last_reply_direction ('inbound'/'outbound'/null) for the feed's avatar-vs-status-badge display, and `return` ({ id, order_id, reference, status, reason, raised_by, items[] }) for return threads, null otherwise." } } },
       post: { tags: ['Event Inquiries'], summary: 'Submit an event or general inquiry', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'email'], properties: { name: { type: 'string' }, email: { type: 'string' }, phone: { type: 'string' }, event_date: { type: 'string', format: 'date', nullable: true, description: 'Optional -- omit for a general enquiry with no date' }, guests: { type: 'integer' }, event_type: { type: 'string' }, format: { type: 'string' }, message: { type: 'string' }, restaurant_id: { type: 'string', format: 'uuid', description: 'Optional -- must belong to this property' } } } } } }, responses: { 201: { description: 'Created' }, 400: { description: 'Missing or invalid fields' } } },
     },
     '/api/event-inquiries/{id}': {

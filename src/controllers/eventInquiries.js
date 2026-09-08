@@ -16,6 +16,7 @@ const { verifyInboundWebhook, getReceivedEmail } = require('../lib/resend');
 const { loadInquiryWithProperty, sendOutboundReply } = require('../lib/inquiryReplies');
 const { isConfigured: aiConfigured } = require('../lib/aiReplies');
 const { runAiReply, supersedePendingDrafts, generateDraft, sendDraft, DraftNotPendingError, ProposedBookingError } = require('../lib/aiReplyPipeline');
+const { loadReturnItems } = require('../lib/proshopReturns');
 
 const AI_DRAFT_STATUSES = ['pending', 'sending', 'sent', 'rejected', 'superseded', 'failed'];
 
@@ -57,6 +58,20 @@ async function listInquiries(req, res, next) {
        WHERE ei.property_id = $1${spaFilter} ORDER BY ei.created_at DESC`,
       params
     );
+    // Return threads carry their return (order reference, lines, status)
+    // so the reply dialog can render the panel without a second request.
+    // Two queries for the whole page, not one per row.
+    if (rows.length) {
+      const { rows: returns } = await pool.query(
+        `SELECT r.id, r.event_inquiry_id, r.order_id, r.status, r.reason, r.raised_by, o.reference
+         FROM proshop_return r JOIN proshop_order o ON o.id = r.order_id
+         WHERE r.event_inquiry_id = ANY($1)`,
+        [rows.map((r) => r.id)]
+      );
+      const items = await loadReturnItems(returns.map((r) => r.id));
+      const byInquiry = new Map(returns.map((r) => [r.event_inquiry_id, { ...r, items: items.get(r.id) ?? [] }]));
+      for (const row of rows) row.return = byInquiry.get(row.id) ?? null;
+    }
     res.json(rows);
   } catch (err) { next(err); }
 }
