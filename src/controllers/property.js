@@ -43,7 +43,7 @@ function generateApiKey() {
 async function getCurrentProperty(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id FROM property WHERE id = $1',
+      'SELECT id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions FROM property WHERE id = $1',
       [req.property_id]
     );
     res.json(rows[0]);
@@ -57,7 +57,7 @@ async function getCurrentProperty(req, res, next) {
 // (website checkout) apply them today.
 async function updateCurrentProperty(req, res, next) {
   try {
-    const { currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id } = req.body;
+    const { currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions } = req.body;
     if (currency !== undefined && !isValidCurrencyCode(currency)) {
       return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP)' });
     }
@@ -67,17 +67,23 @@ async function updateCurrentProperty(req, res, next) {
     if (tax_rate !== undefined && (typeof tax_rate !== 'number' || !Number.isFinite(tax_rate) || tax_rate < 0 || tax_rate > 100)) {
       return res.status(400).json({ error: 'tax_rate must be a number between 0 and 100' });
     }
+    if (return_instructions !== undefined && return_instructions !== null
+        && (typeof return_instructions !== 'string' || return_instructions.length > 4000)) {
+      return res.status(400).json({ error: 'return_instructions must be a string of at most 4000 characters' });
+    }
     const { rows } = await pool.query(
       `UPDATE property SET
-         currency      = COALESCE($1, currency),
-         timezone      = COALESCE($2, timezone),
-         tax_enabled   = COALESCE($3, tax_enabled),
-         tax_rate      = COALESCE($4, tax_rate),
-         tax_inclusive = COALESCE($5, tax_inclusive),
-         tax_id        = COALESCE($6, tax_id)
-       WHERE id = $7
-       RETURNING id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id`,
-      [currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, req.property_id]
+         currency            = COALESCE($1, currency),
+         timezone            = COALESCE($2, timezone),
+         tax_enabled         = COALESCE($3, tax_enabled),
+         tax_rate            = COALESCE($4, tax_rate),
+         tax_inclusive       = COALESCE($5, tax_inclusive),
+         tax_id              = COALESCE($6, tax_id),
+         return_instructions = CASE WHEN $8::boolean THEN $7::text ELSE return_instructions END
+       WHERE id = $9
+       RETURNING id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions`,
+      [currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id,
+        return_instructions ?? null, return_instructions !== undefined, req.property_id]
     );
     res.json(rows[0]);
   } catch (err) {
