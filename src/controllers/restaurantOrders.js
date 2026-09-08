@@ -9,6 +9,7 @@ const {
   client: ablyClient,
 } = require('../lib/ably');
 const { generateJoinCode, verifyJoinCode } = require('../lib/joinCode');
+const { computeOrderTax } = require('../lib/tax');
 
 function isValidTranslations(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -223,10 +224,18 @@ async function getOrder(req, res, next) {
 
 async function createOrder(req, res, next) {
   try {
-    const { restaurant_id, booking_id, table_id, guest_id, items, notes, scheduled_for, force } = req.body;
-    if (!restaurant_id || (!booking_id && !table_id) || !Array.isArray(items) || !items.length) {
-      return res.status(400).json({ error: 'restaurant_id, either booking_id or table_id, and an items array, are required' });
+    const { restaurant_id, booking_id, table_id, guest_id, items, notes, scheduled_for, force, contact_name, contact_email, contact_phone } = req.body;
+    if (!restaurant_id || !Array.isArray(items) || !items.length) {
+      return res.status(400).json({ error: 'restaurant_id and an items array are required' });
     }
+
+    // No booking_id/table_id = a paid-upfront pickup order (website
+    // ordering, no waiter, nothing to bill a tab through) -- see
+    // migrate-2026-09-07-merge-restaurant-web-order.sql. contact_name
+    // defaults the same way restaurant_web_order did, so a PaymentIntent
+    // can exist before a checkout form's contact fields even render.
+    const isPickup = !booking_id && !table_id;
+    const resolvedContactName = isPickup ? (contact_name || 'Website Guest') : (contact_name || null);
 
     const client = await pool.connect();
     try {
@@ -329,7 +338,7 @@ async function createOrder(req, res, next) {
       }
 
       // Lock in item prices from DB
-      let total = 0;
+      let itemsSubtotal = 0;
       const resolvedItems = [];
       for (const item of items) {
         const { item_id, quantity = 1, variant } = item;
@@ -342,15 +351,34 @@ async function createOrder(req, res, next) {
           return res.status(404).json({ error: `Item ${item_id} not found` });
         }
         const unit_price = parseFloat(found[0].price);
-        total += unit_price * quantity;
+        itemsSubtotal += unit_price * quantity;
         resolvedItems.push({ item_id, item_name: found[0].name, quantity, unit_price, variant: variant || null });
+      }
+      itemsSubtotal = Math.round(itemsSubtotal * 100) / 100;
+
+      // Tax only applies to the pickup (website-checkout) case, matching
+      // restaurant_web_order's original scope -- a waiter's tab is untaxed
+      // here same as it always was.
+      let taxAmount = 0;
+      let total = itemsSubtotal;
+      if (isPickup) {
+        const { rows: properties } = await client.query(
+          `SELECT tax_enabled, tax_rate, tax_inclusive FROM property WHERE id = $1`, [req.property_id]
+        );
+        const computed = computeOrderTax(properties[0], itemsSubtotal);
+        taxAmount = computed.taxAmount;
+        total = Math.round((itemsSubtotal + computed.totalExtra) * 100) / 100;
       }
 
       // Create order
       const { rows: order } = await client.query(
-        `INSERT INTO restaurant_order (property_id, restaurant_id, booking_id, table_id, table_session_id, guest_id, notes, scheduled_for, total_price)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-        [req.property_id, restaurant_id, booking_id || null, table_id || null, table_session_id, guest_id || null, notes || null, scheduled_for || null, total]
+        `INSERT INTO restaurant_order
+           (property_id, restaurant_id, booking_id, table_id, table_session_id, guest_id, notes, scheduled_for,
+            total_price, contact_name, contact_email, contact_phone, items_subtotal, tax_amount)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+        [req.property_id, restaurant_id, booking_id || null, table_id || null, table_session_id, guest_id || null, notes || null, scheduled_for || null,
+         total, resolvedContactName, isPickup ? (contact_email || null) : null, isPickup ? (contact_phone || null) : null,
+         isPickup ? itemsSubtotal : null, taxAmount]
       );
 
       // Insert line items
@@ -380,8 +408,13 @@ async function createOrder(req, res, next) {
         publishTableSessionOpened(restaurant_id, req.property_id, { ...openedSession, table_number })
           .catch((err) => console.error('Ably publish failed:', err.message));
       }
-      publishNewOrder(restaurant_id, created).catch((err) => console.error('Ably publish failed:', err.message));
-      publishNewOrderForProperty(req.property_id, created).catch((err) => console.error('Ably publish failed:', err.message));
+      // A pickup order isn't real yet -- no payment taken. Publishing here
+      // would put an abandoned checkout in front of the kitchen; it
+      // publishes instead on the transition to paid (confirmOrderPayment).
+      if (!isPickup) {
+        publishNewOrder(restaurant_id, created).catch((err) => console.error('Ably publish failed:', err.message));
+        publishNewOrderForProperty(req.property_id, created).catch((err) => console.error('Ably publish failed:', err.message));
+      }
       res.status(201).json(created);
     } catch (err) {
       await client.query('ROLLBACK');
@@ -457,6 +490,168 @@ async function updateOrderStatus(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Same joined shape as getOrder -- reused below so the payment endpoints'
+// Ably publishes carry the full row, never a partial patch (see the
+// live-feed payload note in updateOrderStatus above).
+async function loadJoinedOrder(orderId, propertyId) {
+  const { rows } = await pool.query(
+    `SELECT o.*, rm.room_number, rt.table_number,
+            json_agg(json_build_object(
+              'id', oi.id,
+              'item_id', oi.item_id,
+              'item_name', oi.item_name,
+              'quantity', oi.quantity,
+              'unit_price', oi.unit_price,
+              'variant', oi.variant,
+              'total', (oi.quantity * oi.unit_price)
+            )) AS items
+     FROM restaurant_order o
+     LEFT JOIN restaurant_order_item oi ON oi.order_id = o.id
+     LEFT JOIN booking bk ON bk.id = o.booking_id
+     LEFT JOIN room rm ON rm.id = bk.room_id
+     LEFT JOIN restaurant_table rt ON rt.id = o.table_id
+     WHERE o.id = $1 AND o.property_id = $2
+     GROUP BY o.id, rm.room_number, rt.table_number`,
+    [orderId, propertyId]
+  );
+  return rows[0] ?? null;
+}
+
+async function orderTotalCents(order) {
+  return Math.round(parseFloat(order.total_price) * 100);
+}
+
+// Per field: omit = unchanged. Patches in the guest's real contact details
+// before confirm-payment -- createOrder defaults contact_name to "Website
+// Guest" for a pickup order so a PaymentIntent can exist before a checkout
+// form's contact fields even render (same reasoning restaurant_web_order
+// used). Only meaningful for pickup orders, but harmless on any order.
+async function updateOrder(req, res, next) {
+  try {
+    const { contact_name, contact_email, contact_phone, notes } = req.body ?? {};
+    const { rows } = await pool.query(
+      `UPDATE restaurant_order SET
+         contact_name  = COALESCE($1, contact_name),
+         contact_email = COALESCE($2, contact_email),
+         contact_phone = COALESCE($3, contact_phone),
+         notes         = COALESCE($4, notes)
+       WHERE id = $5 AND property_id = $6 RETURNING *`,
+      [contact_name, contact_email, contact_phone, notes, req.params.id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Order not found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
+// Pickup orders only (table_session_id IS NULL) -- an at-table order paid
+// from a phone settles through restaurant_table_session's own
+// payment-intent endpoint instead (it pays the whole tab, not one order).
+async function createOrderPaymentIntent(req, res, next) {
+  try {
+    const order = await loadJoinedOrder(req.params.id, req.property_id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (order.table_session_id) {
+      return res.status(409).json({ error: "This order is billed through its table session -- use POST /api/restaurant-table-sessions/:id/payment-intent instead" });
+    }
+    if (order.status === 'cancelled') return res.status(409).json({ error: 'Order is cancelled' });
+    if (order.payment_status === 'paid') return res.status(409).json({ error: 'Order already paid' });
+
+    const { rows: properties } = await pool.query(`SELECT stripe_secret_key, currency FROM property WHERE id = $1`, [req.property_id]);
+    const property = properties[0];
+    if (!property?.stripe_secret_key) return res.status(409).json({ error: 'No Stripe secret key configured for this property' });
+
+    const stripe = require('stripe')(property.stripe_secret_key);
+    const amount = await orderTotalCents(order);
+
+    // Idempotency: a retry (page refresh, a dropped connection after Stripe
+    // confirmed) shouldn't create a second charge for the same order.
+    if (order.stripe_payment_intent_id) {
+      const existing = await stripe.paymentIntents.retrieve(order.stripe_payment_intent_id);
+      if (['requires_payment_method', 'requires_confirmation', 'requires_capture', 'requires_action'].includes(existing.status)) {
+        return res.json({ client_secret: existing.client_secret, payment_intent_id: existing.id, amount: existing.amount });
+      }
+      if (existing.status === 'succeeded') {
+        if (existing.amount !== amount) {
+          return res.status(409).json({ error: 'A payment already succeeded for a different amount', payment_intent_id: existing.id });
+        }
+        const { rows: paidRows } = await pool.query(
+          `UPDATE restaurant_order SET payment_status = 'paid', paid_at = now(),
+             status = CASE WHEN status = 'pending' THEN 'confirmed' ELSE status END
+           WHERE id = $1 RETURNING *`,
+          [order.id]
+        );
+        const full = (await loadJoinedOrder(paidRows[0].id, req.property_id)) ?? paidRows[0];
+        publishNewOrder(full.restaurant_id, full).catch((err) => console.error('Ably publish failed:', err.message));
+        publishNewOrderForProperty(full.property_id, full).catch((err) => console.error('Ably publish failed:', err.message));
+        return res.json({ already_paid: true, payment_intent_id: existing.id });
+      }
+      // canceled/failed -> fall through and mint a fresh intent
+    }
+
+    const intent = await stripe.paymentIntents.create({
+      amount,
+      currency: property.currency.toLowerCase(),
+      automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
+      capture_method: 'automatic',
+      metadata: { restaurant_order_id: order.id, restaurant_id: order.restaurant_id },
+    });
+
+    await pool.query(`UPDATE restaurant_order SET stripe_payment_intent_id = $1 WHERE id = $2`, [intent.id, order.id]);
+    res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount });
+  } catch (err) {
+    if (err.type?.startsWith('Stripe')) return res.status(502).json({ error: `Stripe error: ${err.message}` });
+    next(err);
+  }
+}
+
+async function confirmOrderPayment(req, res, next) {
+  try {
+    const { payment_intent_id } = req.body ?? {};
+    if (!payment_intent_id) return res.status(400).json({ error: 'payment_intent_id is required' });
+
+    const order = await loadJoinedOrder(req.params.id, req.property_id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (payment_intent_id !== order.stripe_payment_intent_id) {
+      return res.status(409).json({ error: 'Payment intent does not match this order' });
+    }
+
+    const { rows: properties } = await pool.query(`SELECT stripe_secret_key FROM property WHERE id = $1`, [req.property_id]);
+    const stripeSecretKey = properties[0]?.stripe_secret_key;
+    if (!stripeSecretKey) return res.status(409).json({ error: 'No Stripe secret key configured for this property' });
+
+    const stripe = require('stripe')(stripeSecretKey);
+    const intent = await stripe.paymentIntents.retrieve(payment_intent_id);
+    if (intent.status !== 'succeeded') {
+      return res.status(409).json({ error: `Payment has not succeeded (status: ${intent.status})` });
+    }
+    const expected = await orderTotalCents(order);
+    if (intent.amount !== expected) {
+      return res.status(409).json({ error: 'Payment amount does not match the order total' });
+    }
+
+    // A client retry after a dropped response just re-confirms harmlessly --
+    // but the publish below must only fire on the actual first transition
+    // to paid, same guard proshop.js uses.
+    if (order.payment_status === 'paid') return res.json(order);
+
+    const { rows } = await pool.query(
+      `UPDATE restaurant_order SET
+         payment_status = 'paid',
+         paid_at = now(),
+         status = CASE WHEN status = 'pending' THEN 'confirmed' ELSE status END
+       WHERE id = $1 AND property_id = $2 RETURNING *`,
+      [order.id, req.property_id]
+    );
+    const full = (await loadJoinedOrder(rows[0].id, req.property_id)) ?? rows[0];
+    publishNewOrder(full.restaurant_id, full).catch((err) => console.error('Ably publish failed:', err.message));
+    publishNewOrderForProperty(full.property_id, full).catch((err) => console.error('Ably publish failed:', err.message));
+    res.json(full);
+  } catch (err) {
+    if (err.type?.startsWith('Stripe')) return res.status(502).json({ error: `Stripe error: ${err.message}` });
+    next(err);
+  }
+}
+
 async function getAblyToken(req, res, next) {
   try {
     const { restaurant_id } = req.query;
@@ -476,4 +671,4 @@ async function getAblyToken(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, renameMenuCategory, listOrders, getOrder, createOrder, updateOrderStatus, getAblyToken };
+module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, renameMenuCategory, listOrders, getOrder, createOrder, updateOrder, updateOrderStatus, createOrderPaymentIntent, confirmOrderPayment, getAblyToken };

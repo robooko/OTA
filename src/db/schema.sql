@@ -765,7 +765,22 @@ CREATE TABLE IF NOT EXISTS restaurant_order (
   scheduled_for  TIMESTAMPTZ,
   total_price    NUMERIC(10,2) NOT NULL DEFAULT 0,
   created_at     TIMESTAMPTZ  DEFAULT now(),
-  CONSTRAINT restaurant_order_booking_or_table CHECK (booking_id IS NOT NULL OR table_id IS NOT NULL)
+  -- Paid-upfront pickup order fields (no booking_id/table_id to bill
+  -- through) -- see migrate-2026-09-07-merge-restaurant-web-order.sql.
+  -- An at-table order paid from a phone still sets table_id and settles
+  -- through restaurant_table_session's 'online' channel instead; these
+  -- columns stay NULL/unpaid for that case and for ordinary waiter orders.
+  contact_name              VARCHAR(100),
+  contact_email             VARCHAR(255),
+  contact_phone             VARCHAR(30),
+  items_subtotal            NUMERIC(10,2),
+  tax_amount                NUMERIC(10,2) NOT NULL DEFAULT 0,
+  payment_status            VARCHAR(20)   NOT NULL DEFAULT 'unpaid',
+  paid_at                   TIMESTAMPTZ,
+  stripe_payment_intent_id  VARCHAR(255),
+  CONSTRAINT restaurant_order_booking_table_or_contact
+    CHECK (booking_id IS NOT NULL OR table_id IS NOT NULL OR contact_name IS NOT NULL),
+  CONSTRAINT restaurant_order_payment_status_check CHECK (payment_status IN ('unpaid', 'paid'))
 );
 
 CREATE TABLE IF NOT EXISTS restaurant_order_item (
@@ -782,53 +797,6 @@ CREATE INDEX IF NOT EXISTS idx_restaurant_order_booking       ON restaurant_orde
 CREATE INDEX IF NOT EXISTS idx_restaurant_order_guest         ON restaurant_order(guest_id);
 CREATE INDEX IF NOT EXISTS idx_restaurant_order_restaurant    ON restaurant_order(restaurant_id);
 CREATE INDEX IF NOT EXISTS idx_restaurant_order_table_session ON restaurant_order(table_session_id);
-
--- "Nando's style" food ordering: order and pay on the website, no running
--- tab. Distinct from restaurant_order above (requires booking_id OR
--- table_id, billed through restaurant_table_session -- built for a waiter
--- opening a walk-in tab) and from restaurant_reservation (a dine-in
--- booking, no food). table_id is optional: pickup orders have none; an
--- at-table order paid per-round (rather than run up on a tab) sets it. See
--- migrate-2026-09-06-restaurant-web-orders.sql. Payment mirrors
--- restaurant_table_session's 'online' channel and proshop_order exactly.
-CREATE TABLE IF NOT EXISTS restaurant_web_order (
-  id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  property_id              UUID          NOT NULL REFERENCES property(id),
-  restaurant_id            UUID          NOT NULL REFERENCES restaurant(id),
-  table_id                 UUID          REFERENCES restaurant_table(id),
-  contact_name             VARCHAR(100)  NOT NULL DEFAULT 'Website Guest',
-  contact_email            VARCHAR(255),
-  contact_phone            VARCHAR(30),
-  scheduled_for            TIMESTAMPTZ,
-  notes                    TEXT,
-  items_subtotal           NUMERIC(10,2) NOT NULL,
-  -- Snapshotted from property.tax_rate at order time -- see
-  -- migrate-2026-09-06-order-tax.sql. Zero unless tax_enabled was on.
-  tax_amount               NUMERIC(10,2) NOT NULL DEFAULT 0,
-  total_price              NUMERIC(10,2) NOT NULL,
-  status                   VARCHAR(20)   NOT NULL DEFAULT 'pending',
-  payment_status           VARCHAR(20)   NOT NULL DEFAULT 'unpaid',
-  stripe_payment_intent_id VARCHAR(255),
-  created_at               TIMESTAMPTZ   DEFAULT now(),
-  CONSTRAINT restaurant_web_order_status_check
-    CHECK (status IN ('pending', 'paid', 'preparing', 'ready', 'completed', 'cancelled')),
-  CONSTRAINT restaurant_web_order_payment_status_check CHECK (payment_status IN ('unpaid', 'paid'))
-);
-
-CREATE TABLE IF NOT EXISTS restaurant_web_order_item (
-  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  order_id   UUID          NOT NULL REFERENCES restaurant_web_order(id) ON DELETE CASCADE,
-  item_id    UUID          REFERENCES restaurant_menu_item(id),
-  item_name  VARCHAR(100)  NOT NULL,
-  unit_price NUMERIC(10,2) NOT NULL,
-  quantity   INT           NOT NULL CHECK (quantity > 0),
-  variant    VARCHAR(100),
-  subtotal   NUMERIC(10,2) NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_restaurant_web_order_property   ON restaurant_web_order(property_id);
-CREATE INDEX IF NOT EXISTS idx_restaurant_web_order_restaurant ON restaurant_web_order(restaurant_id);
-CREATE INDEX IF NOT EXISTS idx_restaurant_web_order_item       ON restaurant_web_order_item(order_id);
 
 -- ── Pro Shop ──────────────────────────────────────────────────────────────────
 
@@ -855,8 +823,15 @@ CREATE TABLE IF NOT EXISTS proshop_item (
   -- (addBookingItem), restored on a paid-order cancellation or a
   -- booking-item removal.
   stock_quantity INT,
+  -- Groups colour/size variants (each its own row, own price, own
+  -- stock_quantity) into one displayed product -- see
+  -- migrate-2026-09-08-proshop-item-grouping.sql. NULL = standalone item.
+  product_group  VARCHAR(100),
+  variant_label  VARCHAR(50),
   CONSTRAINT proshop_item_stock_quantity_check CHECK (stock_quantity IS NULL OR stock_quantity >= 0)
 );
+
+CREATE INDEX IF NOT EXISTS idx_proshop_item_product_group ON proshop_item(product_group);
 
 -- Standalone guest order from the venue's website -- not attached to any
 -- booking (that's golf_booking_item below, a separate concept: staff

@@ -58,7 +58,10 @@ async function listItems(req, res, next) {
     if (shop_id) { params.push(shop_id); query += ` AND shop_id = $${params.length}`; }
     params.push(req.property_id);
     query += ` AND property_id = $${params.length}`;
-    query += ' ORDER BY category, name';
+    // Grouped variants sort adjacent to each other (by their shared
+    // product_group), each group taking its place alphabetically among
+    // standalone items (which sort by their own name instead).
+    query += ' ORDER BY category, COALESCE(product_group, name), variant_label NULLS FIRST, name';
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) { next(err); }
@@ -72,7 +75,7 @@ function isValidStockQuantity(value) {
 
 async function createItem(req, res, next) {
   try {
-    const { name, description, category, price, shop_id, stock_quantity } = req.body;
+    const { name, description, category, price, shop_id, stock_quantity, product_group, variant_label } = req.body;
     if (!name || price == null) return res.status(400).json({ error: 'name and price are required' });
     if (!shop_id) return res.status(400).json({ error: 'shop_id is required' });
     if (!isValidStockQuantity(stock_quantity)) {
@@ -85,8 +88,9 @@ async function createItem(req, res, next) {
     if (!shops.length) return res.status(404).json({ error: 'Shop not found' });
 
     const { rows } = await pool.query(
-      `INSERT INTO proshop_item (property_id, shop_id, name, description, category, price, stock_quantity) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.property_id, shop_id, name, description || null, category || null, price, stock_quantity ?? null]
+      `INSERT INTO proshop_item (property_id, shop_id, name, description, category, price, stock_quantity, product_group, variant_label)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.property_id, shop_id, name, description || null, category || null, price, stock_quantity ?? null, product_group || null, variant_label || null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -94,15 +98,16 @@ async function createItem(req, res, next) {
 
 async function updateItem(req, res, next) {
   try {
-    const { name, description, category, price, status, stock_quantity } = req.body;
+    const { name, description, category, price, status, stock_quantity, product_group, variant_label } = req.body;
     if (stock_quantity !== undefined && !isValidStockQuantity(stock_quantity)) {
       return res.status(400).json({ error: 'stock_quantity must be a non-negative integer, or null for unlimited' });
     }
-    // stock_quantity is nullable-on-purpose (untracked), so it can't use the
-    // same "COALESCE = omit" convention as the other fields here -- a
-    // present-but-null value must clear it to untracked, not leave the old
-    // count in place. undefined (the field wasn't sent at all) still means
-    // "leave unchanged".
+    // stock_quantity, product_group and variant_label are all nullable-on-
+    // purpose (untracked / ungrouped), so they can't use the same
+    // "COALESCE = omit" convention as the other fields here -- a
+    // present-but-null value must clear them, not leave the old value in
+    // place. undefined (the field wasn't sent at all) still means "leave
+    // unchanged" for all three.
     const { rows } = await pool.query(
       `UPDATE proshop_item SET
          name           = COALESCE($1, name),
@@ -110,9 +115,17 @@ async function updateItem(req, res, next) {
          category       = COALESCE($3, category),
          price          = COALESCE($4, price),
          status         = COALESCE($5, status),
-         stock_quantity = CASE WHEN $6 THEN $7 ELSE stock_quantity END
-       WHERE id = $8 AND property_id = $9 RETURNING *`,
-      [name, description, category, price, status, stock_quantity !== undefined, stock_quantity ?? null, req.params.id, req.property_id]
+         stock_quantity = CASE WHEN $6 THEN $7  ELSE stock_quantity END,
+         product_group  = CASE WHEN $8 THEN $9  ELSE product_group END,
+         variant_label  = CASE WHEN $10 THEN $11 ELSE variant_label END
+       WHERE id = $12 AND property_id = $13 RETURNING *`,
+      [
+        name, description, category, price, status,
+        stock_quantity !== undefined, stock_quantity ?? null,
+        product_group !== undefined, product_group ?? null,
+        variant_label !== undefined, variant_label ?? null,
+        req.params.id, req.property_id,
+      ]
     );
     if (!rows.length) return res.status(404).json({ error: 'Item not found' });
     res.json(rows[0]);
