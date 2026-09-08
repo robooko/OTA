@@ -11,6 +11,7 @@ const { publishAiDraftReady, publishAiDraftUpdated } = require('./ably');
 const { isConfigured, generateInquiryReply, AiReplyError, MODEL } = require('./aiReplies');
 const { loadInquiryWithProperty, sendOutboundReply } = require('./inquiryReplies');
 const { bookFromAvailability } = require('../controllers/spa');
+const { loadReturnForInquiry } = require('./proshopReturns');
 const tokens = require('./tokens');
 const { InsufficientTokensError } = tokens;
 const { sendInquiryForward } = require('./resend');
@@ -105,7 +106,7 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
 
   await supersedePendingDrafts(inquiry.id);
 
-  const [{ rows: thread }, { rows: restaurantRows }, spaContext] = await Promise.all([
+  const [{ rows: thread }, { rows: restaurantRows }, spaContext, returnRequest] = await Promise.all([
     pool.query(
       'SELECT direction, body, created_at FROM event_inquiry_message WHERE event_inquiry_id = $1 ORDER BY created_at ASC',
       [inquiry.id]
@@ -114,22 +115,27 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
       ? pool.query('SELECT name, description FROM restaurant WHERE id = $1', [inquiry.restaurant_id])
       : Promise.resolve({ rows: [] }),
     inquiry.spa_id ? loadSpaContext(inquiry.spa_id) : Promise.resolve(null),
+    loadReturnForInquiry(inquiry.id),
   ]);
 
   let draftRow;
   try {
     const result = await generateInquiryReply({
-      property: { name: inquiry.property_name, currency: inquiry.currency, ai_reply_instructions: inquiry.ai_reply_instructions },
+      property: {
+        name: inquiry.property_name, currency: inquiry.currency,
+        ai_reply_instructions: inquiry.ai_reply_instructions, return_instructions: inquiry.return_instructions,
+      },
       inquiry,
       restaurant: restaurantRows[0] ?? null,
       spa: spaContext,
       thread,
       triggerType,
+      returnRequest,
     });
     // A proposal is only bookable against a spa diary, so it's dropped (not
-    // stored) for inquiries without one -- the draft text then over-promises,
-    // which the reviewer catches, rather than approve silently doing nothing.
-    const proposal = inquiry.spa_id ? result.proposed_booking : null;
+    // stored) for inquiries without one -- and never for a return thread,
+    // where a booking makes no sense whatever the model proposed.
+    const proposal = inquiry.spa_id && !returnRequest ? result.proposed_booking : null;
     ({ rows: [draftRow] } = await pool.query(
       `INSERT INTO event_inquiry_ai_draft
          (property_id, event_inquiry_id, trigger_type, trigger_message_id, body, quality_score,

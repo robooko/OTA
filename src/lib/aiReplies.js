@@ -129,13 +129,16 @@ STYLE
 
 THREAD
 - Your reply is the venue's next message in the thread. Read the whole thread; do not re-answer things the venue already covered unless the guest asked again.
-- If the last message is already from the venue and the guest has not replied since, still produce a suitable follow-up, but lower the score.`;
+- If the last message is already from the venue and the guest has not replied since, still produce a suitable follow-up, but lower the score.
+
+RETURNS
+- When <inquiry> contains a <return> block, the guest is returning shop items from a paid order. Confirm which items and the order reference, relay <return_instructions> from the venue section if present (do not invent a postal address, deadline or refund timing that isn't there), and never propose a booking. If the venue has no return instructions, say the team will follow up with next steps and set requires_human to true.`;
 
 // Guest-authored text is wrapped in tags; make sure it can't close our own
 // tags early. Only the exact closing sequences are neutralised, so ordinary
 // punctuation ("<3", "a < b") survives untouched.
 function neutraliseTags(text) {
-  return String(text ?? '').replace(/<\/?(inquiry|thread|message|field|venue_instructions|venue|restaurant|spa|trigger)\b/gi, (m) => m.replace('<', '‹'));
+  return String(text ?? '').replace(/<\/?(inquiry|thread|message|field|venue_instructions|venue|restaurant|spa|trigger|return_instructions|return|line|reason)\b/gi, (m) => m.replace('<', '‹'));
 }
 
 function field(name, value) {
@@ -188,6 +191,9 @@ function buildPropertyBlock(property, restaurant, spa) {
     }
     text += '  </spa>\n';
   }
+  if (property.return_instructions?.trim()) {
+    text += `  <return_instructions>${neutraliseTags(property.return_instructions.trim())}</return_instructions>\n`;
+  }
   text += '</venue>\n\n<venue_instructions>\n';
   text += property.ai_reply_instructions?.trim()
     ? neutraliseTags(property.ai_reply_instructions.trim())
@@ -204,7 +210,7 @@ const TRIGGER_TEXT = {
 
 // Volatile part (thread, today's date) goes in the user turn, after the cached
 // system prefix, so a new message never invalidates the property cache.
-function buildUserMessage({ inquiry, thread, triggerType, today }) {
+function buildUserMessage({ inquiry, thread, triggerType, today, returnRequest = null }) {
   let text = '<inquiry>\n';
   text += field('guest_name', inquiry.name);
   text += field('event_date', inquiry.event_date);
@@ -213,6 +219,14 @@ function buildUserMessage({ inquiry, thread, triggerType, today }) {
   text += field('event_type', inquiry.event_type);
   text += field('format', inquiry.format);
   text += field('original_message', inquiry.message);
+  if (returnRequest) {
+    text += `  <return order_reference="${neutraliseTags(returnRequest.reference)}" status="${returnRequest.status}">\n`;
+    for (const line of returnRequest.items) {
+      text += `    <line quantity="${line.quantity}">${neutraliseTags(line.item_name)}</line>\n`;
+    }
+    if (returnRequest.reason) text += `    <reason>${neutraliseTags(returnRequest.reason)}</reason>\n`;
+    text += '  </return>\n';
+  }
   text += '</inquiry>\n\n<thread>\n';
   for (const m of thread) {
     const from = m.direction === 'inbound' ? 'guest' : 'venue';
@@ -253,7 +267,7 @@ function findCorruption(text) {
 // model, usage: { input_tokens, output_tokens, cache_read_input_tokens } } or
 // throws AiReplyError. Callers persist failures rather than letting them
 // escape into a request path.
-async function generateInquiryReply({ property, inquiry, restaurant = null, spa = null, thread = [], triggerType = 'manual', today }) {
+async function generateInquiryReply({ property, inquiry, restaurant = null, spa = null, thread = [], triggerType = 'manual', today, returnRequest = null }) {
   if (!client) throw new AiReplyError('AI replies are not configured (ANTHROPIC_API_KEY is unset)', { kind: 'not_configured' });
   today = today || new Date().toISOString().slice(0, 10);
 
@@ -276,7 +290,7 @@ async function generateInquiryReply({ property, inquiry, restaurant = null, spa 
     // Fresh messages per outer (corruption-retry) attempt -- a prior
     // attempt's tool_use/tool_result trajectory belongs to that attempt,
     // not this one.
-    const messages = [{ role: 'user', content: buildUserMessage({ inquiry, thread, triggerType, today }) }];
+    const messages = [{ role: 'user', content: buildUserMessage({ inquiry, thread, triggerType, today, returnRequest }) }];
 
     try {
       response = await client.messages.parse({ ...baseRequest, messages });

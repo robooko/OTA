@@ -19,7 +19,7 @@ async function loadInquiryWithProperty(inquiryId, propertyId = null) {
   const { rows } = await pool.query(
     `SELECT ei.*, p.name AS property_name, p.currency,
             p.ai_reply_mode, p.ai_reply_instructions, p.ai_reply_auto_send_min_score,
-            p.fallback_email, p.email_branding
+            p.fallback_email, p.email_branding, p.return_instructions
      FROM event_inquiry ei
      JOIN property p ON p.id = ei.property_id
      WHERE ei.id = $1 AND ($2::uuid IS NULL OR ei.property_id = $2)`,
