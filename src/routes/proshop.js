@@ -19,10 +19,16 @@ router.delete('/booking/:booking_id/:id', authenticateOrApiKey, ctrl.removeBooki
 
 // Orders (guest self-checkout from the venue's website, no booking)
 router.get('/orders', authenticateOrApiKey, ctrl.listOrders);
+router.post('/orders/lookup', authenticateOrApiKey, ctrl.lookupOrder); // before /orders/:id
 router.get('/orders/:id', authenticateOrApiKey, ctrl.getOrder);
 router.post('/orders', authenticateOrApiKey, ctrl.createOrder);
 router.put('/orders/:id', authenticateOrApiKey, ctrl.updateOrder);
 router.post('/orders/:id/payment-intent', authenticateOrApiKey, ctrl.createOrderPaymentIntent);
 router.post('/orders/:id/confirm-payment', authenticateOrApiKey, ctrl.confirmOrderPayment);
+
+// Returns (guest via website, or staff via dashboard) -- managed as enquiries
+router.get('/returns', authenticateOrApiKey, ctrl.listReturns);
+router.get('/returns/:id', authenticateOrApiKey, ctrl.getReturn);
+router.put('/returns/:id', authenticateOrApiKey, ctrl.updateReturnStatus);
 
 module.exports = router;

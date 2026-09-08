@@ -4,7 +4,12 @@ const {
   publishProshopItemRemoved,
   publishNewProshopOrder,
   publishProshopOrderStatusChanged,
+  publishProshopReturnStatusChanged,
 } = require('../lib/ably');
+const {
+  RETURN_STATUSES, RETURN_TRANSITIONS,
+  findOrderByReferenceAndEmail, loadOrderLinesWithReturnable, loadReturnItems, loadReturn,
+} = require('../lib/proshopReturns');
 const { computeOrderTax } = require('../lib/tax');
 const { generateOrderReference } = require('../lib/orderReference');
 
@@ -560,10 +565,84 @@ async function confirmOrderPayment(req, res, next) {
   }
 }
 
+// ── Returns ───────────────────────────────────────────────────────────────────
+// Design: docs/superpowers/specs/2026-09-08-proshop-returns-design.md.
+
+// Guest-facing order lookup: reference + the email on the order. The same
+// 404 for a wrong reference, a wrong email, or an unpaid/cancelled order,
+// so the endpoint can't be used to probe which half was right.
+async function lookupOrder(req, res, next) {
+  try {
+    const { reference, email } = req.body ?? {};
+    const order = await findOrderByReferenceAndEmail(req.property_id, reference, email);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    const items = await loadOrderLinesWithReturnable(order.id);
+    const { stripe_payment_intent_id, ...publicOrder } = order;
+    res.json({ ...publicOrder, items });
+  } catch (err) { next(err); }
+}
+
+async function listReturns(req, res, next) {
+  try {
+    const { status, order_id, cursor, limit } = req.query;
+    const take = Math.min(parseInt(limit, 10) || 30, 100);
+    let query = `SELECT r.*, o.reference, o.contact_name, o.contact_email
+                 FROM proshop_return r JOIN proshop_order o ON o.id = r.order_id
+                 WHERE r.property_id = $1`;
+    const params = [req.property_id];
+    if (status) { params.push(status); query += ` AND r.status = $${params.length}`; }
+    if (order_id) { params.push(order_id); query += ` AND r.order_id = $${params.length}`; }
+    if (cursor) { params.push(cursor); query += ` AND r.created_at < $${params.length}`; }
+    params.push(take);
+    query += ` ORDER BY r.created_at DESC LIMIT $${params.length}`;
+    const { rows: returns } = await pool.query(query, params);
+    const items = await loadReturnItems(returns.map((r) => r.id));
+    for (const r of returns) r.items = items.get(r.id) ?? [];
+    res.json(returns);
+  } catch (err) { next(err); }
+}
+
+async function getReturn(req, res, next) {
+  try {
+    const ret = await loadReturn(req.params.id, req.property_id);
+    if (!ret) return res.status(404).json({ error: 'Return not found' });
+    res.json(ret);
+  } catch (err) { next(err); }
+}
+
+// Status only. Legal moves are RETURN_TRANSITIONS; 'received' puts the
+// returned quantities back into stock (the goods are on the shelf again).
+// The UPDATE is conditional on the status we validated against, so two
+// staff changing it at once can't both succeed.
+async function updateReturnStatus(req, res, next) {
+  try {
+    const { status } = req.body ?? {};
+    if (!RETURN_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `status must be one of ${RETURN_STATUSES.join(', ')}` });
+    }
+    const current = await loadReturn(req.params.id, req.property_id);
+    if (!current) return res.status(404).json({ error: 'Return not found' });
+    if (!RETURN_TRANSITIONS[current.status].includes(status)) {
+      return res.status(409).json({ error: `Cannot move a return from '${current.status}' to '${status}'` });
+    }
+    const { rows } = await pool.query(
+      `UPDATE proshop_return SET status = $1, updated_at = now()
+       WHERE id = $2 AND property_id = $3 AND status = $4 RETURNING *`,
+      [status, req.params.id, req.property_id, current.status]
+    );
+    if (!rows.length) return res.status(409).json({ error: 'Return changed while updating — reload and try again' });
+    if (status === 'received') await restoreStockForItems(current.items);
+    publishProshopReturnStatusChanged(req.property_id, { id: current.id, order_id: current.order_id, reference: current.reference, status })
+      .catch((err) => console.error('Ably publish failed:', err.message));
+    res.json({ ...current, ...rows[0], items: current.items });
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   listShops, createShop, updateShop,
   listItems, createItem, updateItem,
   listBookingItems, addBookingItem, removeBookingItem,
   listOrders, getOrder, createOrder, updateOrder,
   createOrderPaymentIntent, confirmOrderPayment,
+  lookupOrder, listReturns, getReturn, updateReturnStatus,
 };
