@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS property (
   token_balance      INT NOT NULL DEFAULT 0,
   stripe_customer_id VARCHAR(255), -- on the PLATFORM's Stripe account (token purchases), not the venue's
   fallback_email     VARCHAR(255), -- where enquiries go when there's no token for an AI draft
+  return_instructions TEXT, -- sent to guests requesting a shop return; also fed to AI replies
   -- Google Business Profile place id for the live-reviews endpoint -- see
   -- migrate-2026-09-02-property-google-reviews.sql.
   google_place_id  TEXT,
@@ -846,6 +847,8 @@ CREATE TABLE IF NOT EXISTS proshop_order (
   id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id              UUID          NOT NULL REFERENCES property(id),
   shop_id                  UUID          NOT NULL REFERENCES shop(id),
+  -- Short code guests quote for returns -- see migrate-2026-09-08-proshop-returns.sql
+  reference                VARCHAR(12)   NOT NULL,
   contact_name             VARCHAR(100)  NOT NULL,
   contact_email            VARCHAR(255),
   contact_phone            VARCHAR(30),
@@ -893,6 +896,7 @@ CREATE INDEX IF NOT EXISTS idx_proshop_item_shop            ON proshop_item(shop
 CREATE INDEX IF NOT EXISTS idx_proshop_order_property       ON proshop_order(property_id);
 CREATE INDEX IF NOT EXISTS idx_proshop_order_shop           ON proshop_order(shop_id);
 CREATE INDEX IF NOT EXISTS idx_proshop_order_item           ON proshop_order_item(order_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proshop_order_reference     ON proshop_order(property_id, reference);
 
 -- ── Event Inquiries ─────────────────────────────────────────────────────────
 
@@ -941,6 +945,38 @@ CREATE TABLE IF NOT EXISTS event_inquiry_message (
 CREATE INDEX IF NOT EXISTS idx_event_inquiry_message_inquiry ON event_inquiry_message(event_inquiry_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_event_inquiry_message_resend_id
   ON event_inquiry_message(resend_email_id) WHERE resend_email_id IS NOT NULL;
+
+-- ── Pro Shop Returns ──────────────────────────────────────────────────────────
+-- A return is its own record (status flow below) and always opens an
+-- event_inquiry thread, which is where staff manage it -- see
+-- docs/superpowers/specs/2026-09-08-proshop-returns-design.md.
+
+CREATE TABLE IF NOT EXISTS proshop_return (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id      UUID        NOT NULL REFERENCES property(id),
+  order_id         UUID        NOT NULL REFERENCES proshop_order(id),
+  event_inquiry_id UUID        NOT NULL REFERENCES event_inquiry(id),
+  status           VARCHAR(20) NOT NULL DEFAULT 'requested',
+  reason           TEXT,
+  raised_by        VARCHAR(10) NOT NULL,
+  created_at       TIMESTAMPTZ DEFAULT now(),
+  updated_at       TIMESTAMPTZ DEFAULT now(),
+  CONSTRAINT proshop_return_status_check CHECK (status IN ('requested', 'approved', 'rejected', 'received', 'refunded', 'cancelled')),
+  CONSTRAINT proshop_return_raised_by_check CHECK (raised_by IN ('guest', 'staff'))
+);
+
+CREATE TABLE IF NOT EXISTS proshop_return_item (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  return_id     UUID NOT NULL REFERENCES proshop_return(id) ON DELETE CASCADE,
+  order_item_id UUID NOT NULL REFERENCES proshop_order_item(id),
+  quantity      INT  NOT NULL CHECK (quantity > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_proshop_return_property    ON proshop_return(property_id);
+CREATE INDEX IF NOT EXISTS idx_proshop_return_order       ON proshop_return(order_id);
+CREATE INDEX IF NOT EXISTS idx_proshop_return_inquiry     ON proshop_return(event_inquiry_id);
+CREATE INDEX IF NOT EXISTS idx_proshop_return_item_return ON proshop_return_item(return_id);
+CREATE INDEX IF NOT EXISTS idx_proshop_return_item_line   ON proshop_return_item(order_item_id);
 
 -- ── Event Inquiry AI Drafts ─────────────────────────────────────────────────
 -- One row per Claude generation attempt for an inquiry (new inquiry, inbound

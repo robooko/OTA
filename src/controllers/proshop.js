@@ -6,6 +6,7 @@ const {
   publishProshopOrderStatusChanged,
 } = require('../lib/ably');
 const { computeOrderTax } = require('../lib/tax');
+const { generateOrderReference } = require('../lib/orderReference');
 
 // ── Shops ─────────────────────────────────────────────────────────────────────
 
@@ -376,11 +377,24 @@ async function createOrder(req, res, next) {
       const { taxAmount, totalExtra } = computeOrderTax(properties[0], itemsSubtotal);
       const totalPrice = Math.round((itemsSubtotal + shippingCost + totalExtra) * 100) / 100;
 
+      // Unique per property; the existence check runs inside the transaction
+      // so a collision (vanishingly rare at 32^6) is retried instead of
+      // aborting the transaction on the unique index.
+      let reference;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const candidate = generateOrderReference();
+        const { rows: clash } = await client.query(
+          'SELECT 1 FROM proshop_order WHERE property_id = $1 AND reference = $2', [req.property_id, candidate]
+        );
+        if (!clash.length) { reference = candidate; break; }
+      }
+      if (!reference) throw new Error('Could not allocate an order reference');
+
       const { rows: orderRows } = await client.query(
         `INSERT INTO proshop_order
-           (property_id, shop_id, contact_name, contact_email, contact_phone, shipping_address, shipping_cost, items_subtotal, tax_amount, total_price, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-        [req.property_id, shop_id, contact_name || 'Website Guest', contact_email || null, contact_phone || null, shipping_address || null, shippingCost, itemsSubtotal, taxAmount, totalPrice, notes || null]
+           (property_id, shop_id, reference, contact_name, contact_email, contact_phone, shipping_address, shipping_cost, items_subtotal, tax_amount, total_price, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+        [req.property_id, shop_id, reference, contact_name || 'Website Guest', contact_email || null, contact_phone || null, shipping_address || null, shippingCost, itemsSubtotal, taxAmount, totalPrice, notes || null]
       );
       const order = orderRows[0];
 
