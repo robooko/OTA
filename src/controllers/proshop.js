@@ -462,6 +462,12 @@ async function updateOrder(req, res, next) {
     );
     if (!rows.length) return res.status(404).json({ error: 'Order not found' });
     if (wasPaid) {
+      // Restores the full ordered quantity per line, with no awareness of
+      // any return already 'received' against this order (which already put
+      // its returned quantity back -- see updateReturnStatus). Cancelling a
+      // paid order that has a received return therefore over-counts stock
+      // by the returned amount. Left as-is for now; staff can correct stock
+      // directly in the Items dialog.
       const { rows: items } = await pool.query(
         `SELECT item_id, quantity FROM proshop_order_item WHERE order_id = $1`, [rows[0].id]
       );
@@ -581,8 +587,19 @@ async function lookupOrder(req, res, next) {
     const order = await findOrderByReferenceAndEmail(req.property_id, reference, email);
     if (!order) return res.status(404).json({ error: 'Order not found' });
     const items = await loadOrderLinesWithReturnable(order.id);
-    const { stripe_payment_intent_id, ...publicOrder } = order;
-    res.json({ ...publicOrder, items });
+    // Explicit allowlist, not a destructure-out: this endpoint is proxied to
+    // anonymous guests, so staff-only fields (notes, shipping_address,
+    // contact_phone, contact_email, stripe_payment_intent_id, property_id,
+    // shop_id) must never leak here even if new columns are added later.
+    const {
+      id, reference: orderReference, created_at, status, payment_status,
+      items_subtotal, tax_amount, shipping_cost, total_price, contact_name,
+    } = order;
+    res.json({
+      id, reference: orderReference, created_at, status, payment_status,
+      items_subtotal, tax_amount, shipping_cost, total_price, contact_name,
+      items,
+    });
   } catch (err) { next(err); }
 }
 
