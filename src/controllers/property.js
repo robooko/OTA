@@ -9,6 +9,10 @@ const googleReviews = require('../lib/googleReviews');
 // error, so a Google outage degrades to yesterday's numbers, not a broken
 // section on the venue's site.
 const GOOGLE_REVIEWS_TTL_MS = 12 * 60 * 60 * 1000;
+// Kill switch, off by default (2026-09-10): no Places call is made and no
+// cached copy is served until GOOGLE_REVIEWS_ENABLED=true is set on the
+// server. Websites already treat a non-200 as "hide the reviews section".
+const GOOGLE_REVIEWS_ENABLED = process.env.GOOGLE_REVIEWS_ENABLED === 'true';
 
 const AI_REPLY_MODES = ['off', 'draft', 'auto'];
 // ~2k tokens. Keeps the cached per-property prompt prefix small and bounds
@@ -95,6 +99,9 @@ async function updateCurrentProperty(req, res, next) {
 // quotes, write-a-review link), lazily cached in google_reviews_cache.
 async function getGoogleReviews(req, res, next) {
   try {
+    if (!GOOGLE_REVIEWS_ENABLED) {
+      return res.status(503).json({ error: 'Google reviews are turned off on this server' });
+    }
     const { rows } = await pool.query('SELECT google_place_id FROM property WHERE id = $1', [req.property_id]);
     const placeId = rows[0]?.google_place_id;
     if (!placeId) {
