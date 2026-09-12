@@ -855,6 +855,10 @@ CREATE TABLE IF NOT EXISTS proshop_order (
   shop_id                  UUID          NOT NULL REFERENCES shop(id),
   -- Short code guests quote for returns -- see migrate-2026-09-08-proshop-returns.sql
   reference                VARCHAR(12)   NOT NULL,
+  -- Links a signed-in customer to their own order for "My Orders" lookup --
+  -- see migrate-2026-09-13-proshop-order-clerk-user.sql, mirroring
+  -- spa_appointment.clerk_user_id.
+  clerk_user_id            VARCHAR(100),
   contact_name             VARCHAR(100)  NOT NULL,
   contact_email            VARCHAR(255),
   contact_phone            VARCHAR(30),
@@ -903,6 +907,7 @@ CREATE INDEX IF NOT EXISTS idx_proshop_order_property       ON proshop_order(pro
 CREATE INDEX IF NOT EXISTS idx_proshop_order_shop           ON proshop_order(shop_id);
 CREATE INDEX IF NOT EXISTS idx_proshop_order_item           ON proshop_order_item(order_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_proshop_order_reference     ON proshop_order(property_id, reference);
+CREATE INDEX IF NOT EXISTS idx_proshop_order_clerk_user     ON proshop_order(clerk_user_id);
 
 -- ── Event Inquiries ─────────────────────────────────────────────────────────
 

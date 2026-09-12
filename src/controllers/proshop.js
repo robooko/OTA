@@ -289,12 +289,15 @@ async function loadOrderWithItems(orderId, propertyId) {
 
 async function listOrders(req, res, next) {
   try {
-    const { shop_id, status, date_from, date_to, cursor, limit } = req.query;
+    const { shop_id, status, date_from, date_to, cursor, limit, clerk_user_id } = req.query;
     const take = Math.min(parseInt(limit, 10) || 30, 500);
     let query = `SELECT * FROM proshop_order WHERE property_id = $1`;
     const params = [req.property_id];
     if (shop_id) { params.push(shop_id); query += ` AND shop_id = $${params.length}`; }
     if (status) { params.push(status); query += ` AND status = $${params.length}`; }
+    // "My Orders" on the guest-facing site -- mirrors GET
+    // /api/spa/:spa_id/appointments?clerk_user_id=... exactly.
+    if (clerk_user_id) { params.push(clerk_user_id); query += ` AND clerk_user_id = $${params.length}`; }
     // date_from/date_to are the shop dashboard's stat tiles and weekly
     // orders/revenue charts (shop-client.ts) -- an inclusive range over
     // created_at, same convention as restaurant.js's listReservations and
@@ -346,7 +349,7 @@ async function getOrder(req, res, next) {
 // guest has entered them, right before confirm-payment.
 async function createOrder(req, res, next) {
   try {
-    const { shop_id, contact_name, contact_email, contact_phone, shipping_address, shipping_cost, notes, items } = req.body ?? {};
+    const { shop_id, contact_name, contact_email, contact_phone, shipping_address, shipping_cost, notes, items, clerk_user_id } = req.body ?? {};
     if (!shop_id) return res.status(400).json({ error: 'shop_id is required' });
     if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'items must be a non-empty array of { item_id, quantity }' });
     const shippingCost = shipping_cost != null ? Number(shipping_cost) : 0;
@@ -407,9 +410,9 @@ async function createOrder(req, res, next) {
 
       const { rows: orderRows } = await client.query(
         `INSERT INTO proshop_order
-           (property_id, shop_id, reference, contact_name, contact_email, contact_phone, shipping_address, shipping_cost, items_subtotal, tax_amount, total_price, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
-        [req.property_id, shop_id, reference, contact_name || 'Website Guest', contact_email || null, contact_phone || null, shipping_address || null, shippingCost, itemsSubtotal, taxAmount, totalPrice, notes || null]
+           (property_id, shop_id, reference, clerk_user_id, contact_name, contact_email, contact_phone, shipping_address, shipping_cost, items_subtotal, tax_amount, total_price, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+        [req.property_id, shop_id, reference, clerk_user_id || null, contact_name || 'Website Guest', contact_email || null, contact_phone || null, shipping_address || null, shippingCost, itemsSubtotal, taxAmount, totalPrice, notes || null]
       );
       const order = orderRows[0];
 
