@@ -12,6 +12,7 @@ router.put('/menu/:id', authenticateOrApiKey, ctrl.updateMenuItem);
 // Orders
 router.get('/ably-token', authenticate, ctrl.getAblyToken);
 router.get('/', authenticateOrApiKey, ctrl.listOrders);
+router.get('/:id/ably-token', authenticateOrApiKey, ctrl.getOrderAblyToken);
 router.get('/:id', authenticate, ctrl.getOrder);
 router.post('/', authenticateOrApiKey, ctrl.createOrder);
 router.put('/:id', authenticateOrApiKey, ctrl.updateOrder);

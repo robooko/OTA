@@ -55,6 +55,16 @@ async function publishOrderStatusChangedForBooking(bookingId, payload) {
   await channel.publish('order-status-changed', payload);
 }
 
+// Mirrors the restaurant-wide status event onto a per-order channel, so a
+// guest who placed a pickup/website order can subscribe without seeing the
+// rest of the restaurant's activity (the restaurant/property channels above
+// are staff-only to mint). See GET /api/restaurant-orders/{id}/ably-token.
+async function publishOrderStatusChangedForOrder(orderId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`restaurant-order:${orderId}`);
+  await channel.publish('order-status-changed', payload);
+}
+
 // Table-session lifecycle, on the same channels as orders -- existing
 // order-feed tokens (restaurant- and property-scoped) receive these with no
 // new capability. Opened fires only when a session is genuinely created
@@ -288,6 +298,7 @@ module.exports = {
   publishNewOrderForProperty,
   publishOrderStatusChangedForProperty,
   publishOrderStatusChangedForBooking,
+  publishOrderStatusChangedForOrder,
   publishTableSessionOpened,
   publishTableSessionClosed,
   publishNewReservation,

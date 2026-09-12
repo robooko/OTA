@@ -5,6 +5,7 @@ const {
   publishNewOrderForProperty,
   publishOrderStatusChangedForProperty,
   publishOrderStatusChangedForBooking,
+  publishOrderStatusChangedForOrder,
   publishTableSessionOpened,
   client: ablyClient,
 } = require('../lib/ably');
@@ -494,6 +495,7 @@ async function updateOrderStatus(req, res, next) {
     publishOrderStatusChanged(rows[0].restaurant_id, orderFull).catch((err) => console.error('Ably publish failed:', err.message));
     publishOrderStatusChangedForProperty(rows[0].property_id, orderFull).catch((err) => console.error('Ably publish failed:', err.message));
     publishOrderStatusChangedForBooking(rows[0].booking_id, payload).catch((err) => console.error('Ably publish failed:', err.message));
+    publishOrderStatusChangedForOrder(rows[0].id, orderFull).catch((err) => console.error('Ably publish failed:', err.message));
     res.json(orderFull);
   } catch (err) { next(err); }
 }
@@ -679,4 +681,27 @@ async function getAblyToken(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, renameMenuCategory, listOrders, getOrder, createOrder, updateOrder, updateOrderStatus, createOrderPaymentIntent, confirmOrderPayment, getAblyToken };
+// Subscribe token for ONE order's channel -- the guest-safe realtime surface
+// (contrast getAblyToken above: staff-only, restaurant-wide). The order's id
+// is the only credential, same as the guest site's own status-polling call --
+// a guest only ever learns it because it's their own order, handed to their
+// browser at checkout. No join code: unlike a table session, a standalone
+// order has no shared/guessable identifier a stranger could stumble onto.
+async function getOrderAblyToken(req, res, next) {
+  try {
+    if (!ablyClient) return res.status(503).json({ error: 'Realtime notifications are not configured' });
+    const { rows } = await pool.query(
+      'SELECT id FROM restaurant_order WHERE id = $1 AND property_id = $2',
+      [req.params.id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Order not found' });
+
+    const channel = `restaurant-order:${rows[0].id}`;
+    const tokenRequest = await ablyClient.auth.createTokenRequest({
+      capability: { [channel]: ['subscribe'] },
+    });
+    res.json({ tokenRequest, channel });
+  } catch (err) { next(err); }
+}
+
+module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, renameMenuCategory, listOrders, getOrder, createOrder, updateOrder, updateOrderStatus, createOrderPaymentIntent, confirmOrderPayment, getAblyToken, getOrderAblyToken };
