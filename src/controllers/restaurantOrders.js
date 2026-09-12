@@ -134,7 +134,7 @@ async function renameMenuCategory(req, res, next) {
 
 async function listOrders(req, res, next) {
   try {
-    const { restaurant_id, booking_id, table_id, guest_id, status, skip, take } = req.query;
+    const { restaurant_id, booking_id, table_id, guest_id, status, date_from, date_to, skip, take } = req.query;
 
     // A table_id listing is the full tab (items, totals, notes) -- without
     // this gate it would be a trivial read bypass of the join code. Wider
@@ -175,9 +175,15 @@ async function listOrders(req, res, next) {
     if (table_id)   { params.push(table_id);   query += ` AND o.table_id = $${params.length}`; }
     if (guest_id)   { params.push(guest_id);   query += ` AND o.guest_id = $${params.length}`; }
     if (status)     { params.push(status);     query += ` AND o.status = $${params.length}`; }
+    // date_from/date_to are the restaurant dashboard's stat tiles and weekly
+    // orders chart (restaurant-dashboard-client.ts) -- an inclusive range
+    // over the order's created_at date, same convention as restaurant.js's
+    // listReservations date_from/date_to.
+    if (date_from)  { params.push(date_from);  query += ` AND o.created_at::date >= $${params.length}`; }
+    if (date_to)    { params.push(date_to);    query += ` AND o.created_at::date <= $${params.length}`; }
     query += ' GROUP BY o.id, rm.room_number, rt.table_number ORDER BY o.created_at DESC';
 
-    const countParams = [req.property_id, restaurant_id, booking_id, table_id, guest_id, status].filter(Boolean);
+    const countParams = [req.property_id, restaurant_id, booking_id, table_id, guest_id, status, date_from, date_to].filter(Boolean);
     const [{ rows: countRows }] = await Promise.all([
       pool.query(`SELECT COUNT(DISTINCT o.id) AS total FROM restaurant_order o WHERE o.property_id = $1
         ${restaurant_id ? ` AND o.restaurant_id = $${[restaurant_id].length + 1}` : ''}
@@ -185,6 +191,8 @@ async function listOrders(req, res, next) {
         ${table_id   ? ` AND o.table_id = $${[restaurant_id, booking_id, table_id].filter(Boolean).length + 1}` : ''}
         ${guest_id   ? ` AND o.guest_id = $${[restaurant_id, booking_id, table_id, guest_id].filter(Boolean).length + 1}` : ''}
         ${status     ? ` AND o.status = $${[restaurant_id, booking_id, table_id, guest_id, status].filter(Boolean).length + 1}` : ''}
+        ${date_from  ? ` AND o.created_at::date >= $${[restaurant_id, booking_id, table_id, guest_id, status, date_from].filter(Boolean).length + 1}` : ''}
+        ${date_to    ? ` AND o.created_at::date <= $${[restaurant_id, booking_id, table_id, guest_id, status, date_from, date_to].filter(Boolean).length + 1}` : ''}
       `, countParams)
     ]);
 
