@@ -289,12 +289,18 @@ async function loadOrderWithItems(orderId, propertyId) {
 
 async function listOrders(req, res, next) {
   try {
-    const { shop_id, status, cursor, limit } = req.query;
-    const take = Math.min(parseInt(limit, 10) || 30, 100);
+    const { shop_id, status, date_from, date_to, cursor, limit } = req.query;
+    const take = Math.min(parseInt(limit, 10) || 30, 500);
     let query = `SELECT * FROM proshop_order WHERE property_id = $1`;
     const params = [req.property_id];
     if (shop_id) { params.push(shop_id); query += ` AND shop_id = $${params.length}`; }
     if (status) { params.push(status); query += ` AND status = $${params.length}`; }
+    // date_from/date_to are the shop dashboard's stat tiles and weekly
+    // orders/revenue charts (shop-client.ts) -- an inclusive range over
+    // created_at, same convention as restaurant.js's listReservations and
+    // restaurantOrders.js's listOrders.
+    if (date_from) { params.push(date_from); query += ` AND created_at::date >= $${params.length}`; }
+    if (date_to)   { params.push(date_to);   query += ` AND created_at::date <= $${params.length}`; }
     if (cursor) { params.push(cursor); query += ` AND created_at < $${params.length}`; }
     params.push(take);
     query += ` ORDER BY created_at DESC LIMIT $${params.length}`;
