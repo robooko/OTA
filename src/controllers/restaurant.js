@@ -388,7 +388,7 @@ async function searchAvailability(req, res, next) {
 
 async function listAllReservations(req, res, next) {
   try {
-    const { date, status } = req.query;
+    const { date, date_from, date_to, status } = req.query;
     let query = `
       SELECT rr.*, rt.table_number, rt.seats, rt.location, rt.restaurant_id
       FROM restaurant_reservation rr
@@ -397,6 +397,11 @@ async function listAllReservations(req, res, next) {
     `;
     const params = [req.property_id];
     if (date) { params.push(date); query += ` AND rr.reservation_date = $${params.length}`; }
+    // date_from/date_to are the main dashboard's "Reservations this week"
+    // chart -- an inclusive range, same convention as listReservations'
+    // own date_from/date_to (independent of the single-day `date` above).
+    if (date_from) { params.push(date_from); query += ` AND rr.reservation_date >= $${params.length}`; }
+    if (date_to)   { params.push(date_to);   query += ` AND rr.reservation_date <= $${params.length}`; }
     if (status) { params.push(status); query += ` AND rr.status = $${params.length}`; }
     query += ' ORDER BY rr.created_at DESC';
     const { rows } = await pool.query(query, params);

@@ -30,7 +30,7 @@ async function fetchJoinedBooking(id) {
 
 async function listBookings(req, res, next) {
   try {
-    const { status, guest_id, from, to, skip, take } = req.query;
+    const { status, guest_id, from, to, created_from, created_to, skip, take } = req.query;
     let query = `
       SELECT b.*, g.first_name, g.last_name, g.email, g.phone,
              r.room_number, r.floor,
@@ -63,6 +63,12 @@ async function listBookings(req, res, next) {
     if (guest_id) { params.push(guest_id); query += ` AND b.guest_id = $${params.length}`; countQuery += ` AND b.guest_id = $${params.length}`; }
     if (from) { params.push(from); query += ` AND b.check_in >= $${params.length}`; countQuery += ` AND b.check_in >= $${params.length}`; }
     if (to) { params.push(to); query += ` AND b.check_out <= $${params.length}`; countQuery += ` AND b.check_out <= $${params.length}`; }
+    // created_from/created_to are the main dashboard's Room total revenue
+    // stat and Sales this week chart -- when the booking was made, not
+    // when the stay happens (from/to above), same "revenue today" meaning
+    // as restaurant-orders/proshop-orders' own date_from/date_to.
+    if (created_from) { params.push(created_from); query += ` AND b.created_at::date >= $${params.length}`; countQuery += ` AND b.created_at::date >= $${params.length}`; }
+    if (created_to)   { params.push(created_to);   query += ` AND b.created_at::date <= $${params.length}`; countQuery += ` AND b.created_at::date <= $${params.length}`; }
 
     const filterParams = [...params]; // snapshot before pagination params are appended below
 
