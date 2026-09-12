@@ -14,6 +14,15 @@ const GOOGLE_REVIEWS_TTL_MS = 12 * 60 * 60 * 1000;
 // server. Websites already treat a non-200 as "hide the reviews section".
 const GOOGLE_REVIEWS_ENABLED = process.env.GOOGLE_REVIEWS_ENABLED === 'true';
 
+// Toggleable sidebar modules/dashboard sections -- see
+// migrate-2026-09-12-property-enabled-modules.sql. Dashboard/Settings/Docs/
+// API aren't in this list; they're never hidden.
+const MODULE_KEYS = ['rooms', 'restaurants', 'spa', 'tours', 'golf', 'equipment', 'shop', 'event_inquiries'];
+
+function isValidEnabledModules(v) {
+  return Array.isArray(v) && v.every((m) => MODULE_KEYS.includes(m));
+}
+
 const AI_REPLY_MODES = ['off', 'draft', 'auto'];
 // ~2k tokens. Keeps the cached per-property prompt prefix small and bounds
 // the per-draft cost; a venue brief longer than this belongs in a document,
@@ -47,7 +56,7 @@ function generateApiKey() {
 async function getCurrentProperty(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions FROM property WHERE id = $1',
+      'SELECT id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules FROM property WHERE id = $1',
       [req.property_id]
     );
     res.json(rows[0]);
@@ -61,7 +70,7 @@ async function getCurrentProperty(req, res, next) {
 // (website checkout) apply them today.
 async function updateCurrentProperty(req, res, next) {
   try {
-    const { currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions } = req.body;
+    const { currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules } = req.body;
     if (currency !== undefined && !isValidCurrencyCode(currency)) {
       return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP)' });
     }
@@ -75,6 +84,11 @@ async function updateCurrentProperty(req, res, next) {
         && (typeof return_instructions !== 'string' || return_instructions.length > 4000)) {
       return res.status(400).json({ error: 'return_instructions must be a string of at most 4000 characters' });
     }
+    // null clears it back to "every module enabled" (the default); anything
+    // else must be an array drawn from MODULE_KEYS.
+    if (enabled_modules !== undefined && enabled_modules !== null && !isValidEnabledModules(enabled_modules)) {
+      return res.status(400).json({ error: `enabled_modules must be an array drawn from: ${MODULE_KEYS.join(', ')}, or null` });
+    }
     const { rows } = await pool.query(
       `UPDATE property SET
          currency            = COALESCE($1, currency),
@@ -83,11 +97,14 @@ async function updateCurrentProperty(req, res, next) {
          tax_rate            = COALESCE($4, tax_rate),
          tax_inclusive       = COALESCE($5, tax_inclusive),
          tax_id              = COALESCE($6, tax_id),
-         return_instructions = CASE WHEN $8::boolean THEN $7::text ELSE return_instructions END
-       WHERE id = $9
-       RETURNING id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions`,
+         return_instructions = CASE WHEN $8::boolean  THEN $7::text  ELSE return_instructions END,
+         enabled_modules     = CASE WHEN $10::boolean THEN $9::jsonb ELSE enabled_modules     END
+       WHERE id = $11
+       RETURNING id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules`,
       [currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id,
-        return_instructions ?? null, return_instructions !== undefined, req.property_id]
+        return_instructions ?? null, return_instructions !== undefined,
+        enabled_modules != null ? JSON.stringify(enabled_modules) : null, enabled_modules !== undefined,
+        req.property_id]
     );
     res.json(rows[0]);
   } catch (err) {

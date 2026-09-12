@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS property (
   tax_rate      NUMERIC(5,2) NOT NULL DEFAULT 0,
   tax_inclusive BOOLEAN NOT NULL DEFAULT true,
   tax_id        TEXT,
+  -- Which sidebar modules/dashboard sections this property actually uses --
+  -- see migrate-2026-09-12-property-enabled-modules.sql. NULL means every
+  -- module is enabled (the default for every existing and new property);
+  -- once set, it's the exhaustive list of enabled module keys (see
+  -- controllers/property.js's MODULE_KEYS).
+  enabled_modules JSONB,
   created_at       TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT property_ai_reply_mode_check CHECK (ai_reply_mode IN ('off', 'draft', 'auto')),
   CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100),
