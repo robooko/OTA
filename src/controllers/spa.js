@@ -641,7 +641,6 @@ function toLiveSpaBooking(row) {
     duration_minutes: row.duration_mins,
     price: row.price,
     status: row.status,
-    payment_status: row.payment_status,
     created_at: row.created_at,
   };
 }
@@ -1058,14 +1057,11 @@ async function updateAppointment(req, res, next) {
   const client = await pool.connect();
   try {
     const { spa_id, id } = req.params;
-    const { status, notes, branding, appointment_date, start_time, therapist_id, payment_status } = req.body;
+    const { status, notes, branding, appointment_date, start_time, therapist_id } = req.body;
     const reschedule = appointment_date != null || start_time != null || therapist_id != null;
 
     const brandingError = validateBranding(branding);
     if (brandingError) return res.status(400).json({ error: brandingError });
-    if (payment_status != null && !['unpaid', 'paid'].includes(payment_status)) {
-      return res.status(400).json({ error: "payment_status must be 'unpaid' or 'paid'" });
-    }
     if (status != null && !['confirmed', 'cancelled', 'checked_in', 'completed', 'no_show'].includes(status)) {
       return res.status(400).json({ error: "status must be one of 'confirmed', 'cancelled', 'checked_in', 'completed', 'no_show'" });
     }
@@ -1073,7 +1069,7 @@ async function updateAppointment(req, res, next) {
     await client.query('BEGIN');
 
     const beforeRes = await client.query(
-      `SELECT sa.status, sa.payment_status, sa.slot_id, sa.treatment_id, sa.therapist_id, sa.appointment_date, sa.start_time,
+      `SELECT sa.status, sa.slot_id, sa.treatment_id, sa.therapist_id, sa.appointment_date, sa.start_time,
               tr.duration_mins
        FROM spa_appointment sa
        JOIN spa_therapist st ON st.id = sa.therapist_id
@@ -1130,24 +1126,20 @@ async function updateAppointment(req, res, next) {
          appointment_date = COALESCE($6, sa.appointment_date),
          start_time       = COALESCE($7, sa.start_time),
          end_time         = COALESCE($8, sa.end_time),
-         therapist_id     = COALESCE($9, sa.therapist_id),
-         payment_status   = COALESCE($10, sa.payment_status),
-         paid_at          = CASE WHEN $10 = 'paid' THEN now()
-                                  WHEN $10 = 'unpaid' THEN NULL
-                                  ELSE sa.paid_at END
+         therapist_id     = COALESCE($9, sa.therapist_id)
        FROM spa_therapist st
        WHERE sa.therapist_id = st.id
          AND sa.id = $3
          AND st.spa_id = $4
          AND sa.property_id = $5
        RETURNING sa.*`,
-      [status, notes, id, spa_id, req.property_id, appointment_date, start_time, newEndTime, therapist_id, payment_status]
+      [status, notes, id, spa_id, req.property_id, appointment_date, start_time, newEndTime, therapist_id]
     );
     if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Appointment not found' }); }
 
     await client.query('COMMIT');
 
-    if (rows[0].status !== before.status || rows[0].payment_status !== before.payment_status || reschedule) {
+    if (rows[0].status !== before.status || reschedule) {
       publishAppointmentStatusChanged(spa_id, { id: rows[0].id, status: rows[0].status, spa_id })
         .catch((err) => console.error('Ably publish failed:', err.message));
 
