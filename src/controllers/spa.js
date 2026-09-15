@@ -719,8 +719,8 @@ async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawI
 
 async function listAppointmentsForProperty(req, res, next) {
   try {
-    const { cursor, limit, spa_id, therapist_id, date } = req.query;
-    const take = Math.min(parseInt(limit, 10) || 30, 100);
+    const { cursor, limit, spa_id, therapist_id, date, from, to } = req.query;
+    const take = Math.min(parseInt(limit, 10) || 30, 500);
     let query = `
       SELECT sa.*, st.spa_id, st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
       FROM spa_appointment sa
@@ -741,6 +741,12 @@ async function listAppointmentsForProperty(req, res, next) {
     // Optional -- the spa schedule page scopes this feed to whichever date
     // is selected on its calendar, same as its own day-grid appointments.
     if (date) { params.push(date); query += ` AND sa.appointment_date = $${params.length}`; }
+    // Optional inclusive appointment_date range -- for the property
+    // dashboard's weekly bookings-count/revenue charts, same from/to shape
+    // as listAppointments' own range filter. Not meant to combine with the
+    // exact-match `date` above.
+    if (from) { params.push(from); query += ` AND sa.appointment_date >= $${params.length}`; }
+    if (to) { params.push(to); query += ` AND sa.appointment_date <= $${params.length}`; }
     if (cursor) { params.push(cursor); query += ` AND sa.created_at < $${params.length}`; }
     params.push(take);
     query += ` ORDER BY sa.created_at DESC LIMIT $${params.length}`;
