@@ -862,8 +862,11 @@ async function createAppointmentFromSlot(req, res, next) {
 // day, has no overlapping non-cancelled appointment, and isn't already in
 // the past in the property's own timezone. Called inside the same
 // transaction/connection that will lock the therapist row, so this read is
-// consistent with that lock.
-async function isTherapistFree(client, therapistId, date, time, durationMins, timezone) {
+// consistent with that lock. excludeAppointmentId leaves one appointment out
+// of the overlap check -- rescheduling needs to know whether the *new*
+// date/time/therapist is free without the appointment's own current slot
+// counting as a conflict against itself.
+async function isTherapistFree(client, therapistId, date, time, durationMins, timezone, excludeAppointmentId = null) {
   const { rows } = await client.query(
     `SELECT
        EXISTS (
@@ -884,12 +887,13 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
            AND sa.status != 'cancelled'
            AND sa.start_time < $3::time + ($4 || ' minutes')::interval
            AND sa.end_time   > $3::time
+           AND ($6::uuid IS NULL OR sa.id != $6)
        ) AS has_overlap,
        (
          $2::date < (now() AT TIME ZONE $5)::date
          OR ($2::date = (now() AT TIME ZONE $5)::date AND $3::time <= (now() AT TIME ZONE $5)::time)
        ) AS is_past`,
-    [therapistId, date, time, durationMins, timezone]
+    [therapistId, date, time, durationMins, timezone, excludeAppointmentId]
   );
   const r = rows[0];
   return r.within_hours && !r.has_time_off && !r.has_overlap && !r.is_past;
@@ -1030,38 +1034,100 @@ async function createAppointment(req, res, next) {
   return createAppointmentFromAvailability(req, res, next);
 }
 
+// status/notes update in-place. Rescheduling (appointment_date/start_time/
+// therapist_id) additionally needs a treatment duration to compute the new
+// end_time, a conflict check against the target therapist's own hours/
+// time-off/other-appointments (isTherapistFree, excluding this appointment's
+// own current row from the overlap check), and a row lock for the duration
+// of that check -- same shape as bookFromAvailability's booking path, just
+// updating an existing row instead of inserting one. Only supported for
+// hours-driven appointments (slot_id IS NULL); a slot-driven appointment's
+// slot_id would otherwise go stale (still marked booked, and pointing at
+// the old time) since this path never touches spa_slot.
 async function updateAppointment(req, res, next) {
+  const client = await pool.connect();
   try {
     const { spa_id, id } = req.params;
-    const { status, notes, branding } = req.body;
+    const { status, notes, branding, appointment_date, start_time, therapist_id } = req.body;
+    const reschedule = appointment_date != null || start_time != null || therapist_id != null;
 
     const brandingError = validateBranding(branding);
     if (brandingError) return res.status(400).json({ error: brandingError });
 
-    const beforeRes = await pool.query(
-      `SELECT sa.status FROM spa_appointment sa
+    await client.query('BEGIN');
+
+    const beforeRes = await client.query(
+      `SELECT sa.status, sa.slot_id, sa.treatment_id, sa.therapist_id, sa.appointment_date, sa.start_time,
+              tr.duration_mins
+       FROM spa_appointment sa
        JOIN spa_therapist st ON st.id = sa.therapist_id
-       WHERE sa.id = $1 AND st.spa_id = $2 AND sa.property_id = $3`,
+       JOIN spa_treatment tr ON tr.id = sa.treatment_id
+       WHERE sa.id = $1 AND st.spa_id = $2 AND sa.property_id = $3
+       FOR UPDATE OF sa`,
       [id, spa_id, req.property_id]
     );
-    if (!beforeRes.rows.length) return res.status(404).json({ error: 'Appointment not found' });
-    const statusBefore = beforeRes.rows[0].status;
+    if (!beforeRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Appointment not found' }); }
+    const before = beforeRes.rows[0];
 
-    const { rows } = await pool.query(
+    let newEndTime;
+    if (reschedule) {
+      if (before.slot_id) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'This appointment is slot-based and can\'t have its date/time changed here.' });
+      }
+
+      const effectiveDate = appointment_date ?? before.appointment_date;
+      const effectiveTime = start_time ?? before.start_time;
+      const effectiveTherapistId = therapist_id ?? before.therapist_id;
+
+      if (therapist_id) {
+        const tRes = await client.query(
+          "SELECT id FROM spa_therapist WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active' FOR UPDATE",
+          [therapist_id, spa_id, req.property_id]
+        );
+        if (!tRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Therapist not found' }); }
+      }
+
+      const propertyRes = await client.query(
+        `SELECT p.timezone FROM property p JOIN spa s ON s.property_id = p.id WHERE s.id = $1`,
+        [spa_id]
+      );
+      const timezone = propertyRes.rows[0].timezone;
+
+      const free = await isTherapistFree(client, effectiveTherapistId, effectiveDate, effectiveTime, before.duration_mins, timezone, id);
+      if (!free) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'That time is no longer available.' });
+      }
+
+      const endRes = await client.query(
+        `SELECT ($1::time + ($2 || ' minutes')::interval)::time AS end_time`,
+        [effectiveTime, before.duration_mins]
+      );
+      newEndTime = endRes.rows[0].end_time;
+    }
+
+    const { rows } = await client.query(
       `UPDATE spa_appointment sa SET
-         status = COALESCE($1, sa.status),
-         notes  = COALESCE($2, sa.notes)
+         status           = COALESCE($1, sa.status),
+         notes            = COALESCE($2, sa.notes),
+         appointment_date = COALESCE($6, sa.appointment_date),
+         start_time       = COALESCE($7, sa.start_time),
+         end_time         = COALESCE($8, sa.end_time),
+         therapist_id     = COALESCE($9, sa.therapist_id)
        FROM spa_therapist st
        WHERE sa.therapist_id = st.id
          AND sa.id = $3
          AND st.spa_id = $4
          AND sa.property_id = $5
        RETURNING sa.*`,
-      [status, notes, id, spa_id, req.property_id]
+      [status, notes, id, spa_id, req.property_id, appointment_date, start_time, newEndTime, therapist_id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Appointment not found' });
+    if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Appointment not found' }); }
 
-    if (rows[0].status !== statusBefore) {
+    await client.query('COMMIT');
+
+    if (rows[0].status !== before.status || reschedule) {
       publishAppointmentStatusChanged(spa_id, { id: rows[0].id, status: rows[0].status, spa_id })
         .catch((err) => console.error('Ably publish failed:', err.message));
 
@@ -1088,7 +1154,12 @@ async function updateAppointment(req, res, next) {
     }
 
     res.json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
 }
 
 // GET, unauthenticated -- the appointment UUID is the capability (unguessable,
