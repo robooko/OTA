@@ -20,7 +20,11 @@ const CLAIM_SQL = `
   WHERE p.id = sa.property_id
     AND p.review_request_enabled
     AND p.review_url IS NOT NULL
-    AND sa.status = 'confirmed'
+    -- 'completed' too -- a property that checks appointments off as they
+    -- finish would otherwise flip status before the delay elapses and
+    -- silently stop matching this claim (see status whitelist added to
+    -- updateAppointment in spa.js: checked_in/completed/no_show).
+    AND sa.status IN ('confirmed', 'completed')
     AND sa.contact_email IS NOT NULL
     AND sa.review_request_sent_at IS NULL
     AND sa.review_request_attempts < $1
