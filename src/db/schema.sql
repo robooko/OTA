@@ -872,6 +872,9 @@ CREATE TABLE IF NOT EXISTS proshop_order (
   status                   VARCHAR(20)   NOT NULL DEFAULT 'pending',
   payment_status           VARCHAR(20)   NOT NULL DEFAULT 'unpaid',
   stripe_payment_intent_id VARCHAR(255),
+  -- Resend id of the order confirmation email, which doubles as the
+  -- "already sent" guard -- see migrate-2026-09-17-proshop-order-confirmation-email.sql.
+  confirmation_resend_email_id VARCHAR(255),
   notes                    TEXT,
   created_at               TIMESTAMPTZ   DEFAULT now(),
   CONSTRAINT proshop_order_status_check CHECK (status IN ('pending', 'paid', 'cancelled')),

@@ -453,6 +453,89 @@ async function sendReviewRequest(appointment, propertyName, branding, reviewUrl,
   return data.id;
 }
 
+// A pro-shop order's receipt, sent once when the order first becomes paid
+// (proshop.js's emailOrderConfirmation owns the send-once guard). Same
+// skeleton as sendAppointmentEmail -- header / greeting / details card /
+// note / sign-off -- with a lines-and-totals table standing in for the
+// booking card, since an order has no date or time to lead with. `order` is
+// emailOrderConfirmation's joined shape: proshop_order.* plus
+// items[{ item_name, quantity, subtotal }], shop_name and property_currency.
+// `branding` is the property's stored email_branding, exactly as the
+// appointment emails take it. Tables, not flexbox, for the money column --
+// Outlook ignores display:flex.
+async function sendOrderConfirmation(order, propertyName, branding = undefined) {
+  if (!client) throw new Error('Resend not configured');
+  const firstName = String(order.contact_name ?? '').trim().split(/\s+/)[0] || 'there';
+  const money = (v) => formatMoney(Number(v ?? 0), order.property_currency);
+  const shipping = Number(order.shipping_cost ?? 0);
+  const tax = Number(order.tax_amount ?? 0);
+  const lines = order.items.map((i) => [`${i.quantity} × ${i.item_name}`, money(i.subtotal)]);
+  // Subtotal/shipping/tax only earn a row when they say something the total
+  // doesn't -- a pickup order with tax off is just "Total: £40.00".
+  const totals = [
+    ...(shipping > 0 || tax > 0 ? [['Subtotal', money(order.items_subtotal)]] : []),
+    ...(shipping > 0 ? [['Shipping', money(shipping)]] : []),
+    ...(tax > 0 ? [['Tax', money(tax)]] : []),
+    ['Total', money(order.total_price)],
+  ];
+  const fulfillment = order.shipping_address
+    ? `Shipping to:\n${order.shipping_address}`
+    : `Ready to collect from ${order.shop_name}. We'll be in touch when it's ready.`;
+  const keepRef = "Keep your order reference — you'll need it if you want to return anything.";
+
+  const text = [
+    `Hi ${firstName},`,
+    '',
+    "Thanks for your order. Here's your receipt.",
+    '',
+    `Order ${order.reference}`,
+    '',
+    ...lines.map(([label, amount]) => `${label} — ${amount}`),
+    '',
+    ...totals.map(([label, amount]) => `${label}: ${amount}`),
+    '',
+    fulfillment,
+    '',
+    keepRef,
+    '',
+    `The team at ${propertyName}`,
+  ].join('\n');
+
+  const row = (label, amount, style) =>
+    `<tr>
+        <td style="padding:3px 0;${style}">${escapeHtml(label)}</td>
+        <td style="padding:3px 0;text-align:right;white-space:nowrap;${style}">${escapeHtml(amount)}</td>
+      </tr>`;
+  const linesHtml = lines.map(([l, a]) => row(l, a, 'font-size:14px;')).join('');
+  const totalsHtml = totals
+    .map(([l, a], i) =>
+      row(l, a, i === totals.length - 1 ? 'font-size:15px;font-weight:600;' : 'font-size:14px;color:#555;')
+    )
+    .join('');
+
+  const { data, error } = await client.emails.send({
+    from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
+    to: order.contact_email,
+    subject: `Order ${order.reference} confirmed — ${propertyName}`,
+    text,
+    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;margin:0 auto;">
+      ${brandingHeaderHtml(branding, propertyName)}
+      <p style="margin:0 0 16px;">Hi ${escapeHtml(firstName)},</p>
+      <p style="margin:0 0 16px;">Thanks for your order. Here's your receipt.</p>
+      <div style="background:#f6f6f4;border-radius:8px;padding:18px 20px;margin:0 0 16px;">
+        <div style="font-size:12px;color:#888;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px;">Order ${escapeHtml(order.reference)}</div>
+        <table style="width:100%;border-collapse:collapse;">${linesHtml}</table>
+        <table style="width:100%;border-collapse:collapse;margin-top:10px;padding-top:10px;border-top:1px solid #e0e0e0;">${totalsHtml}</table>
+      </div>
+      ${textToHtmlParagraphs(fulfillment)}
+      <p style="margin:0 0 16px;color:#555;">${escapeHtml(keepRef)}</p>
+      <p style="margin:16px 0 0;">The team at ${escapeHtml(propertyName)}</p>
+    </div>`,
+  });
+  if (error) throw new Error(error.message);
+  return data.id;
+}
+
 function verifyInboundWebhook(payload, headers) {
   if (!client) throw new Error('Resend not configured');
   return client.webhooks.verify({
@@ -484,6 +567,7 @@ module.exports = {
   sendSpaReminder,
   sendReservationReminder,
   sendReviewRequest,
+  sendOrderConfirmation,
   verifyInboundWebhook,
   getReceivedEmail,
 };

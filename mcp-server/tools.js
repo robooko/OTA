@@ -457,7 +457,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'update_proshop_order_status',
-    description: "Update a pro shop order's status (e.g. mark fulfilled/shipped by moving to 'paid', or 'cancelled')",
+    description: "Update a pro shop order's status (e.g. mark fulfilled/shipped by moving to 'paid', or 'cancelled'). Moving an order to 'paid' emails the guest their receipt, unless one already went out for it.",
     inputSchema: { id: z.string(), status: z.enum(['pending', 'paid', 'cancelled']) },
     run: ({ id, status }) => apiRequest('PUT', `/api/proshop/orders/${id}`, { body: { status } }),
   },

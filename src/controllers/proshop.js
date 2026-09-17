@@ -15,6 +15,7 @@ const {
 const { validateBranding, isValidUuid } = require('../middleware/validate');
 const { runAiReply } = require('../lib/aiReplyPipeline');
 const { computeOrderTax } = require('../lib/tax');
+const { sendOrderConfirmation } = require('../lib/resend');
 const { generateOrderReference } = require('../lib/orderReference');
 
 // ── Shops ─────────────────────────────────────────────────────────────────────
@@ -272,6 +273,46 @@ async function restoreStockForItems(items) {
   }
 }
 
+// The guest receipt, sent once the first time an order becomes paid --
+// whichever of the three paths got it there (confirm-payment, the
+// payment-intent already-succeeded branch, or staff marking it paid in the
+// dashboard). confirmation_resend_email_id is both the record and the
+// guard, so a retried confirm or a pending -> paid -> pending -> paid round
+// trip never sends a second one. An order with no contact_email (a cart
+// still waiting on the checkout form) simply gets nothing.
+async function emailOrderConfirmation(orderId, propertyId) {
+  const { rows } = await pool.query(
+    `SELECT o.*, s.name AS shop_name,
+            p.name AS property_name, p.currency AS property_currency, p.email_branding
+     FROM proshop_order o
+     JOIN shop s ON s.id = o.shop_id
+     JOIN property p ON p.id = o.property_id
+     WHERE o.id = $1 AND o.property_id = $2`,
+    [orderId, propertyId]
+  );
+  const order = rows[0];
+  if (!order || !order.contact_email || order.confirmation_resend_email_id) return;
+  const { rows: items } = await pool.query(
+    `SELECT item_name, quantity, subtotal FROM proshop_order_item WHERE order_id = $1 ORDER BY item_name`,
+    [orderId]
+  );
+  const emailId = await sendOrderConfirmation(
+    { ...order, items }, order.property_name, order.email_branding ?? undefined
+  );
+  await pool.query(
+    `UPDATE proshop_order SET confirmation_resend_email_id = $1
+     WHERE id = $2 AND confirmation_resend_email_id IS NULL`,
+    [emailId, orderId]
+  );
+}
+
+// Fire-and-forget, matching the Ably publishes it sits beside: a Resend
+// outage must never fail a payment that has already gone through.
+function emailOrderConfirmationInBackground(orderId, propertyId) {
+  emailOrderConfirmation(orderId, propertyId)
+    .catch((err) => console.error(`Order confirmation email failed for order ${orderId}:`, err.message));
+}
+
 async function loadOrderWithItems(orderId, propertyId) {
   const { rows: orders } = await pool.query(
     `SELECT o.*, p.stripe_secret_key, p.currency
@@ -447,16 +488,20 @@ async function updateOrder(req, res, next) {
       return res.status(400).json({ error: "status must be 'pending', 'paid', or 'cancelled'" });
     }
 
-    // Only a paid order actually drew down stock, so only cancelling one
-    // that was paid should give it back -- fetched before the update below
-    // so it reflects the status this request is transitioning FROM.
-    let wasPaid = false;
-    if (status === 'cancelled') {
+    // The status this request is transitioning FROM, read before the update
+    // below. Two things need it: only a paid order actually drew down stock,
+    // so only cancelling one that was paid should give it back; and the
+    // receipt only goes out on a real move into 'paid' (staff marking an
+    // order paid at the till), never on a no-op re-save of an order
+    // confirm-payment has already emailed.
+    let previousStatus = null;
+    if (status === 'cancelled' || status === 'paid') {
       const { rows: before } = await pool.query(
         `SELECT status FROM proshop_order WHERE id = $1 AND property_id = $2`, [req.params.id, req.property_id]
       );
-      wasPaid = before[0]?.status === 'paid';
+      previousStatus = before[0]?.status ?? null;
     }
+    const wasPaid = previousStatus === 'paid';
 
     const { rows } = await pool.query(
       `UPDATE proshop_order SET
@@ -481,6 +526,9 @@ async function updateOrder(req, res, next) {
         `SELECT item_id, quantity FROM proshop_order_item WHERE order_id = $1`, [rows[0].id]
       );
       await restoreStockForItems(items);
+    }
+    if (status === 'paid' && !wasPaid) {
+      emailOrderConfirmationInBackground(rows[0].id, req.property_id);
     }
     if (status !== undefined) {
       publishProshopOrderStatusChanged(req.property_id, { id: rows[0].id, status: rows[0].status, payment_status: rows[0].payment_status })
@@ -520,6 +568,7 @@ async function createOrderPaymentIntent(req, res, next) {
         await decrementStockForItems(order.items);
         publishNewProshopOrder(req.property_id, forFeed(orderWithItems(paidRows[0], order.items)))
           .catch((err) => console.error('Ably publish failed:', err.message));
+        emailOrderConfirmationInBackground(order.id, req.property_id);
         return res.json({ already_paid: true, payment_intent_id: existing.id });
       }
       // canceled/failed -> fall through and mint a fresh intent
@@ -576,6 +625,7 @@ async function confirmOrderPayment(req, res, next) {
       await decrementStockForItems(order.items);
       publishNewProshopOrder(req.property_id, forFeed(orderWithItems(rows[0], order.items)))
         .catch((err) => console.error('Ably publish failed:', err.message));
+      emailOrderConfirmationInBackground(order.id, req.property_id);
     }
     res.json(rows[0]);
   } catch (err) {
