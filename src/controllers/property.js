@@ -17,7 +17,12 @@ const GOOGLE_REVIEWS_ENABLED = process.env.GOOGLE_REVIEWS_ENABLED === 'true';
 // Toggleable sidebar modules/dashboard sections -- see
 // migrate-2026-09-12-property-enabled-modules.sql. Dashboard/Settings/Docs/
 // API aren't in this list; they're never hidden.
-const MODULE_KEYS = ['rooms', 'restaurants', 'spa', 'tours', 'golf', 'equipment', 'shop', 'event_inquiries'];
+// 'restaurant_reservations' sits *inside* 'restaurants' rather than beside
+// it -- a venue that takes orders but no table bookings turns it off and
+// keeps menus, orders and tables (see
+// migrate-2026-09-17-restaurant-reservations-module.sql, which backfills it
+// on for every property that already had an explicit module list).
+const MODULE_KEYS = ['rooms', 'restaurants', 'restaurant_reservations', 'spa', 'tours', 'golf', 'equipment', 'shop', 'event_inquiries'];
 
 function isValidEnabledModules(v) {
   return Array.isArray(v) && v.every((m) => MODULE_KEYS.includes(m));
