@@ -41,6 +41,7 @@ async function listInquiries(req, res, next) {
     const { rows } = await pool.query(
       `SELECT ei.*, r.name AS restaurant_name, s.name AS spa_name, lrm.direction AS last_reply_direction,
               lrm.sent_by_name AS last_reply_by_name, lrm.sent_by_avatar_url AS last_reply_avatar_url,
+              lim.created_at AS last_inbound_at,
               pad.id AS pending_ai_draft_id
        FROM event_inquiry ei
        LEFT JOIN restaurant r ON r.id = ei.restaurant_id
@@ -50,6 +51,17 @@ async function listInquiries(req, res, next) {
          WHERE m.event_inquiry_id = ei.id
          ORDER BY m.created_at DESC LIMIT 1
        ) lrm ON true
+       -- When the guest last wrote, which is what the feed card's "Received"
+       -- should say. ei.created_at is only when the thread opened, so a
+       -- thread the guest has since written to again showed a stale time.
+       -- Null until they reply at all (the opening message lives on
+       -- ei.message, not in event_inquiry_message), and the feed falls back
+       -- to ei.created_at for that case.
+       LEFT JOIN LATERAL (
+         SELECT created_at FROM event_inquiry_message m
+         WHERE m.event_inquiry_id = ei.id AND m.direction = 'inbound'
+         ORDER BY m.created_at DESC LIMIT 1
+       ) lim ON true
        LEFT JOIN LATERAL (
          SELECT id FROM event_inquiry_ai_draft d
          WHERE d.event_inquiry_id = ei.id AND d.status = 'pending'
