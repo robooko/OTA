@@ -7,7 +7,10 @@
 // spa never imports this module or eventInquiries). eventInquiries imports
 // this; it never imports eventInquiries.
 const pool = require('../db');
-const { publishAiDraftReady, publishAiDraftUpdated } = require('./ably');
+const {
+  publishAiDraftReady, publishAiDraftUpdated,
+  publishAiDraftReadyForSpa, publishAiDraftUpdatedForSpa,
+} = require('./ably');
 const { isConfigured, generateInquiryReply, AiReplyError, MODEL } = require('./aiReplies');
 const { loadInquiryWithProperty, sendOutboundReply } = require('./inquiryReplies');
 const { bookFromAvailability } = require('../controllers/spa');
@@ -47,13 +50,26 @@ class ProposedBookingError extends Error {
 }
 
 function publishReady(inquiry, draft) {
-  publishAiDraftReady(inquiry.property_id, { inquiry_id: inquiry.id, name: inquiry.name, draft })
+  const payload = { inquiry_id: inquiry.id, name: inquiry.name, draft };
+  publishAiDraftReady(inquiry.property_id, payload)
     .catch((err) => console.error('Ably publish failed:', err.message));
+  if (inquiry.spa_id) {
+    publishAiDraftReadyForSpa(inquiry.spa_id, payload)
+      .catch((err) => console.error('Ably publish failed:', err.message));
+  }
 }
 
-function publishUpdated(propertyId, inquiryId, draft) {
-  publishAiDraftUpdated(propertyId, { inquiry_id: inquiryId, draft })
+// spaId is passed wherever the caller has the inquiry to hand -- a salon's
+// feed listens on its own channel, so without it the draft transition never
+// reaches the dashboard the enquiry actually belongs to.
+function publishUpdated(propertyId, inquiryId, draft, spaId = null) {
+  const payload = { inquiry_id: inquiryId, draft };
+  publishAiDraftUpdated(propertyId, payload)
     .catch((err) => console.error('Ably publish failed:', err.message));
+  if (spaId) {
+    publishAiDraftUpdatedForSpa(spaId, payload)
+      .catch((err) => console.error('Ably publish failed:', err.message));
+  }
 }
 
 // Everything the model may state as fact about a spa venue -- menu with
@@ -81,14 +97,14 @@ async function loadSpaContext(spaId) {
 
 // A pending draft is stale the moment anything newer happens on the thread:
 // a fresh draft, or a human reply. Marks them superseded and tells the feed.
-async function supersedePendingDrafts(inquiryId, { exceptDraftId = null } = {}) {
+async function supersedePendingDrafts(inquiryId, { exceptDraftId = null, spaId = null } = {}) {
   const { rows } = await pool.query(
     `UPDATE event_inquiry_ai_draft SET status = 'superseded'
      WHERE event_inquiry_id = $1 AND status = 'pending' AND ($2::uuid IS NULL OR id <> $2)
      RETURNING *`,
     [inquiryId, exceptDraftId]
   );
-  for (const draft of rows) publishUpdated(draft.property_id, inquiryId, draft);
+  for (const draft of rows) publishUpdated(draft.property_id, inquiryId, draft, spaId);
   return rows;
 }
 
@@ -104,7 +120,7 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
   const spent = await tokens.spend(inquiry.property_id, 'ai_reply', inquiry.id);
   if (!spent.ok) throw new InsufficientTokensError(spent.balance, spent.cost);
 
-  await supersedePendingDrafts(inquiry.id);
+  await supersedePendingDrafts(inquiry.id, { spaId: inquiry.spa_id });
 
   const [{ rows: thread }, { rows: restaurantRows }, spaContext, returnRequest] = await Promise.all([
     pool.query(
@@ -277,7 +293,7 @@ async function sendDraft({ draft, inquiry, body, sender = null, auto = false }) 
     throw err;
   }
 
-  publishUpdated(inquiry.property_id, inquiry.id, finalDraft);
+  publishUpdated(inquiry.property_id, inquiry.id, finalDraft, inquiry.spa_id);
   return { draft: finalDraft, message: sent.message, inquiry: sent.inquiry };
 }
 

@@ -176,6 +176,22 @@ async function publishAiDraftUpdated(propertyId, payload) {
   await channel.publish('ai-draft-updated', payload);
 }
 
+// Mirrored onto spa:{id}:inquiries for the spa dashboard's own feed, same as
+// new-inquiry/inquiry-updated/new-reply above. Without these, a salon's feed
+// never learned that a draft had landed or been sent, so its cards sat on
+// whatever the last page load said until the next one.
+async function publishAiDraftReadyForSpa(spaId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`spa:${spaId}:inquiries`);
+  await channel.publish('ai-draft-ready', payload);
+}
+
+async function publishAiDraftUpdatedForSpa(spaId, payload) {
+  if (!client) return;
+  const channel = client.channels.get(`spa:${spaId}:inquiries`);
+  await channel.publish('ai-draft-updated', payload);
+}
+
 async function publishNewBooking(propertyId, booking) {
   if (!client) return;
   const channel = client.channels.get(`property:${propertyId}:bookings`);
@@ -307,6 +323,8 @@ module.exports = {
   publishInquiryUpdated,
   publishAiDraftReady,
   publishAiDraftUpdated,
+  publishAiDraftReadyForSpa,
+  publishAiDraftUpdatedForSpa,
   publishNewBooking,
   publishBookingStatusChanged,
   publishNewAppointment,

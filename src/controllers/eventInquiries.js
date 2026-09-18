@@ -8,6 +8,7 @@ const {
   publishNewReply,
   publishInquiryUpdated,
   publishAiDraftUpdated,
+  publishAiDraftUpdatedForSpa,
   publishNewInquiryForSpa,
   publishInquiryUpdatedForSpa,
   publishNewReplyForSpa,
@@ -242,7 +243,7 @@ async function createReply(req, res, next) {
     // A human just replied, so any AI draft still waiting for approval is
     // answering a moment that has passed -- retire it rather than leave a
     // stale draft in the queue.
-    supersedePendingDrafts(inquiry.id).catch((err) => console.error('Failed to supersede AI drafts:', err.message));
+    supersedePendingDrafts(inquiry.id, { spaId: inquiry.spa_id }).catch((err) => console.error('Failed to supersede AI drafts:', err.message));
 
     res.status(201).json({ message, inquiry: updatedInquiry });
   } catch (err) { next(err); }
@@ -453,8 +454,10 @@ async function rejectAiDraft(req, res, next) {
       return res.status(400).json({ error: 'reason must be a string' });
     }
 
+    // spa_id rides along so the publish below can also reach the salon feed
+    // this enquiry belongs to, which listens on its own channel.
     const { rows: inquiryRows } = await pool.query(
-      'SELECT id FROM event_inquiry WHERE id = $1 AND property_id = $2',
+      'SELECT id, spa_id FROM event_inquiry WHERE id = $1 AND property_id = $2',
       [req.params.id, req.property_id]
     );
     if (!inquiryRows.length) return res.status(404).json({ error: 'Inquiry not found' });
@@ -475,8 +478,13 @@ async function rejectAiDraft(req, res, next) {
       return res.status(409).json({ error: 'Draft is not pending' });
     }
 
-    publishAiDraftUpdated(req.property_id, { inquiry_id: req.params.id, draft: rows[0] })
+    const draftPayload = { inquiry_id: req.params.id, draft: rows[0] };
+    publishAiDraftUpdated(req.property_id, draftPayload)
       .catch((err) => console.error('Ably publish failed:', err.message));
+    if (inquiryRows[0].spa_id) {
+      publishAiDraftUpdatedForSpa(inquiryRows[0].spa_id, draftPayload)
+        .catch((err) => console.error('Ably publish failed:', err.message));
+    }
 
     res.json(rows[0]);
   } catch (err) { next(err); }
