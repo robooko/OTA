@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/property');
-const { authenticate, authenticateOrApiKey, requireRole } = require('../middleware/auth');
+const { authenticate, authenticateOrApiKey, requireRole, requireRoleOrApiKey } = require('../middleware/auth');
 
 // Both on the API-key rail: identity is read-only content, and
 // currency/timezone are the same "safe config" category as ai-replies'
@@ -42,8 +42,13 @@ router.put('/ai-replies/instructions', authenticateOrApiKey, ctrl.updateAiReplyI
 router.get('/google-reviews', authenticateOrApiKey, ctrl.getGoogleReviews);
 router.put('/google-place-id', authenticateOrApiKey, ctrl.setGooglePlaceId);
 
-router.get('/email-branding', authenticate, ctrl.getEmailBranding);
-router.put('/email-branding', authenticate, requireRole('admin'), ctrl.updateEmailBranding);
+// On the API-key rail for the same reason as /me above -- logo, colour and
+// cancel link are the venue's own presentation settings, not something that
+// changes what runs unsupervised -- so the MCP get/update_email_branding
+// tools work over a plain X-Api-Key. A staff session still needs the admin
+// role it always did; requireRoleOrApiKey only waives it for the key.
+router.get('/email-branding', authenticateOrApiKey, ctrl.getEmailBranding);
+router.put('/email-branding', authenticateOrApiKey, requireRoleOrApiKey('admin'), ctrl.updateEmailBranding);
 
 router.get('/reminders', authenticate, ctrl.getReminderSettings);
 router.put('/reminders', authenticate, requireRole('admin'), ctrl.updateReminderSettings);

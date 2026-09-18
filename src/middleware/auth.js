@@ -95,4 +95,18 @@ function requireRole(...roles) {
   };
 }
 
-module.exports = { authenticate, authenticateOrApiKey, requireRole };
+// Same role gate, but an api-key caller passes it: the key is already
+// property-scoped and every other property-wide write it can reach (PUT
+// /api/property/me -- currency, timezone, tax, enabled_modules) trusts it
+// the same way. Use this instead of requireRole on a route that has been
+// widened to authenticateOrApiKey, so staff sessions keep the role rule
+// they had rather than silently losing it.
+function requireRoleOrApiKey(...roles) {
+  const guard = requireRole(...roles);
+  return (req, res, next) => {
+    if (req.auth_method === 'api_key') return next();
+    return guard(req, res, next);
+  };
+}
+
+module.exports = { authenticate, authenticateOrApiKey, requireRole, requireRoleOrApiKey };

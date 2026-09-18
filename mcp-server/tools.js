@@ -599,6 +599,27 @@ function createTools(apiRequest) {
     run: (args) => apiRequest('PUT', '/api/property/me', { body: args }),
   },
   {
+    name: 'get_email_branding',
+    description: "The property's stored default branding for booking and enquiry emails (logo, accent colour, header background, cancel link), plus its post-visit Google review request settings. This is the saved default -- distinct from the per-request `branding` some booking tools accept, which styles one email and is never stored.",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/property/email-branding'),
+  },
+  {
+    name: 'update_email_branding',
+    description: "Set the property's default email branding and review-request settings. Per field: omit to leave unchanged, null or empty string to clear. Applies to every booking/enquiry email that doesn't carry its own branding.",
+    inputSchema: {
+      logo_url: z.string().nullable().optional().describe('http(s) image URL shown at the top of the email, or null to clear'),
+      brand_color: z.string().nullable().optional().describe('Hex accent colour, e.g. #c9a85c, or null to clear'),
+      header_bg: z.string().nullable().optional().describe('Hex background behind the logo, e.g. #ffffff -- keeps dark logos visible in dark mode; null to clear'),
+      cancel_url: z.string().nullable().optional().describe('http(s) cancel link for booking emails; may contain {id}, replaced with the booking id. Null to clear'),
+      review_request_enabled: z.boolean().optional().describe('Send a post-visit Google review email (spa module). Needs review_url set'),
+      review_url: z.string().nullable().optional().describe('Google review short link (https://g.page/r/…/review), or null to clear'),
+      review_request_delay_mins: z.number().int().min(0).max(1440).optional().describe('Minutes after an appointment ends before the review email goes out'),
+      review_request_cooldown_days: z.number().int().min(0).max(365).optional().describe('Days before the same guest can be asked again'),
+    },
+    run: (args) => apiRequest('PUT', '/api/property/email-branding', { body: args }),
+  },
+  {
     name: 'get_ai_reply_settings',
     description: "The property's AI enquiry-reply settings: mode (off/draft/auto), instructions, auto_send_min_score, and whether the feature is configured on this server",
     inputSchema: {},
