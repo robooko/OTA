@@ -57,5 +57,8 @@ router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
 router.post('/websites', authenticate, ctrl.createWebsite);
 router.put('/websites/:id', authenticate, ctrl.updateWebsite);
 router.get('/websites/:id/analytics', authenticateOrApiKey, ctrl.getWebsiteAnalytics);
+// Tells Settings which service-account address a venue grants Viewer access
+// to in GA4. No secret in the response -- the email is meant to be shared.
+router.get('/analytics/google', authenticateOrApiKey, ctrl.getGoogleAnalyticsSetup);
 
 module.exports = router;

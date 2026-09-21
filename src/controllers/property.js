@@ -1,9 +1,10 @@
 const crypto = require('crypto');
 const pool = require('../db');
-const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate, validateBranding, validateCancelUrl } = require('../middleware/validate');
+const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate, isValidUuid, validateBranding, validateCancelUrl } = require('../middleware/validate');
 const { isConfigured: aiConfigured, MODEL: AI_MODEL } = require('../lib/aiReplies');
 const twilio = require('../lib/twilio');
 const googleReviews = require('../lib/googleReviews');
+const googleAnalytics = require('../lib/googleAnalytics');
 
 // One Places call per property per window; stale cache always beats an
 // error, so a Google outage degrades to yesterday's numbers, not a broken
@@ -224,10 +225,22 @@ async function enableApiKey(req, res, next) {
   }
 }
 
+const WEBSITE_FIELDS = 'id, url, label, status, vercel_project_id, ga4_property_id';
+
+// ga4_property_id: undefined = not supplied, null/'' = clear, otherwise a
+// numeric GA4 property id ("properties/123" accepted). Returns
+// { value } or { error }.
+function parseGa4PropertyId(raw) {
+  if (raw === undefined) return { value: undefined };
+  if (raw === null || raw === '') return { value: null };
+  const id = googleAnalytics.normalisePropertyId(raw);
+  return id ? { value: id } : { error: 'ga4_property_id must be the numeric GA4 property id (GA Admin > Property details), not the G- measurement id' };
+}
+
 async function listWebsites(req, res, next) {
   try {
     const { rows } = await pool.query(
-      "SELECT id, url, label, vercel_project_id FROM property_website WHERE property_id = $1 AND status = 'active' ORDER BY created_at",
+      `SELECT ${WEBSITE_FIELDS} FROM property_website WHERE property_id = $1 AND status = 'active' ORDER BY created_at`,
       [req.property_id]
     );
     res.json(rows);
@@ -241,9 +254,12 @@ async function createWebsite(req, res, next) {
     const { url, label, vercel_project_id } = req.body;
     if (!url) return res.status(400).json({ error: 'url is required' });
     if (!isValidUrl(url)) return res.status(400).json({ error: 'url must be a valid http(s) URL' });
+    const ga4 = parseGa4PropertyId(req.body.ga4_property_id);
+    if (ga4.error) return res.status(400).json({ error: ga4.error });
     const { rows } = await pool.query(
-      'INSERT INTO property_website (property_id, url, label, vercel_project_id) VALUES ($1, $2, $3, $4) RETURNING id, url, label, vercel_project_id',
-      [req.property_id, url, label ?? null, vercel_project_id ?? null]
+      `INSERT INTO property_website (property_id, url, label, vercel_project_id, ga4_property_id)
+       VALUES ($1, $2, $3, $4, $5) RETURNING ${WEBSITE_FIELDS}`,
+      [req.property_id, url, label ?? null, vercel_project_id || null, ga4.value ?? null]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -251,26 +267,42 @@ async function createWebsite(req, res, next) {
   }
 }
 
+// url/label/status: omit = unchanged. The two analytics ids are clearable --
+// null (or '') removes the mapping -- which vercel_project_id wasn't before:
+// it was COALESCEd, so picking "Not connected" in Settings silently kept the
+// old project. Switching a site between Vercel and GA needs the clear to work.
 async function updateWebsite(req, res, next) {
   try {
-    const { url, label, status, vercel_project_id } = req.body;
+    const { url, label, status } = req.body;
     if (url !== undefined && !isValidUrl(url)) {
       return res.status(400).json({ error: 'url must be a valid http(s) URL' });
     }
+    const ga4 = parseGa4PropertyId(req.body.ga4_property_id);
+    if (ga4.error) return res.status(400).json({ error: ga4.error });
+    const setVercel = req.body.vercel_project_id !== undefined;
+    const setGa4 = ga4.value !== undefined;
     const { rows } = await pool.query(
       `UPDATE property_website SET
-         url                = COALESCE($1, url),
-         label              = COALESCE($2, label),
-         status             = COALESCE($3, status),
-         vercel_project_id  = COALESCE($4, vercel_project_id)
-       WHERE id = $5 AND property_id = $6 RETURNING id, url, label, status, vercel_project_id`,
-      [url, label, status, vercel_project_id, req.params.id, req.property_id]
+         url               = COALESCE($1, url),
+         label             = COALESCE($2, label),
+         status            = COALESCE($3, status),
+         vercel_project_id = CASE WHEN $4::boolean THEN $5 ELSE vercel_project_id END,
+         ga4_property_id   = CASE WHEN $6::boolean THEN $7 ELSE ga4_property_id END
+       WHERE id = $8 AND property_id = $9 RETURNING ${WEBSITE_FIELDS}`,
+      [url, label, status, setVercel, req.body.vercel_project_id || null, setGa4, ga4.value ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Website not found' });
     res.json(rows[0]);
   } catch (err) {
     next(err);
   }
+}
+
+// What the Settings page tells a venue to do before GA can work: the one
+// address to add as a Viewer on their GA4 property. configured=false means
+// GA_SERVICE_ACCOUNT_JSON isn't set on this server at all.
+async function getGoogleAnalyticsSetup(req, res) {
+  res.json({ configured: googleAnalytics.isConfigured(), service_account_email: googleAnalytics.serviceAccountEmail() });
 }
 
 function defaultSinceUntil(since, until) {
@@ -336,13 +368,33 @@ async function getWebsiteAnalytics(req, res, next) {
     if (since !== undefined && !isValidDate(since)) return res.status(400).json({ error: 'since must be YYYY-MM-DD' });
     if (until !== undefined && !isValidDate(until)) return res.status(400).json({ error: 'until must be YYYY-MM-DD' });
 
+    // A malformed id was reaching Postgres and coming back as a 500.
+    if (!isValidUuid(req.params.id)) return res.status(404).json({ error: 'Website not found' });
     const { rows } = await pool.query(
-      'SELECT id, vercel_project_id FROM property_website WHERE id = $1 AND property_id = $2',
+      'SELECT id, vercel_project_id, ga4_property_id FROM property_website WHERE id = $1 AND property_id = $2',
       [req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Website not found' });
-    const { vercel_project_id } = rows[0];
-    if (!vercel_project_id) return res.status(400).json({ error: 'Website is not mapped to a Vercel project' });
+    const { vercel_project_id, ga4_property_id } = rows[0];
+
+    // GA4 wins when both are set -- Settings clears the other on save, but a
+    // direct API write could leave both, and one source has to be the answer.
+    if (ga4_property_id) {
+      if (!googleAnalytics.isConfigured()) {
+        return res.status(503).json({ error: 'Google Analytics is not configured on this server' });
+      }
+      const { sinceIso, untilIso } = defaultSinceUntil(since, until);
+      try {
+        const analytics = await googleAnalytics.fetchGa4Analytics({ propertyId: ga4_property_id, sinceIso, untilIso });
+        if (!analytics) return res.status(502).json({ error: 'Failed to fetch analytics from Google' });
+        return res.json({ ...analytics, source: 'ga4' });
+      } catch (err) {
+        // Access and setup problems carry a message a venue can act on.
+        return res.status(502).json({ error: err.message });
+      }
+    }
+
+    if (!vercel_project_id) return res.status(400).json({ error: 'Website is not mapped to an analytics source' });
 
     const { token, teamId } = await resolveAnalyticsAuth(req.property_id);
     if (!token) {
@@ -352,7 +404,7 @@ async function getWebsiteAnalytics(req, res, next) {
     const { sinceIso, untilIso } = defaultSinceUntil(since, until);
     const analytics = await fetchVercelAnalytics({ token, teamId, projectId: vercel_project_id, sinceIso, untilIso });
     if (!analytics) return res.status(502).json({ error: 'Failed to fetch analytics from Vercel' });
-    res.json(analytics);
+    res.json({ ...analytics, source: 'vercel' });
   } catch (err) {
     next(err);
   }
@@ -793,7 +845,7 @@ module.exports = {
   getEmailBranding, updateEmailBranding,
   getReminderSettings, updateReminderSettings,
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
-  listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics,
+  listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics, getGoogleAnalyticsSetup,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,
   setVercelPat, clearVercelPat,
   getStripeStatus, setStripeKey, clearStripeKey,

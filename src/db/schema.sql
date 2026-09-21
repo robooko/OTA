@@ -101,6 +101,9 @@ CREATE TABLE IF NOT EXISTS property_website (
   url                TEXT        NOT NULL,
   label              VARCHAR(100),
   vercel_project_id  VARCHAR(100), -- NULL = not mapped, no analytics available
+  -- Google Analytics alternative; wins over vercel_project_id when set -- see
+  -- migrate-2026-09-21-website-ga4.sql and src/lib/googleAnalytics.js.
+  ga4_property_id    VARCHAR(20),
   status             VARCHAR(20) DEFAULT 'active',
   created_at         TIMESTAMPTZ DEFAULT now()
 );
