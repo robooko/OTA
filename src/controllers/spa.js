@@ -10,6 +10,7 @@ const {
   client: ablyClient,
 } = require('../lib/ably');
 const { sendAppointmentConfirmation, sendAppointmentCancellation, escapeHtml } = require('../lib/resend');
+const { memberRateUntil, resolveRate } = require('../lib/spaMemberRate');
 
 // Steps a 'YYYY-MM-DD' string forward by whole days via UTC epoch math --
 // `new Date(str); d.setDate(d.getDate() + 1)` looks equivalent but
@@ -100,38 +101,76 @@ async function listTreatments(req, res, next) {
 async function createTreatment(req, res, next) {
   try {
     const { spa_id } = req.params;
-    const { name, description, duration_mins, price } = req.body;
-    if (!name || duration_mins == null || price == null) {
-      return res.status(400).json({ error: 'name, duration_mins, and price are required' });
+    const { name, description, duration_mins, price, member_price, member_duration_mins } = req.body;
+    // price may be null for a regulars-only treatment, as long as it has a
+    // member_price -- see lib/spaMemberRate.js.
+    if (!name || duration_mins == null || (price == null && member_price == null)) {
+      return res.status(400).json({ error: 'name, duration_mins, and price (or member_price) are required' });
     }
 
     const spaRes = await pool.query('SELECT id FROM spa WHERE id = $1 AND property_id = $2', [spa_id, req.property_id]);
     if (!spaRes.rows.length) return res.status(404).json({ error: 'Spa not found' });
 
     const { rows } = await pool.query(
-      `INSERT INTO spa_treatment (property_id, spa_id, name, description, duration_mins, price) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.property_id, spa_id, name, description ?? null, duration_mins, price]
+      `INSERT INTO spa_treatment (property_id, spa_id, name, description, duration_mins, price, member_price, member_duration_mins)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.property_id, spa_id, name, description ?? null, duration_mins, price ?? null, member_price ?? null, member_duration_mins ?? null]
     );
     res.status(201).json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.constraint === 'spa_treatment_has_price') return res.status(400).json({ error: 'A treatment needs a price or a member_price' });
+    next(err);
+  }
 }
 
 async function updateTreatment(req, res, next) {
   try {
     const { spa_id, id } = req.params;
-    const { name, description, duration_mins, price, status } = req.body;
+    const { name, description, duration_mins, status } = req.body;
+    // The three price fields are genuinely clearable (null = "no regulars'
+    // rate", "same duration", "regulars only"), so COALESCE can't express
+    // them -- present-in-body decides, same as updateTherapist's
+    // clerk_user_id.
+    const has = (key) => Object.prototype.hasOwnProperty.call(req.body, key);
     const { rows } = await pool.query(
       `UPDATE spa_treatment SET
-         name          = COALESCE($1, name),
-         description   = COALESCE($2, description),
-         duration_mins = COALESCE($3, duration_mins),
-         price         = COALESCE($4, price),
-         status        = COALESCE($5, status)
-       WHERE id = $6 AND spa_id = $7 AND property_id = $8 RETURNING *`,
-      [name, description, duration_mins, price, status, id, spa_id, req.property_id]
+         name                 = COALESCE($1, name),
+         description          = COALESCE($2, description),
+         duration_mins        = COALESCE($3, duration_mins),
+         price                = CASE WHEN $4 THEN $5::numeric ELSE price END,
+         status               = COALESCE($6, status),
+         member_price         = CASE WHEN $7 THEN $8::numeric ELSE member_price END,
+         member_duration_mins = CASE WHEN $9 THEN $10::int ELSE member_duration_mins END
+       WHERE id = $11 AND spa_id = $12 AND property_id = $13 RETURNING *`,
+      [
+        name, description, duration_mins,
+        has('price'), req.body.price ?? null,
+        status,
+        has('member_price'), req.body.member_price ?? null,
+        has('member_duration_mins'), req.body.member_duration_mins ?? null,
+        id, spa_id, req.property_id,
+      ]
     );
     if (!rows.length) return res.status(404).json({ error: 'Treatment not found' });
     res.json(rows[0]);
+  } catch (err) {
+    if (err.constraint === 'spa_treatment_has_price') return res.status(400).json({ error: 'A treatment needs a price or a member_price' });
+    next(err);
+  }
+}
+
+// GET ?email= -- the last appointment date that email gets the regulars'
+// rate for ({ member_until: 'YYYY-MM-DD' | null }). Property-wide (a visit
+// to any of the property's spas counts); spa_id only scopes the route.
+// Callers pass an email they've verified themselves -- see
+// lib/spaMemberRate.js.
+async function getMemberRate(req, res, next) {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ error: 'email is required' });
+    const spaRes = await pool.query('SELECT id FROM spa WHERE id = $1 AND property_id = $2', [req.params.spa_id, req.property_id]);
+    if (!spaRes.rows.length) return res.status(404).json({ error: 'Spa not found' });
+    res.json({ member_until: await memberRateUntil(pool, req.property_id, email) });
   } catch (err) { next(err); }
 }
 
@@ -365,26 +404,41 @@ const MAX_AVAILABILITY_DAYS = 31;
 // "available" means. Caller is responsible for validating spa_id/
 // treatment_id/therapist_id belong to the property first (searchSpaAvailability
 // does this for the route; aiReplyTools.js does its own lookup).
-async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = null) {
+//
+// memberUntil (from lib/spaMemberRate.js's memberRateUntil, or null) picks
+// the duration per date: dates it covers use the treatment's
+// member_duration_mins when it has a regulars' rate, others the standard
+// duration -- and a regulars-only treatment (price NULL) has no availability
+// at all on dates it doesn't cover.
+async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = null, memberUntil = null) {
     const { rows } = await pool.query(
       `WITH r AS (
-         SELECT s.slot_interval_minutes, tr.duration_mins, p.timezone
+         SELECT s.slot_interval_minutes, tr.duration_mins, tr.price, tr.member_price, tr.member_duration_mins, p.timezone
          FROM spa s
          JOIN spa_treatment tr ON tr.id = $4
          JOIN property p ON p.id = s.property_id
          WHERE s.id = $1
        ),
        candidate_dates AS (
-         SELECT gs::date AS avail_date FROM generate_series($2::date, $3::date, '1 day') AS gs
+         SELECT d.avail_date,
+                CASE WHEN d.member THEN COALESCE(r.member_duration_mins, r.duration_mins) ELSE r.duration_mins END AS duration_mins
+         FROM (
+           SELECT gs::date AS avail_date, (r.member_price IS NOT NULL AND gs::date <= $6::date) AS member
+           FROM generate_series($2::date, $3::date, '1 day') AS gs
+           CROSS JOIN r
+         ) d
+         CROSS JOIN r
+         WHERE d.member OR r.price IS NOT NULL
        ),
        candidate AS (
          SELECT
            cd.avail_date,
+           cd.duration_mins,
            t.id AS therapist_id,
            t.name AS therapist_name,
            generate_series(
              DATE '2000-01-01' + h.start_time,
-             DATE '2000-01-01' + h.end_time - (r.duration_mins || ' minutes')::interval,
+             DATE '2000-01-01' + h.end_time - (cd.duration_mins || ' minutes')::interval,
              (r.slot_interval_minutes || ' minutes')::interval
            )::time AS start_time
          FROM candidate_dates cd
@@ -411,7 +465,7 @@ async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = n
          WHERE sa.therapist_id = c.therapist_id
            AND sa.appointment_date = c.avail_date
            AND sa.status != 'cancelled'
-           AND sa.start_time < c.start_time + (r.duration_mins || ' minutes')::interval
+           AND sa.start_time < c.start_time + (c.duration_mins || ' minutes')::interval
            AND sa.end_time   > c.start_time
        )
        AND NOT EXISTS (
@@ -419,7 +473,7 @@ async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = n
          WHERE tof.therapist_id = c.therapist_id
            AND c.avail_date BETWEEN tof.start_date AND tof.end_date
            AND tof.start_time IS NOT NULL
-           AND tof.start_time < c.start_time + (r.duration_mins || ' minutes')::interval
+           AND tof.start_time < c.start_time + (c.duration_mins || ' minutes')::interval
            AND tof.end_time   > c.start_time
        )
        AND (
@@ -427,7 +481,7 @@ async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = n
          OR c.start_time > (now() AT TIME ZONE r.timezone)::time
        )
        ORDER BY c.avail_date, c.start_time, c.therapist_name`,
-      [spaId, from, to, treatmentId, therapistId]
+      [spaId, from, to, treatmentId, therapistId, memberUntil]
     );
 
     const byDate = new Map();
@@ -448,7 +502,9 @@ async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = n
 async function searchSpaAvailability(req, res, next) {
   try {
     const { spa_id } = req.params;
-    const { from, to, treatment_id, therapist_id } = req.query;
+    // member_email: an email the caller has verified, whose regulars' rate
+    // (if any) sets the duration per date -- see findSpaAvailability.
+    const { from, to, treatment_id, therapist_id, member_email } = req.query;
 
     if (!from || !to || !treatment_id) {
       return res.status(400).json({ error: 'from, to, and treatment_id are required' });
@@ -473,7 +529,8 @@ async function searchSpaAvailability(req, res, next) {
       if (!therapistRes.rows.length) return res.status(404).json({ error: 'Therapist not found' });
     }
 
-    const result = await findSpaAvailability(spa_id, from, to, treatment_id, therapist_id ?? null);
+    const memberUntil = await memberRateUntil(pool, req.property_id, member_email);
+    const result = await findSpaAvailability(spa_id, from, to, treatment_id, therapist_id ?? null, memberUntil);
     res.json(result);
   } catch (err) { next(err); }
 }
@@ -654,7 +711,7 @@ async function getFullAppointmentForEmail(appointmentId) {
   const { rows } = await pool.query(
     `SELECT sa.*,
             st.name AS therapist_name,
-            tr.name AS treatment_name, tr.duration_mins, tr.price,
+            tr.name AS treatment_name, (EXTRACT(EPOCH FROM (sa.end_time - sa.start_time)) / 60)::int AS duration_mins,
             s.contact_email AS spa_contact_email, s.address AS spa_address, s.phone AS spa_phone,
             p.name AS property_name, p.currency AS property_currency
      FROM spa_appointment sa
@@ -722,7 +779,8 @@ async function listAppointmentsForProperty(req, res, next) {
     const { cursor, limit, spa_id, therapist_id, date, from, to } = req.query;
     const take = Math.min(parseInt(limit, 10) || 30, 500);
     let query = `
-      SELECT sa.*, st.spa_id, st.name AS therapist_name, tr.name AS treatment_name, tr.duration_mins, tr.price
+      SELECT sa.*, st.spa_id, st.name AS therapist_name, tr.name AS treatment_name,
+             (EXTRACT(EPOCH FROM (sa.end_time - sa.start_time)) / 60)::int AS duration_mins
       FROM spa_appointment sa
       JOIN spa_therapist st ON st.id = sa.therapist_id
       JOIN spa_treatment tr ON tr.id = sa.treatment_id
@@ -760,7 +818,7 @@ async function listAppointments(req, res, next) {
     const { spa_id } = req.params;
     const { date, from, to, status, guest_id, clerk_user_id, therapist_id } = req.query;
     let query = `
-      SELECT sa.*, st.name AS therapist_name, tr.name AS treatment_name, tr.price
+      SELECT sa.*, st.name AS therapist_name, tr.name AS treatment_name
       FROM spa_appointment sa
       JOIN spa_therapist st ON st.id = sa.therapist_id
       JOIN spa_treatment tr ON tr.id = sa.treatment_id
@@ -804,7 +862,7 @@ async function getAppointment(req, res, next) {
   try {
     const { spa_id, id } = req.params;
     const { rows } = await pool.query(
-      `SELECT sa.*, st.name AS therapist_name, tr.name AS treatment_name, tr.price
+      `SELECT sa.*, st.name AS therapist_name, tr.name AS treatment_name
        FROM spa_appointment sa
        JOIN spa_therapist st ON st.id = sa.therapist_id
        JOIN spa_treatment tr ON tr.id = sa.treatment_id
@@ -847,17 +905,19 @@ async function createAppointmentFromSlot(req, res, next) {
     );
     if (conflictRes.rows.length) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Slot already booked' }); }
 
-    const treatmentRes = await client.query('SELECT duration_mins FROM spa_treatment WHERE id = $1', [slot.treatment_id]);
+    // The legacy slot flow has no regulars' rate -- standard price only.
+    const treatmentRes = await client.query('SELECT duration_mins, price FROM spa_treatment WHERE id = $1', [slot.treatment_id]);
     const endTime = addMinutesToTime(slot.slot_time, treatmentRes.rows[0].duration_mins);
 
     const { rows } = await client.query(
       `INSERT INTO spa_appointment
          (property_id, slot_id, treatment_id, therapist_id, appointment_date, start_time, end_time,
-          guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+          guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, price)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
       [
         req.property_id, slot_id, slot.treatment_id, slot.therapist_id, slot.slot_date, slot.slot_time, endTime,
         guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
+        treatmentRes.rows[0].price,
       ]
     );
 
@@ -920,18 +980,26 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // when omitted, picks the free therapist with the lowest name (deterministic,
 // no cleverness). Returns { ok: true, appointment } or { ok: false, code }
 // with code one of 'treatment_not_found' | 'guest_not_found' |
-// 'therapist_not_found' | 'unavailable'.
-async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, branding, cancel_url }) {
+// 'therapist_not_found' | 'members_only' | 'unavailable'.
+//
+// member_email is an email the caller has verified (never contact_email --
+// see lib/spaMemberRate.js); when it qualifies for the regulars' rate on
+// `date`, the appointment books at member_price/member_duration_mins. The
+// price is frozen onto the appointment either way.
+async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, branding, cancel_url }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const treatmentRes = await client.query(
-      "SELECT id, duration_mins FROM spa_treatment WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'",
+      `SELECT id, duration_mins, price, member_price, member_duration_mins
+       FROM spa_treatment WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'`,
       [treatment_id, spa_id, property_id]
     );
     if (!treatmentRes.rows.length) { await client.query('ROLLBACK'); return { ok: false, code: 'treatment_not_found' }; }
-    const durationMins = treatmentRes.rows[0].duration_mins;
+    const rate = resolveRate(treatmentRes.rows[0], await memberRateUntil(client, property_id, member_email), date);
+    if (!rate.ok) { await client.query('ROLLBACK'); return { ok: false, code: rate.code }; }
+    const durationMins = rate.durationMins;
 
     const propertyRes = await client.query(
       `SELECT p.timezone FROM property p JOIN spa s ON s.property_id = p.id WHERE s.id = $1`,
@@ -979,11 +1047,12 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
     const { rows } = await client.query(
       `INSERT INTO spa_appointment
          (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time,
-          guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+          guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, price, member_rate)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
       [
         property_id, treatment_id, chosenTherapistId, date, time, endTime,
         guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
+        rate.price, rate.memberRate,
       ]
     );
 
@@ -1002,12 +1071,13 @@ const BOOK_FAILURE_HTTP = {
   treatment_not_found: [404, 'Treatment not found'],
   guest_not_found: [404, 'Guest not found'],
   therapist_not_found: [404, 'Therapist not found'],
+  members_only: [403, "That service is only available at the regulars' rate"],
   unavailable: [409, 'Time is not available'],
 };
 
 async function createAppointmentFromAvailability(req, res, next) {
   const { spa_id } = req.params;
-  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, branding, cancel_url } = req.body;
+  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, branding, cancel_url } = req.body;
 
   if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
   if (!isValidTime(time)) return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
@@ -1015,7 +1085,7 @@ async function createAppointmentFromAvailability(req, res, next) {
   try {
     const result = await bookFromAvailability({
       property_id: req.property_id, spa_id, treatment_id, therapist_id, date, time,
-      guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, branding, cancel_url,
+      guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, branding, cancel_url,
     });
     if (!result.ok) {
       const [status, error] = BOOK_FAILURE_HTTP[result.code];
@@ -1076,7 +1146,9 @@ async function updateAppointment(req, res, next) {
 
     const beforeRes = await client.query(
       `SELECT sa.status, sa.slot_id, sa.treatment_id, sa.therapist_id, sa.appointment_date, sa.start_time,
-              tr.duration_mins
+              -- The appointment's own length, not the treatment's: a
+              -- regulars'-rate booking can run member_duration_mins.
+              (EXTRACT(EPOCH FROM (sa.end_time - sa.start_time)) / 60)::int AS duration_mins
        FROM spa_appointment sa
        JOIN spa_therapist st ON st.id = sa.therapist_id
        JOIN spa_treatment tr ON tr.id = sa.treatment_id
@@ -1245,6 +1317,7 @@ async function reminderOptOut(req, res, next) {
 module.exports = {
   listSpas, getSpa, createSpa, updateSpa,
   listTreatments, createTreatment, updateTreatment,
+  getMemberRate,
   listTherapists, createTherapist, updateTherapist,
   listTherapistHours, setTherapistHours,
   listTherapistTimeOff, createTherapistTimeOff, deleteTherapistTimeOff,

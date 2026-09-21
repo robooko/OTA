@@ -176,7 +176,17 @@ function buildPropertyBlock(property, restaurant, spa) {
     if (spa.treatments?.length) {
       text += '    Services (duration, price):\n';
       for (const t of spa.treatments) {
-        text += `      ${neutraliseTags(t.name)} -- ${t.duration_mins} min -- ${money(t.price, property.currency)}\n`;
+        const standard = t.price != null ? money(t.price, property.currency) : 'regulars only';
+        const regulars = t.member_price != null
+          ? ` (regulars' rate ${money(t.member_price, property.currency)}${t.member_duration_mins ? `, ${t.member_duration_mins} min` : ''})`
+          : '';
+        text += `      ${neutraliseTags(t.name)} -- ${t.duration_mins} min -- ${standard}${regulars}\n`;
+      }
+      // A booking made from a reply can't verify the guest is a regular
+      // (lib/spaMemberRate.js), so it always books at the standard price
+      // and a regulars-only service can't be booked this way at all.
+      if (spa.treatments.some((t) => t.member_price != null)) {
+        text += "    The regulars' rate applies to clients whose last visit was within the past 4 weeks, and only when they book online while signed in. Never propose booking a regulars-only service.\n";
       }
     }
     if (spa.hours?.length) {

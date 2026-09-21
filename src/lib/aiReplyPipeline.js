@@ -81,7 +81,7 @@ async function loadSpaContext(spaId) {
   const [{ rows: [spa] }, { rows: treatments }, { rows: hours }] = await Promise.all([
     pool.query('SELECT name, description, phone, address FROM spa WHERE id = $1', [spaId]),
     pool.query(
-      "SELECT name, duration_mins, price FROM spa_treatment WHERE spa_id = $1 AND status = 'active' ORDER BY name",
+      "SELECT name, duration_mins, price, member_price, member_duration_mins FROM spa_treatment WHERE spa_id = $1 AND status = 'active' ORDER BY name",
       [spaId]
     ),
     pool.query(

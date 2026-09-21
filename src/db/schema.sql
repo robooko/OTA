@@ -117,6 +117,8 @@ CREATE TABLE IF NOT EXISTS guest (
   last_name     VARCHAR(100) NOT NULL,
   email         VARCHAR(255) NOT NULL,
   phone         VARCHAR(30),
+  -- Spa regulars' rate granted through this date -- see src/lib/spaMemberRate.js.
+  member_until  DATE,
   created_at    TIMESTAMPTZ  DEFAULT now(),
   UNIQUE (property_id, email),
   UNIQUE (property_id, clerk_user_id)
@@ -441,8 +443,13 @@ CREATE TABLE IF NOT EXISTS spa_treatment (
   name          VARCHAR(100)  NOT NULL,
   description   TEXT,
   duration_mins INT           NOT NULL,
-  price         NUMERIC(10,2) NOT NULL,
-  status        VARCHAR(20)   DEFAULT 'active'
+  -- NULL price + a member_price = regulars-only. See
+  -- migrate-2026-09-21-spa-member-pricing.sql.
+  price         NUMERIC(10,2),
+  member_price  NUMERIC(10,2),
+  member_duration_mins INT,
+  status        VARCHAR(20)   DEFAULT 'active',
+  CONSTRAINT spa_treatment_has_price CHECK (price IS NOT NULL OR member_price IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS spa_therapist (
@@ -535,6 +542,9 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
   reminder_email_resend_id TEXT,
   reminder_sms_sid         TEXT,
   reminder_attempts        SMALLINT NOT NULL DEFAULT 0,
+  -- Frozen at booking time -- see migrate-2026-09-21-spa-member-pricing.sql.
+  price                    NUMERIC(10,2),
+  member_rate              BOOLEAN NOT NULL DEFAULT false,
   created_at                    TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT spa_appointment_payment_status CHECK (payment_status IN ('unpaid', 'paid'))
 );
@@ -561,6 +571,7 @@ CREATE TABLE IF NOT EXISTS reminder_opt_out (
 );
 
 CREATE INDEX IF NOT EXISTS idx_spa_treatment_spa       ON spa_treatment(spa_id);
+CREATE INDEX IF NOT EXISTS idx_spa_appointment_property_email ON spa_appointment (property_id, lower(contact_email));
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_spa       ON spa_therapist(spa_id);
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_clerk_user ON spa_therapist(clerk_user_id);
 CREATE INDEX IF NOT EXISTS idx_spa_slot_therapist_date ON spa_slot(therapist_id, slot_date);

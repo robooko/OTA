@@ -22,6 +22,7 @@ router.put('/:id', authenticateOrApiKey, ctrl.updateSpa);
 router.get('/:spa_id/treatments', authenticateOrApiKey, ctrl.listTreatments);
 router.post('/:spa_id/treatments', authenticateOrApiKey, ctrl.createTreatment);
 router.put('/:spa_id/treatments/:id', authenticateOrApiKey, ctrl.updateTreatment);
+router.get('/:spa_id/member-rate', authenticateOrApiKey, ctrl.getMemberRate);
 
 // Therapists
 router.get('/:spa_id/therapists', authenticateOrApiKey, ctrl.listTherapists);

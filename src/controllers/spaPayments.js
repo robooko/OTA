@@ -5,10 +5,10 @@ const pool = require('../db');
 // requester's property. Cross-property ids read as not-found.
 async function loadAppointmentForPayment(appointmentId, spaId, propertyId) {
   const { rows } = await pool.query(
-    `SELECT sa.*, tr.price, p.stripe_secret_key, p.currency
+    // sa.price is the price frozen at booking (regulars' rate or standard).
+    `SELECT sa.*, p.stripe_secret_key, p.currency
      FROM spa_appointment sa
      JOIN spa_therapist st ON st.id = sa.therapist_id
-     JOIN spa_treatment tr ON tr.id = sa.treatment_id
      JOIN property p ON p.id = sa.property_id
      WHERE sa.id = $1 AND st.spa_id = $2 AND sa.property_id = $3`,
     [appointmentId, spaId, propertyId]

@@ -27,14 +27,14 @@ async function getGuest(req, res, next) {
 
 async function createGuest(req, res, next) {
   try {
-    const { first_name, last_name, email, phone, clerk_user_id } = req.body;
+    const { first_name, last_name, email, phone, clerk_user_id, member_until } = req.body;
     if (!first_name || !last_name || !email) {
       return res.status(400).json({ error: 'first_name, last_name, and email are required' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO guest (property_id, clerk_user_id, first_name, last_name, email, phone)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.property_id, clerk_user_id || null, first_name, last_name, email, phone || null]
+      `INSERT INTO guest (property_id, clerk_user_id, first_name, last_name, email, phone, member_until)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.property_id, clerk_user_id || null, first_name, last_name, email, phone || null, member_until || null]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -93,15 +93,19 @@ async function lookupGuest(req, res, next) {
 async function updateGuest(req, res, next) {
   try {
     const { first_name, last_name, email, phone, clerk_user_id } = req.body;
+    // member_until (spa regulars' rate, see lib/spaMemberRate.js) is
+    // clearable, so present-in-body decides rather than COALESCE.
+    const hasMemberUntil = Object.prototype.hasOwnProperty.call(req.body, 'member_until');
     const { rows } = await pool.query(
       `UPDATE guest SET
          clerk_user_id = COALESCE($1, clerk_user_id),
          first_name    = COALESCE($2, first_name),
          last_name     = COALESCE($3, last_name),
          email         = COALESCE($4, email),
-         phone         = COALESCE($5, phone)
+         phone         = COALESCE($5, phone),
+         member_until  = CASE WHEN $8 THEN $9::date ELSE member_until END
        WHERE id = $6 AND property_id = $7 RETURNING *`,
-      [clerk_user_id, first_name, last_name, email, phone, req.params.id, req.property_id]
+      [clerk_user_id, first_name, last_name, email, phone, req.params.id, req.property_id, hasMemberUntil, req.body.member_until ?? null]
     );
     if (!rows.length) return res.status(404).json({ error: 'Guest not found' });
     res.json(rows[0]);
