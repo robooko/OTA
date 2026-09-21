@@ -84,26 +84,50 @@ class Ga4AccessError extends Error {
   }
 }
 
+// A site's bare host and its www. twin -- the one variant common enough to
+// count as the same site without asking. "https://www.x.com/" -> ["x.com",
+// "www.x.com"].
+function hostVariants(host) {
+  const bare = String(host).toLowerCase().replace(/^www\./, '');
+  return [bare, `www.${bare}`];
+}
+
+async function runReport(propertyId, body) {
+  return fetch(`${DATA_API}/properties/${propertyId}:runReport`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${await accessToken()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 /**
  * Same shape as property.js's fetchVercelAnalytics, so the chart doesn't care
  * which source it came from: { visitors, pageviews, daily: [{ date, visitors,
  * pageviews }] }. `visitors` is GA's activeUsers -- what the GA UI calls
  * "Users" -- and the total is GA's own de-duplicated figure, not a sum of the
  * days (summing daily users double-counts anyone who came back).
+ *
+ * `host` (the website's own hostname) narrows the report to that site's
+ * traffic. A GA property can collect hits from more than one host -- a
+ * template's measurement id left in another site, a developer's localhost --
+ * and without the filter those land in this site's chart; with it, a site
+ * mapped to the wrong property shows zero instead of someone else's numbers.
+ * When the filter leaves nothing, other_hosts lists where the property's
+ * traffic did come from, so an empty chart can say why.
  */
-async function fetchGa4Analytics({ propertyId, sinceIso, untilIso }) {
+async function fetchGa4Analytics({ propertyId, sinceIso, untilIso, host = null }) {
   const startDate = sinceIso.slice(0, 10);
   const endDate = untilIso.slice(0, 10);
-  const res = await fetch(`${DATA_API}/properties/${propertyId}:runReport`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${await accessToken()}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      dateRanges: [{ startDate, endDate }],
-      dimensions: [{ name: 'date' }],
-      metrics: [{ name: 'activeUsers' }, { name: 'screenPageViews' }],
-      metricAggregations: ['TOTAL'],
-      orderBys: [{ dimension: { dimensionName: 'date' } }],
-    }),
+  const hostFilter = host
+    ? { dimensionFilter: { filter: { fieldName: 'hostName', inListFilter: { values: hostVariants(host) } } } }
+    : {};
+  const res = await runReport(propertyId, {
+    dateRanges: [{ startDate, endDate }],
+    dimensions: [{ name: 'date' }],
+    metrics: [{ name: 'activeUsers' }, { name: 'screenPageViews' }],
+    metricAggregations: ['TOTAL'],
+    orderBys: [{ dimension: { dimensionName: 'date' } }],
+    ...hostFilter,
   });
   if (res.status === 403 || res.status === 404) {
     // A 403 also comes back when the Data API itself is switched off on the
@@ -132,11 +156,31 @@ async function fetchGa4Analytics({ propertyId, sinceIso, untilIso }) {
     daily.push({ date, visitors, pageviews });
   }
   const totals = body.totals?.[0]?.metricValues ?? [];
-  return {
+  const result = {
     visitors: Number(totals[0]?.value ?? 0),
     pageviews: Number(totals[1]?.value ?? 0),
     daily,
   };
+
+  // Only paid for on an empty filtered result: one more report, by host,
+  // to tell "this site had no visits" apart from "this property's visits
+  // are all from somewhere else" -- the second means the mapping is wrong.
+  if (host && result.visitors === 0 && result.pageviews === 0) {
+    const byHost = await runReport(propertyId, {
+      dateRanges: [{ startDate, endDate }],
+      dimensions: [{ name: 'hostName' }],
+      metrics: [{ name: 'activeUsers' }],
+      orderBys: [{ metric: { metricName: 'activeUsers' }, desc: true }],
+      limit: 5,
+    });
+    if (byHost.ok) {
+      const hostBody = await byHost.json();
+      result.other_hosts = (hostBody.rows ?? [])
+        .map((row) => ({ host: row.dimensionValues[0].value, visitors: Number(row.metricValues[0].value) }))
+        .filter((h) => h.visitors > 0 && h.host !== '(not set)');
+    }
+  }
+  return result;
 }
 
 module.exports = { isConfigured, serviceAccountEmail, normalisePropertyId, fetchGa4Analytics, Ga4AccessError };

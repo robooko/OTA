@@ -371,11 +371,11 @@ async function getWebsiteAnalytics(req, res, next) {
     // A malformed id was reaching Postgres and coming back as a 500.
     if (!isValidUuid(req.params.id)) return res.status(404).json({ error: 'Website not found' });
     const { rows } = await pool.query(
-      'SELECT id, vercel_project_id, ga4_property_id FROM property_website WHERE id = $1 AND property_id = $2',
+      'SELECT id, url, vercel_project_id, ga4_property_id FROM property_website WHERE id = $1 AND property_id = $2',
       [req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Website not found' });
-    const { vercel_project_id, ga4_property_id } = rows[0];
+    const { url, vercel_project_id, ga4_property_id } = rows[0];
 
     // GA4 wins when both are set -- Settings clears the other on save, but a
     // direct API write could leave both, and one source has to be the answer.
@@ -384,10 +384,18 @@ async function getWebsiteAnalytics(req, res, next) {
         return res.status(503).json({ error: 'Google Analytics is not configured on this server' });
       }
       const { sinceIso, untilIso } = defaultSinceUntil(since, until);
+      // Scoped to this website's own host -- one GA property can collect
+      // several sites' hits, and only this site's belong on its chart.
+      let host = null;
       try {
-        const analytics = await googleAnalytics.fetchGa4Analytics({ propertyId: ga4_property_id, sinceIso, untilIso });
+        host = new URL(url).hostname;
+      } catch {
+        host = null; // unparseable stored url: fall back to the whole property
+      }
+      try {
+        const analytics = await googleAnalytics.fetchGa4Analytics({ propertyId: ga4_property_id, sinceIso, untilIso, host });
         if (!analytics) return res.status(502).json({ error: 'Failed to fetch analytics from Google' });
-        return res.json({ ...analytics, source: 'ga4' });
+        return res.json({ ...analytics, source: 'ga4', host });
       } catch (err) {
         // Access and setup problems carry a message a venue can act on.
         return res.status(502).json({ error: err.message });
