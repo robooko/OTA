@@ -448,8 +448,15 @@ CREATE TABLE IF NOT EXISTS spa_treatment (
   price         NUMERIC(10,2),
   member_price  NUMERIC(10,2),
   member_duration_mins INT,
+  -- Days this treatment is offered, ISO day-of-week (1 = Mon .. 7 = Sun).
+  -- NULL = every day. See migrate-2026-09-22-spa-treatment-days.sql.
+  days_of_week  INT[],
   status        VARCHAR(20)   DEFAULT 'active',
-  CONSTRAINT spa_treatment_has_price CHECK (price IS NOT NULL OR member_price IS NOT NULL)
+  CONSTRAINT spa_treatment_has_price CHECK (price IS NOT NULL OR member_price IS NOT NULL),
+  CONSTRAINT spa_treatment_days_of_week_valid CHECK (
+    days_of_week IS NULL
+    OR (array_length(days_of_week, 1) BETWEEN 1 AND 7 AND days_of_week <@ ARRAY[1,2,3,4,5,6,7])
+  )
 );
 
 CREATE TABLE IF NOT EXISTS spa_therapist (

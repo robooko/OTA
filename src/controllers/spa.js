@@ -33,6 +33,38 @@ function addMinutesToTime(timeStr, minutesToAdd) {
   return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 
+// spa_treatment.days_of_week: ISO day-of-week (1 = Mon .. 7 = Sun) for the
+// days a treatment is offered, NULL meaning every day. Returns the cleaned
+// array, null, or an error string -- the DB CHECK is the backstop, this is
+// only so a bad body gets a 400 with a sentence in it rather than a
+// constraint violation. An empty array is rejected on purpose: a treatment
+// offered on no day at all is a delete (status = 'inactive'), not a schedule.
+function normalizeDaysOfWeek(value) {
+  if (value == null) return { value: null };
+  if (!Array.isArray(value) || !value.length) {
+    return { error: 'days_of_week must be a non-empty array of 1-7 (Mon-Sun), or null for every day' };
+  }
+  const days = [...new Set(value.map(Number))].sort((a, b) => a - b);
+  if (days.some((d) => !Number.isInteger(d) || d < 1 || d > 7)) {
+    return { error: 'days_of_week values must be integers 1-7 (1 = Monday)' };
+  }
+  // All seven days is the same offer as no restriction -- stored as NULL so
+  // there is one representation of "every day" for readers to handle.
+  return { value: days.length === 7 ? null : days };
+}
+
+// Is a 'YYYY-MM-DD' date one of a treatment's days_of_week? UTC epoch math
+// for the same reason as addDaysUTC -- getDay() would read the date in the
+// server process's local timezone. Postgres does this inline via
+// EXTRACT(ISODOW ...) in findSpaAvailability; this is the JS equivalent for
+// the booking paths.
+function isOfferedOn(daysOfWeek, dateStr) {
+  if (!daysOfWeek || !daysOfWeek.length) return true;
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const sundayFirst = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return daysOfWeek.includes(sundayFirst === 0 ? 7 : sundayFirst);
+}
+
 // ── Spas ──────────────────────────────────────────────────────────────────────
 
 async function listSpas(req, res, next) {
@@ -107,14 +139,16 @@ async function createTreatment(req, res, next) {
     if (!name || duration_mins == null || (price == null && member_price == null)) {
       return res.status(400).json({ error: 'name, duration_mins, and price (or member_price) are required' });
     }
+    const days = normalizeDaysOfWeek(req.body.days_of_week);
+    if (days.error) return res.status(400).json({ error: days.error });
 
     const spaRes = await pool.query('SELECT id FROM spa WHERE id = $1 AND property_id = $2', [spa_id, req.property_id]);
     if (!spaRes.rows.length) return res.status(404).json({ error: 'Spa not found' });
 
     const { rows } = await pool.query(
-      `INSERT INTO spa_treatment (property_id, spa_id, name, description, duration_mins, price, member_price, member_duration_mins)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.property_id, spa_id, name, description ?? null, duration_mins, price ?? null, member_price ?? null, member_duration_mins ?? null]
+      `INSERT INTO spa_treatment (property_id, spa_id, name, description, duration_mins, price, member_price, member_duration_mins, days_of_week)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.property_id, spa_id, name, description ?? null, duration_mins, price ?? null, member_price ?? null, member_duration_mins ?? null, days.value]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -132,6 +166,9 @@ async function updateTreatment(req, res, next) {
     // them -- present-in-body decides, same as updateTherapist's
     // clerk_user_id.
     const has = (key) => Object.prototype.hasOwnProperty.call(req.body, key);
+    // days_of_week is clearable the same way (null = offered every day).
+    const days = normalizeDaysOfWeek(req.body.days_of_week);
+    if (days.error) return res.status(400).json({ error: days.error });
     const { rows } = await pool.query(
       `UPDATE spa_treatment SET
          name                 = COALESCE($1, name),
@@ -140,14 +177,16 @@ async function updateTreatment(req, res, next) {
          price                = CASE WHEN $4 THEN $5::numeric ELSE price END,
          status               = COALESCE($6, status),
          member_price         = CASE WHEN $7 THEN $8::numeric ELSE member_price END,
-         member_duration_mins = CASE WHEN $9 THEN $10::int ELSE member_duration_mins END
-       WHERE id = $11 AND spa_id = $12 AND property_id = $13 RETURNING *`,
+         member_duration_mins = CASE WHEN $9 THEN $10::int ELSE member_duration_mins END,
+         days_of_week         = CASE WHEN $11 THEN $12::int[] ELSE days_of_week END
+       WHERE id = $13 AND spa_id = $14 AND property_id = $15 RETURNING *`,
       [
         name, description, duration_mins,
         has('price'), req.body.price ?? null,
         status,
         has('member_price'), req.body.member_price ?? null,
         has('member_duration_mins'), req.body.member_duration_mins ?? null,
+        has('days_of_week'), days.value,
         id, spa_id, req.property_id,
       ]
     );
@@ -413,7 +452,7 @@ const MAX_AVAILABILITY_DAYS = 31;
 async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = null, memberUntil = null) {
     const { rows } = await pool.query(
       `WITH r AS (
-         SELECT s.slot_interval_minutes, tr.duration_mins, tr.price, tr.member_price, tr.member_duration_mins, p.timezone
+         SELECT s.slot_interval_minutes, tr.duration_mins, tr.price, tr.member_price, tr.member_duration_mins, tr.days_of_week, p.timezone
          FROM spa s
          JOIN spa_treatment tr ON tr.id = $4
          JOIN property p ON p.id = s.property_id
@@ -428,7 +467,9 @@ async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = n
            CROSS JOIN r
          ) d
          CROSS JOIN r
-         WHERE d.member OR r.price IS NOT NULL
+         WHERE (d.member OR r.price IS NOT NULL)
+           -- Days the treatment itself is offered on; NULL = every day.
+           AND (r.days_of_week IS NULL OR EXTRACT(ISODOW FROM d.avail_date)::int = ANY(r.days_of_week))
        ),
        candidate AS (
          SELECT
@@ -577,14 +618,17 @@ async function bulkCreateSlots(req, res, next) {
     if (!therapistRes.rows.length || therapistRes.rows[0].spa_id !== spa_id) {
       return res.status(400).json({ error: 'therapist_id does not belong to this spa' });
     }
-    const treatmentRes = await pool.query('SELECT spa_id FROM spa_treatment WHERE id = $1', [treatment_id]);
+    const treatmentRes = await pool.query('SELECT spa_id, days_of_week FROM spa_treatment WHERE id = $1', [treatment_id]);
     if (!treatmentRes.rows.length || treatmentRes.rows[0].spa_id !== spa_id) {
       return res.status(400).json({ error: 'treatment_id does not belong to this spa' });
     }
+    const daysOfWeek = treatmentRes.rows[0].days_of_week;
 
     const created = [];
     let date = from;
     while (date <= to) {
+      // Days the treatment isn't offered on get no slots generated for them.
+      if (!isOfferedOn(daysOfWeek, date)) { date = addDaysUTC(date, 1); continue; }
       for (const time of times) {
         const { rows } = await pool.query(
           `INSERT INTO spa_slot (property_id, therapist_id, treatment_id, slot_date, slot_time)
@@ -886,7 +930,9 @@ async function createAppointmentFromSlot(req, res, next) {
     await client.query('BEGIN');
 
     const slotRes = await client.query(
-      `SELECT ss.* FROM spa_slot ss
+      // slot_date comes back as a Date in the process's own timezone, so
+      // the ::text copy is what the day-of-week check reads.
+      `SELECT ss.*, ss.slot_date::text AS slot_date_text FROM spa_slot ss
        JOIN spa_therapist st ON st.id = ss.therapist_id
        WHERE ss.id = $1 AND st.spa_id = $2 AND ss.property_id = $3`,
       [slot_id, spa_id, req.property_id]
@@ -906,7 +952,14 @@ async function createAppointmentFromSlot(req, res, next) {
     if (conflictRes.rows.length) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Slot already booked' }); }
 
     // The legacy slot flow has no regulars' rate -- standard price only.
-    const treatmentRes = await client.query('SELECT duration_mins, price FROM spa_treatment WHERE id = $1', [slot.treatment_id]);
+    const treatmentRes = await client.query('SELECT duration_mins, price, days_of_week FROM spa_treatment WHERE id = $1', [slot.treatment_id]);
+    // A slot generated before the treatment's days were restricted is
+    // still sitting there bookable -- refuse it rather than let the legacy
+    // flow be the one way round the restriction.
+    if (!isOfferedOn(treatmentRes.rows[0].days_of_week, slot.slot_date_text)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'That treatment is not offered on that day' });
+    }
     const endTime = addMinutesToTime(slot.slot_time, treatmentRes.rows[0].duration_mins);
 
     const { rows } = await client.query(
@@ -992,11 +1045,18 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
     await client.query('BEGIN');
 
     const treatmentRes = await client.query(
-      `SELECT id, duration_mins, price, member_price, member_duration_mins
+      `SELECT id, duration_mins, price, member_price, member_duration_mins, days_of_week
        FROM spa_treatment WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'`,
       [treatment_id, spa_id, property_id]
     );
     if (!treatmentRes.rows.length) { await client.query('ROLLBACK'); return { ok: false, code: 'treatment_not_found' }; }
+    // Treatments the salon only offers on some days. Checked here rather
+    // than only in findSpaAvailability so every booking path refuses a
+    // blocked day -- guest site, AI replies, and the staff dashboard alike.
+    if (!isOfferedOn(treatmentRes.rows[0].days_of_week, date)) {
+      await client.query('ROLLBACK');
+      return { ok: false, code: 'day_not_offered' };
+    }
     const rate = resolveRate(treatmentRes.rows[0], await memberRateUntil(client, property_id, member_email), date);
     if (!rate.ok) { await client.query('ROLLBACK'); return { ok: false, code: rate.code }; }
     const durationMins = rate.durationMins;
@@ -1072,6 +1132,7 @@ const BOOK_FAILURE_HTTP = {
   guest_not_found: [404, 'Guest not found'],
   therapist_not_found: [404, 'Therapist not found'],
   members_only: [403, "That service is only available at the regulars' rate"],
+  day_not_offered: [409, 'That treatment is not offered on that day'],
   unavailable: [409, 'Time is not available'],
 };
 

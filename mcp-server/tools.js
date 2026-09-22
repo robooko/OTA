@@ -751,12 +751,13 @@ function createTools(apiRequest) {
       price: z.number().optional(),
       member_price: z.number().optional(),
       member_duration_mins: z.number().int().optional().describe('Omit when the regulars\' booking is the same length'),
+      days_of_week: z.array(z.number().int().min(1).max(7)).optional().describe('Days the treatment is offered, 1 = Monday .. 7 = Sunday. Omit for every day'),
     },
     run: ({ spa_id, ...body }) => apiRequest('POST', `/api/spa/${spa_id}/treatments`, { body }),
   },
   {
     name: 'update_spa_treatment',
-    description: 'Update a spa treatment. Set status to "inactive" to delete it — there is no hard-delete endpoint. price/member_price/member_duration_mins accept null to clear.',
+    description: 'Update a spa treatment. Set status to "inactive" to delete it — there is no hard-delete endpoint. price/member_price/member_duration_mins/days_of_week accept null to clear.',
     inputSchema: {
       spa_id: z.string(),
       id: z.string(),
@@ -766,6 +767,7 @@ function createTools(apiRequest) {
       price: z.number().nullable().optional(),
       member_price: z.number().nullable().optional(),
       member_duration_mins: z.number().int().nullable().optional(),
+      days_of_week: z.array(z.number().int().min(1).max(7)).nullable().optional().describe('Days the treatment is offered, 1 = Monday .. 7 = Sunday. null = every day'),
       status: z.enum(['active', 'inactive']).optional(),
     },
     run: ({ spa_id, id, ...body }) => apiRequest('PUT', `/api/spa/${spa_id}/treatments/${id}`, { body }),

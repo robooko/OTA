@@ -180,7 +180,13 @@ function buildPropertyBlock(property, restaurant, spa) {
         const regulars = t.member_price != null
           ? ` (regulars' rate ${money(t.member_price, property.currency)}${t.member_duration_mins ? `, ${t.member_duration_mins} min` : ''})`
           : '';
-        text += `      ${neutraliseTags(t.name)} -- ${t.duration_mins} min -- ${standard}${regulars}\n`;
+        // A treatment the venue only offers on some days -- check_availability
+        // already returns nothing for the others, but saying so here stops a
+        // reply offering a day it would then have to take back.
+        const days = t.days_of_week?.length
+          ? ` -- only on ${t.days_of_week.map((d) => DAY_NAMES[d - 1]).join(', ')}`
+          : '';
+        text += `      ${neutraliseTags(t.name)} -- ${t.duration_mins} min -- ${standard}${regulars}${days}\n`;
       }
       // A booking made from a reply can't verify the guest is a regular
       // (lib/spaMemberRate.js), so it always books at the standard price
