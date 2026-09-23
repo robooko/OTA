@@ -1022,7 +1022,7 @@ async function getAppointment(req, res, next) {
 // appointment -- slot-based or computed -- has them.
 async function createAppointmentFromSlot(req, res, next) {
   const { spa_id } = req.params;
-  const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, branding, cancel_url } = req.body;
+  const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, payment_verified, branding, cancel_url } = req.body;
 
   const client = await pool.connect();
   try {
@@ -1065,7 +1065,7 @@ async function createAppointmentFromSlot(req, res, next) {
     }
     let hold = null;
     if (isGuestRail(req)) {
-      const check = await guard.checkGuestBooking(client, { property_id: req.property_id, contact_email, member_email });
+      const check = await guard.checkGuestBooking(client, { property_id: req.property_id, contact_email, member_email, payment_verified: payment_verified === true });
       if (!check.ok) { await client.query('ROLLBACK'); return res.status(429).json({ error: BOOKING_LIMIT_ERROR }); }
       hold = check.hold;
     }
@@ -1160,7 +1160,7 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // see lib/spaMemberRate.js); when it qualifies for the regulars' rate on
 // `date`, the appointment books at member_price/member_duration_mins. The
 // price is frozen onto the appointment either way.
-async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, branding, cancel_url, enforceLeadTime = false, guestRail = false }) {
+async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, payment_verified = false, branding, cancel_url, enforceLeadTime = false, guestRail = false }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1186,7 +1186,7 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
     // email lock first and the two can't deadlock.
     let hold = null;
     if (guestRail) {
-      const check = await guard.checkGuestBooking(client, { property_id, contact_email, member_email });
+      const check = await guard.checkGuestBooking(client, { property_id, contact_email, member_email, payment_verified });
       if (!check.ok) { await client.query('ROLLBACK'); return { ok: false, code: check.code }; }
       hold = check.hold;
     }
@@ -1274,7 +1274,7 @@ const BOOK_FAILURE_HTTP = {
 
 async function createAppointmentFromAvailability(req, res, next) {
   const { spa_id } = req.params;
-  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, branding, cancel_url } = req.body;
+  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, payment_verified, branding, cancel_url } = req.body;
 
   if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
   if (!isValidTime(time)) return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
@@ -1283,6 +1283,7 @@ async function createAppointmentFromAvailability(req, res, next) {
     const result = await bookFromAvailability({
       property_id: req.property_id, spa_id, treatment_id, therapist_id, date, time,
       guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, branding, cancel_url,
+      payment_verified: payment_verified === true,
       enforceLeadTime: isGuestRail(req),
       guestRail: isGuestRail(req),
     });

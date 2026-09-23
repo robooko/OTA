@@ -15,7 +15,9 @@
 // Staff bookings (Clerk bearer) skip both. A signed-in site visitor whose
 // verified email (member_email) matches the booking's contact_email skips
 // the hold -- their address is already proven -- but still counts toward
-// the cap.
+// the cap. So does payment_verified: the site's own server has checked a
+// card hold for this booking (in the site's Stripe account, which OTA can't
+// see), and a bot with a made-up address doesn't get past a card.
 const crypto = require('crypto');
 const pool = require('../db');
 
@@ -84,13 +86,13 @@ async function futureBookingCount(client, propertyId, key) {
 // 'booking_limit' } or { ok: true, hold: { status, confirm_token,
 // confirm_token_hash, hold_expires_at } } -- hold.status is 'pending' or
 // 'confirmed', the other hold fields null when confirmed.
-async function checkGuestBooking(client, { property_id, contact_email, member_email }) {
+async function checkGuestBooking(client, { property_id, contact_email, member_email, payment_verified = false }) {
   const key = emailKey(contact_email);
   await lockEmailKey(client, property_id, key);
   if (await futureBookingCount(client, property_id, key) >= MAX_FUTURE_BOOKINGS) {
     return { ok: false, code: 'booking_limit' };
   }
-  if (member_email && emailKey(member_email) === key) {
+  if (payment_verified || (member_email && emailKey(member_email) === key)) {
     return { ok: true, hold: { status: 'confirmed', confirm_token: null, confirm_token_hash: null, hold_expires_at: null } };
   }
   const { token, hash } = newConfirmToken();
