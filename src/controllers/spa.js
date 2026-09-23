@@ -65,6 +65,38 @@ function isOfferedOn(daysOfWeek, dateStr) {
   return daysOfWeek.includes(sundayFirst === 0 ? 7 : sundayFirst);
 }
 
+// spa.lead_time_hours: minimum notice for a guest booking, NULL = none.
+// Returns the cleaned value, null, or an error string, same shape as
+// normalizeDaysOfWeek. '' and 0 (a cleared number input) mean none too.
+function normalizeLeadTimeHours(value) {
+  if (value == null || value === '' || Number(value) === 0) return { value: null };
+  const hours = Number(value);
+  if (!Number.isInteger(hours) || hours < 1 || hours > 720) {
+    return { error: 'lead_time_hours must be a whole number of hours from 1 to 720, or null for none' };
+  }
+  return { value: hours };
+}
+
+// Does date+time fall inside the salon's lead time? Returns the salon's
+// lead_time_hours when it does, else null (including when it has none).
+// Compared in the property's own timezone, same as isTherapistFree's is_past.
+async function withinLeadTime(db, spaId, date, time) {
+  const { rows } = await db.query(
+    `SELECT s.lead_time_hours,
+            ($2::date + $3::time) < (now() AT TIME ZONE p.timezone) + s.lead_time_hours * interval '1 hour' AS too_soon
+     FROM spa s JOIN property p ON p.id = s.property_id
+     WHERE s.id = $1`,
+    [spaId, date, time]
+  );
+  return rows[0]?.too_soon ? rows[0].lead_time_hours : null;
+}
+
+// Staff (Clerk bearer) book walk-ins and phone calls, so the lead time is
+// for the guest rail only -- the X-Api-Key proxy guest websites use.
+const isGuestRail = (req) => req.auth_method === 'api_key';
+
+const leadTimeError = (hours) => `Bookings need at least ${hours} hour${hours === 1 ? '' : 's'}' notice`;
+
 // ── Spas ──────────────────────────────────────────────────────────────────────
 
 async function listSpas(req, res, next) {
@@ -89,10 +121,12 @@ async function createSpa(req, res, next) {
   try {
     const { name, description, phone, slot_interval_minutes, contact_email, address } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
+    const lead = normalizeLeadTimeHours(req.body.lead_time_hours);
+    if (lead.error) return res.status(400).json({ error: lead.error });
     const { rows } = await pool.query(
-      `INSERT INTO spa (property_id, name, description, phone, slot_interval_minutes, contact_email, address)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, contact_email ?? null, address ?? null]
+      `INSERT INTO spa (property_id, name, description, phone, slot_interval_minutes, contact_email, address, lead_time_hours)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, contact_email ?? null, address ?? null, lead.value]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -101,6 +135,11 @@ async function createSpa(req, res, next) {
 async function updateSpa(req, res, next) {
   try {
     const { name, description, phone, status, slot_interval_minutes, contact_email, address } = req.body;
+    // lead_time_hours is clearable (null = no minimum), so present-in-body
+    // decides rather than COALESCE -- same as updateTreatment's price.
+    const hasLead = Object.prototype.hasOwnProperty.call(req.body, 'lead_time_hours');
+    const lead = normalizeLeadTimeHours(req.body.lead_time_hours);
+    if (lead.error) return res.status(400).json({ error: lead.error });
     const { rows } = await pool.query(
       `UPDATE spa SET
          name                  = COALESCE($1, name),
@@ -109,9 +148,10 @@ async function updateSpa(req, res, next) {
          status                = COALESCE($4, status),
          slot_interval_minutes = COALESCE($5, slot_interval_minutes),
          contact_email         = COALESCE($6, contact_email),
-         address               = COALESCE($7, address)
-       WHERE id = $8 AND property_id = $9 RETURNING *`,
-      [name, description, phone, status, slot_interval_minutes, contact_email, address, req.params.id, req.property_id]
+         address               = COALESCE($7, address),
+         lead_time_hours       = CASE WHEN $8 THEN $9::int ELSE lead_time_hours END
+       WHERE id = $10 AND property_id = $11 RETURNING *`,
+      [name, description, phone, status, slot_interval_minutes, contact_email, address, hasLead, lead.value, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Spa not found' });
     res.json(rows[0]);
@@ -449,10 +489,13 @@ const MAX_AVAILABILITY_DAYS = 31;
 // member_duration_mins when it has a regulars' rate, others the standard
 // duration -- and a regulars-only treatment (price NULL) has no availability
 // at all on dates it doesn't cover.
-async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = null, memberUntil = null) {
+//
+// applyLeadTime hides times inside the salon's lead_time_hours -- true for
+// guests and the AI reply pipeline, false for staff (see isGuestRail).
+async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = null, memberUntil = null, applyLeadTime = true) {
     const { rows } = await pool.query(
       `WITH r AS (
-         SELECT s.slot_interval_minutes, tr.duration_mins, tr.price, tr.member_price, tr.member_duration_mins, tr.days_of_week, p.timezone
+         SELECT s.slot_interval_minutes, s.lead_time_hours, tr.duration_mins, tr.price, tr.member_price, tr.member_duration_mins, tr.days_of_week, p.timezone
          FROM spa s
          JOIN spa_treatment tr ON tr.id = $4
          JOIN property p ON p.id = s.property_id
@@ -517,12 +560,11 @@ async function findSpaAvailability(spaId, from, to, treatmentId, therapistId = n
            AND tof.start_time < c.start_time + (c.duration_mins || ' minutes')::interval
            AND tof.end_time   > c.start_time
        )
-       AND (
-         c.avail_date > (now() AT TIME ZONE r.timezone)::date
-         OR c.start_time > (now() AT TIME ZONE r.timezone)::time
-       )
+       -- Not in the past, nor inside the salon's lead time when it applies.
+       AND (c.avail_date + c.start_time) > (now() AT TIME ZONE r.timezone)
+             + CASE WHEN $7 THEN COALESCE(r.lead_time_hours, 0) ELSE 0 END * interval '1 hour'
        ORDER BY c.avail_date, c.start_time, c.therapist_name`,
-      [spaId, from, to, treatmentId, therapistId, memberUntil]
+      [spaId, from, to, treatmentId, therapistId, memberUntil, applyLeadTime]
     );
 
     const byDate = new Map();
@@ -571,7 +613,7 @@ async function searchSpaAvailability(req, res, next) {
     }
 
     const memberUntil = await memberRateUntil(pool, req.property_id, member_email);
-    const result = await findSpaAvailability(spa_id, from, to, treatment_id, therapist_id ?? null, memberUntil);
+    const result = await findSpaAvailability(spa_id, from, to, treatment_id, therapist_id ?? null, memberUntil, isGuestRail(req));
     res.json(result);
   } catch (err) { next(err); }
 }
@@ -960,6 +1002,10 @@ async function createAppointmentFromSlot(req, res, next) {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'That treatment is not offered on that day' });
     }
+    if (isGuestRail(req)) {
+      const leadTimeHours = await withinLeadTime(client, spa_id, slot.slot_date_text, slot.slot_time);
+      if (leadTimeHours) { await client.query('ROLLBACK'); return res.status(409).json({ error: leadTimeError(leadTimeHours) }); }
+    }
     const endTime = addMinutesToTime(slot.slot_time, treatmentRes.rows[0].duration_mins);
 
     const { rows } = await client.query(
@@ -1033,13 +1079,17 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // when omitted, picks the free therapist with the lowest name (deterministic,
 // no cleverness). Returns { ok: true, appointment } or { ok: false, code }
 // with code one of 'treatment_not_found' | 'guest_not_found' |
-// 'therapist_not_found' | 'members_only' | 'unavailable'.
+// 'therapist_not_found' | 'members_only' | 'day_not_offered' | 'too_soon' |
+// 'unavailable' ('too_soon' also carries leadTimeHours).
+//
+// enforceLeadTime refuses a time inside the salon's lead_time_hours -- the
+// guest rail sets it; staff (dashboard, approving an AI draft) don't.
 //
 // member_email is an email the caller has verified (never contact_email --
 // see lib/spaMemberRate.js); when it qualifies for the regulars' rate on
 // `date`, the appointment books at member_price/member_duration_mins. The
 // price is frozen onto the appointment either way.
-async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, branding, cancel_url }) {
+async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, branding, cancel_url, enforceLeadTime = false }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1056,6 +1106,10 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
     if (!isOfferedOn(treatmentRes.rows[0].days_of_week, date)) {
       await client.query('ROLLBACK');
       return { ok: false, code: 'day_not_offered' };
+    }
+    if (enforceLeadTime) {
+      const leadTimeHours = await withinLeadTime(client, spa_id, date, time);
+      if (leadTimeHours) { await client.query('ROLLBACK'); return { ok: false, code: 'too_soon', leadTimeHours }; }
     }
     const rate = resolveRate(treatmentRes.rows[0], await memberRateUntil(client, property_id, member_email), date);
     if (!rate.ok) { await client.query('ROLLBACK'); return { ok: false, code: rate.code }; }
@@ -1147,8 +1201,10 @@ async function createAppointmentFromAvailability(req, res, next) {
     const result = await bookFromAvailability({
       property_id: req.property_id, spa_id, treatment_id, therapist_id, date, time,
       guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, branding, cancel_url,
+      enforceLeadTime: isGuestRail(req),
     });
     if (!result.ok) {
+      if (result.code === 'too_soon') return res.status(409).json({ error: leadTimeError(result.leadTimeHours) });
       const [status, error] = BOOK_FAILURE_HTTP[result.code];
       return res.status(status).json({ error });
     }
@@ -1207,6 +1263,7 @@ async function updateAppointment(req, res, next) {
 
     const beforeRes = await client.query(
       `SELECT sa.status, sa.slot_id, sa.treatment_id, sa.therapist_id, sa.appointment_date, sa.start_time,
+              sa.appointment_date::text AS appointment_date_text,
               -- The appointment's own length, not the treatment's: a
               -- regulars'-rate booking can run member_duration_mins.
               (EXTRACT(EPOCH FROM (sa.end_time - sa.start_time)) / 60)::int AS duration_mins
@@ -1244,6 +1301,12 @@ async function updateAppointment(req, res, next) {
         [spa_id]
       );
       const timezone = propertyRes.rows[0].timezone;
+
+      // A guest moving their own booking is held to the lead time too.
+      if (isGuestRail(req)) {
+        const leadTimeHours = await withinLeadTime(client, spa_id, appointment_date ?? before.appointment_date_text, effectiveTime);
+        if (leadTimeHours) { await client.query('ROLLBACK'); return res.status(409).json({ error: leadTimeError(leadTimeHours) }); }
+      }
 
       const free = await isTherapistFree(client, effectiveTherapistId, effectiveDate, effectiveTime, before.duration_mins, timezone, id);
       if (!free) {

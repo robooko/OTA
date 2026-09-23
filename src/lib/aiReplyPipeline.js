@@ -79,7 +79,7 @@ function publishUpdated(propertyId, inquiryId, draft, spaId = null) {
 // instead of duplicating (and drifting from) the DB.
 async function loadSpaContext(spaId) {
   const [{ rows: [spa] }, { rows: treatments }, { rows: hours }] = await Promise.all([
-    pool.query('SELECT name, description, phone, address FROM spa WHERE id = $1', [spaId]),
+    pool.query('SELECT name, description, phone, address, lead_time_hours FROM spa WHERE id = $1', [spaId]),
     pool.query(
       "SELECT name, duration_mins, price, member_price, member_duration_mins, days_of_week FROM spa_treatment WHERE spa_id = $1 AND status = 'active' ORDER BY name",
       [spaId]

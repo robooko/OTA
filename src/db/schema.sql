@@ -433,6 +433,9 @@ CREATE TABLE IF NOT EXISTS spa (
   slot_interval_minutes INT          NOT NULL DEFAULT 15, -- step between computed availability candidates; see spa_therapist_hours
   contact_email         VARCHAR(255), -- reply-to on booking confirmation/cancellation emails
   address               TEXT,         -- shown in booking confirmation/cancellation emails
+  -- Minimum notice (hours) for a guest/AI booking; NULL = none. Staff are
+  -- exempt. See migrate-2026-09-23-spa-lead-time.sql.
+  lead_time_hours       INT CONSTRAINT spa_lead_time_hours_valid CHECK (lead_time_hours IS NULL OR lead_time_hours BETWEEN 1 AND 720),
   created_at            TIMESTAMPTZ DEFAULT now()
 );
 

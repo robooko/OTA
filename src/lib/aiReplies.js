@@ -173,6 +173,9 @@ function buildPropertyBlock(property, restaurant, spa) {
     if (spa.description) text += `    ${neutraliseTags(spa.description)}\n`;
     if (spa.address) text += `    Address: ${neutraliseTags(spa.address)}\n`;
     if (spa.phone) text += `    Phone: ${neutraliseTags(spa.phone)}\n`;
+    // check_availability already hides times inside it; stating it stops a
+    // reply promising "later today" when the salon needs more notice.
+    if (spa.lead_time_hours) text += `    Bookings need at least ${spa.lead_time_hours} hours' notice.\n`;
     if (spa.treatments?.length) {
       text += '    Services (duration, price):\n';
       for (const t of spa.treatments) {
