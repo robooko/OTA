@@ -9,8 +9,13 @@ const {
   publishSpaBookingStatusChangedForSpa,
   client: ablyClient,
 } = require('../lib/ably');
-const { sendAppointmentConfirmation, sendAppointmentCancellation, escapeHtml } = require('../lib/resend');
+const { sendAppointmentConfirmation, sendAppointmentCancellation, sendAppointmentHoldRequest, escapeHtml, formatAppointmentDate } = require('../lib/resend');
 const { memberRateUntil, resolveRate } = require('../lib/spaMemberRate');
+const guard = require('../lib/spaBookingGuard');
+
+// Public base for links in emails that land back on this API -- same
+// hard-coded host reminders.js/reviewRequester.js use for their opt-outs.
+const OTA_API_BASE_URL = 'https://ota-u6ii.onrender.com';
 
 // Steps a 'YYYY-MM-DD' string forward by whole days via UTC epoch math --
 // `new Date(str); d.setDate(d.getDate() + 1)` looks equivalent but
@@ -96,6 +101,9 @@ async function withinLeadTime(db, spaId, date, time) {
 const isGuestRail = (req) => req.auth_method === 'api_key';
 
 const leadTimeError = (hours) => `Bookings need at least ${hours} hour${hours === 1 ? '' : 's'}' notice`;
+
+const BOOKING_LIMIT_ERROR = `There are already ${guard.MAX_FUTURE_BOOKINGS} upcoming bookings for this email address -- cancel one, or call us, to book another`;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // ── Spas ──────────────────────────────────────────────────────────────────────
 
@@ -860,6 +868,49 @@ async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawI
   }
 }
 
+// Post-commit for any new appointment. A confirmed one goes out as before;
+// a guest hold ('pending') instead gets only the "confirm your booking"
+// email -- no live-feed publish, no confirmation email -- and confirmBooking
+// runs publishAndEmailAfterCreate when the link is clicked. Never throws.
+async function afterAppointmentCreated(spaId, propertyId, row, hold, branding, cancelUrl) {
+  if (row.status !== 'pending') {
+    return publishAndEmailAfterCreate(spaId, propertyId, row.id, row, branding, cancelUrl);
+  }
+  try {
+    const { branding: resolved } = await resolveEmailBranding(propertyId, branding, null);
+    const full = await getFullAppointmentForEmail(row.id);
+    const confirmUrl = `${OTA_API_BASE_URL}/api/spa/confirm-booking/${row.id}/${hold.confirm_token}`;
+    await sendAppointmentHoldRequest(full, full.property_name, resolved, confirmUrl, guard.HOLD_MINUTES);
+  } catch (err) {
+    // The hold simply lapses and releases the time -- nothing to undo.
+    console.error('Booking hold email failed:', err.message);
+  }
+}
+
+// The INSERT columns every guest-rail-aware path shares, beyond its own.
+// `hold` is from guard.checkGuestBooking, or null for staff (confirmed, no
+// hold). pending_email_opts keeps the request's branding/cancel_url for the
+// confirmation email sent at confirm time; JSON drops undefined keys, which
+// is what keeps "not supplied" (use property defaults) distinct from null.
+function holdColumns(hold, contactEmail, branding, cancelUrl) {
+  const pending = hold?.status === 'pending';
+  return [
+    hold?.status ?? 'confirmed',
+    guard.emailKey(contactEmail),
+    pending ? hold.confirm_token_hash : null,
+    pending ? hold.hold_expires_at : null,
+    pending ? JSON.stringify({ branding, cancel_url: cancelUrl }) : null,
+  ];
+}
+
+// Guest-facing shape of a new appointment: the internal hold fields are
+// dropped and `awaiting_email_confirmation` says what the guest needs to
+// do next.
+function createdAppointmentBody(row) {
+  const { confirm_token_hash, pending_email_opts, ...rest } = row;
+  return { ...rest, awaiting_email_confirmation: row.status === 'pending' };
+}
+
 async function listAppointmentsForProperty(req, res, next) {
   try {
     const { cursor, limit, spa_id, therapist_id, date, from, to } = req.query;
@@ -871,7 +922,10 @@ async function listAppointmentsForProperty(req, res, next) {
       JOIN spa_therapist st ON st.id = sa.therapist_id
       JOIN spa_treatment tr ON tr.id = sa.treatment_id
       WHERE sa.property_id = $1
+        AND sa.status <> 'pending'
     `;
+    // ^ An unconfirmed guest hold (lib/spaBookingGuard.js) isn't a booking
+    // yet -- it reaches the live feeds when the guest confirms it.
     const params = [req.property_id];
     // Optional -- the spa dashboard's own feed scopes to one spa; the
     // property dashboard omits this to show bookings across every spa (and
@@ -917,6 +971,9 @@ async function listAppointments(req, res, next) {
     if (from) { params.push(from); query += ` AND sa.appointment_date >= $${params.length}`; }
     if (to) { params.push(to); query += ` AND sa.appointment_date <= $${params.length}`; }
     if (status) { params.push(status); query += ` AND sa.status = $${params.length}`; }
+    // Unconfirmed guest holds only when asked for by status -- same
+    // reasoning as listAppointmentsForProperty.
+    else query += " AND sa.status <> 'pending'";
     if (guest_id) { params.push(guest_id); query += ` AND sa.guest_id = $${params.length}`; }
     if (clerk_user_id) { params.push(clerk_user_id); query += ` AND sa.clerk_user_id = $${params.length}`; }
     if (therapist_id) { params.push(therapist_id); query += ` AND sa.therapist_id = $${params.length}`; }
@@ -965,7 +1022,7 @@ async function getAppointment(req, res, next) {
 // appointment -- slot-based or computed -- has them.
 async function createAppointmentFromSlot(req, res, next) {
   const { spa_id } = req.params;
-  const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, branding, cancel_url } = req.body;
+  const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, branding, cancel_url } = req.body;
 
   const client = await pool.connect();
   try {
@@ -1006,23 +1063,31 @@ async function createAppointmentFromSlot(req, res, next) {
       const leadTimeHours = await withinLeadTime(client, spa_id, slot.slot_date_text, slot.slot_time);
       if (leadTimeHours) { await client.query('ROLLBACK'); return res.status(409).json({ error: leadTimeError(leadTimeHours) }); }
     }
+    let hold = null;
+    if (isGuestRail(req)) {
+      const check = await guard.checkGuestBooking(client, { property_id: req.property_id, contact_email, member_email });
+      if (!check.ok) { await client.query('ROLLBACK'); return res.status(429).json({ error: BOOKING_LIMIT_ERROR }); }
+      hold = check.hold;
+    }
     const endTime = addMinutesToTime(slot.slot_time, treatmentRes.rows[0].duration_mins);
 
     const { rows } = await client.query(
       `INSERT INTO spa_appointment
          (property_id, slot_id, treatment_id, therapist_id, appointment_date, start_time, end_time,
-          guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, price)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+          guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, price,
+          status, contact_email_key, confirm_token_hash, hold_expires_at, pending_email_opts)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING *`,
       [
         req.property_id, slot_id, slot.treatment_id, slot.therapist_id, slot.slot_date, slot.slot_time, endTime,
         guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
         treatmentRes.rows[0].price,
+        ...holdColumns(hold, contact_email, branding, cancel_url),
       ]
     );
 
     await client.query('COMMIT');
-    await publishAndEmailAfterCreate(spa_id, req.property_id, rows[0].id, rows[0], branding, cancel_url);
-    res.status(201).json(rows[0]);
+    await afterAppointmentCreated(spa_id, req.property_id, rows[0], hold, branding, cancel_url);
+    res.status(201).json(createdAppointmentBody(rows[0]));
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -1085,11 +1150,17 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // enforceLeadTime refuses a time inside the salon's lead_time_hours -- the
 // guest rail sets it; staff (dashboard, approving an AI draft) don't.
 //
+// guestRail applies lib/spaBookingGuard.js: 'booking_limit' past the
+// per-email cap, otherwise the appointment may insert as a 'pending' hold
+// awaiting the guest's email confirmation. The caller must already have
+// required contact_email. Off for staff and for the AI reply pipeline
+// (whose guest emailed us from that address in the first place).
+//
 // member_email is an email the caller has verified (never contact_email --
 // see lib/spaMemberRate.js); when it qualifies for the regulars' rate on
 // `date`, the appointment books at member_price/member_duration_mins. The
 // price is frozen onto the appointment either way.
-async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, branding, cancel_url, enforceLeadTime = false }) {
+async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, branding, cancel_url, enforceLeadTime = false, guestRail = false }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1110,6 +1181,14 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
     if (enforceLeadTime) {
       const leadTimeHours = await withinLeadTime(client, spa_id, date, time);
       if (leadTimeHours) { await client.query('ROLLBACK'); return { ok: false, code: 'too_soon', leadTimeHours }; }
+    }
+    // Before the barber-row locks below, so every transaction takes the
+    // email lock first and the two can't deadlock.
+    let hold = null;
+    if (guestRail) {
+      const check = await guard.checkGuestBooking(client, { property_id, contact_email, member_email });
+      if (!check.ok) { await client.query('ROLLBACK'); return { ok: false, code: check.code }; }
+      hold = check.hold;
     }
     const rate = resolveRate(treatmentRes.rows[0], await memberRateUntil(client, property_id, member_email), date);
     if (!rate.ok) { await client.query('ROLLBACK'); return { ok: false, code: rate.code }; }
@@ -1161,17 +1240,19 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
     const { rows } = await client.query(
       `INSERT INTO spa_appointment
          (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time,
-          guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, price, member_rate)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+          guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, price, member_rate,
+          status, contact_email_key, confirm_token_hash, hold_expires_at, pending_email_opts)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING *`,
       [
         property_id, treatment_id, chosenTherapistId, date, time, endTime,
         guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
         rate.price, rate.memberRate,
+        ...holdColumns(hold, contact_email, branding, cancel_url),
       ]
     );
 
     await client.query('COMMIT');
-    await publishAndEmailAfterCreate(spa_id, property_id, rows[0].id, rows[0], branding, cancel_url);
+    await afterAppointmentCreated(spa_id, property_id, rows[0], hold, branding, cancel_url);
     return { ok: true, appointment: rows[0] };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1188,6 +1269,7 @@ const BOOK_FAILURE_HTTP = {
   members_only: [403, "That service is only available at the regulars' rate"],
   day_not_offered: [409, 'That treatment is not offered on that day'],
   unavailable: [409, 'Time is not available'],
+  booking_limit: [429, BOOKING_LIMIT_ERROR],
 };
 
 async function createAppointmentFromAvailability(req, res, next) {
@@ -1202,13 +1284,14 @@ async function createAppointmentFromAvailability(req, res, next) {
       property_id: req.property_id, spa_id, treatment_id, therapist_id, date, time,
       guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, branding, cancel_url,
       enforceLeadTime: isGuestRail(req),
+      guestRail: isGuestRail(req),
     });
     if (!result.ok) {
       if (result.code === 'too_soon') return res.status(409).json({ error: leadTimeError(result.leadTimeHours) });
       const [status, error] = BOOK_FAILURE_HTTP[result.code];
-      return res.status(status).json({ error });
+      return res.status(status).json({ error, code: result.code });
     }
-    res.status(201).json(result.appointment);
+    res.status(201).json(createdAppointmentBody(result.appointment));
   } catch (err) {
     next(err);
   }
@@ -1221,6 +1304,11 @@ async function createAppointment(req, res, next) {
     return res.status(400).json({ error: 'Provide either slot_id or treatment_id, not both' });
   }
   if (!contact_name) return res.status(400).json({ error: 'contact_name is required' });
+  // The guest rail's per-email cap and confirmation hold both hang off the
+  // email, so a guest booking without one can't be let through.
+  if (isGuestRail(req) && !EMAIL_RE.test(req.body.contact_email || '')) {
+    return res.status(400).json({ error: 'A valid contact_email is required to book online' });
+  }
 
   const brandingError = validateBranding(branding);
   if (brandingError) return res.status(400).json({ error: brandingError });
@@ -1376,6 +1464,73 @@ async function updateAppointment(req, res, next) {
   }
 }
 
+// GET, unauthenticated -- the link in the "confirm your booking" email
+// (afterAppointmentCreated). Unlike the opt-out links below, the capability
+// is the separate token, not the appointment id: the id goes back to
+// whoever made the booking, and the point is to prove they can read the
+// inbox. Idempotent, so a mail scanner prefetching the link just confirms
+// it early (which still proves the mailbox exists).
+function confirmPage(title, body) {
+  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title>
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:480px;margin:48px auto;padding:0 16px;color:#1a1a1a;line-height:1.6;">
+  <h1 style="font-size:20px;margin:0 0 12px;">${escapeHtml(title)}</h1><p style="margin:0;">${body}</p></div>`;
+}
+
+async function confirmBooking(req, res, next) {
+  const { appointment_id, token } = req.params;
+  if (!/^[0-9a-f-]{36}$/i.test(appointment_id)) return res.status(404).send(confirmPage('Link not valid', 'That link is no longer valid.'));
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [appt] } = await client.query(
+      `SELECT sa.*, st.spa_id, tr.name AS treatment_name, p.name AS property_name,
+              sa.hold_expires_at <= now() AS hold_lapsed
+       FROM spa_appointment sa
+       JOIN spa_therapist st ON st.id = sa.therapist_id
+       JOIN spa_treatment tr ON tr.id = sa.treatment_id
+       JOIN property p ON p.id = sa.property_id
+       WHERE sa.id = $1
+       FOR UPDATE OF sa`,
+      [appointment_id]
+    );
+    if (!appt || !guard.tokenMatches(token, appt.confirm_token_hash)) {
+      await client.query('ROLLBACK');
+      return res.status(404).send(confirmPage('Link not valid', 'That link is no longer valid.'));
+    }
+
+    const when = `${escapeHtml(appt.treatment_name)}, ${escapeHtml(formatAppointmentDate(appt.appointment_date))} at ${escapeHtml(appt.start_time.slice(0, 5))}`;
+    if (appt.status !== 'pending') {
+      await client.query('ROLLBACK');
+      return appt.status === 'cancelled'
+        ? res.status(410).send(confirmPage('Booking released', `This booking (${when}) wasn't confirmed in time, so the slot was released. Please book again.`))
+        : res.send(confirmPage('Booking confirmed', `Your booking at ${escapeHtml(appt.property_name)} is confirmed: ${when}.`));
+    }
+    if (appt.hold_lapsed) {
+      // Beat the sweep to it -- same outcome.
+      await client.query("UPDATE spa_appointment SET status = 'cancelled' WHERE id = $1", [appt.id]);
+      await client.query('COMMIT');
+      return res.status(410).send(confirmPage('Booking released', `This booking (${when}) wasn't confirmed in time, so the slot was released. Please book again.`));
+    }
+
+    const { rows: [confirmed] } = await client.query(
+      `UPDATE spa_appointment SET status = 'confirmed', hold_expires_at = NULL, pending_email_opts = NULL
+       WHERE id = $1 RETURNING *`,
+      [appt.id]
+    );
+    await client.query('COMMIT');
+
+    const opts = appt.pending_email_opts || {};
+    await publishAndEmailAfterCreate(appt.spa_id, appt.property_id, confirmed.id, confirmed, opts.branding, opts.cancel_url);
+    res.send(confirmPage('Booking confirmed', `Your booking at ${escapeHtml(appt.property_name)} is confirmed: ${when}. A confirmation email is on its way.`));
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
 // GET, unauthenticated -- the appointment UUID is the capability (unguessable,
 // only ever in that customer's own review-request email), same reasoning as
 // the {id} cancel link. Idempotent: a mail client prefetching the link is
@@ -1454,6 +1609,7 @@ module.exports = {
   listAppointmentsForProperty,
   getFullAppointmentForEmail,
   resolveEmailBranding,
+  confirmBooking,
   reviewOptOut,
   reminderOptOut,
 };

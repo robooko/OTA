@@ -240,12 +240,15 @@ function addressFooterHtml({ address, phone }, extraHtml = '') {
 // by spa.js's validateBranding) only affects the HTML header's logo/colors,
 // and `cancelUrl` (validated http(s) URL) only adds a cancel link/button --
 // neither is persisted, and neither can touch the booking text itself.
-async function sendAppointmentEmail(appointment, propertyName, verb, extraLines, branding, cancelUrl, extraFooterHtml = '', extraFooterLines = []) {
+// `action` ({ subject, label, url }, optional) replaces the "Booking <verb>"
+// subject lead and adds a primary button in place of the cancel one -- the
+// hold email's "Confirm booking".
+async function sendAppointmentEmail(appointment, propertyName, verb, extraLines, branding, cancelUrl, extraFooterHtml = '', extraFooterLines = [], action = null) {
   if (!client) throw new Error('Resend not configured');
   const dateLabel = formatAppointmentDate(appointment.appointment_date);
   const timeLabel = appointment.start_time.slice(0, 5);
   const price = formatMoney(appointment.price, appointment.property_currency);
-  const subject = `Booking ${verb} — ${appointment.treatment_name}, ${dateLabel} at ${timeLabel}`;
+  const subject = `${action?.subject ?? `Booking ${verb}`} — ${appointment.treatment_name}, ${dateLabel} at ${timeLabel}`;
 
   const lines = [
     `Hi ${appointment.contact_name},`,
@@ -255,6 +258,7 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
     '',
     ...extraLines,
   ];
+  if (action) lines.push(`${action.label}: ${action.url}`, '');
   if (cancelUrl) lines.push(`Cancel your booking: ${cancelUrl}`, '');
   // Footer-only content (e.g. an unsubscribe URL): appended once here for
   // the text part, and separately as extraFooterHtml for the HTML part --
@@ -282,9 +286,10 @@ async function sendAppointmentEmail(appointment, propertyName, verb, extraLines,
     .map((l) => `<p style="margin:0 0 12px;">${escapeHtml(l)}</p>`)
     .join('');
 
-  const cancelHtml = cancelUrl
+  const button = action ? { url: action.url, label: action.label } : cancelUrl ? { url: cancelUrl, label: 'Cancel booking' } : null;
+  const cancelHtml = button
     ? `<div style="margin:20px 0;">
-        <a href="${escapeHtml(cancelUrl)}" style="display:inline-block;background:${branding?.brand_color || '#1a1a1a'};color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:6px;">Cancel booking</a>
+        <a href="${escapeHtml(button.url)}" style="display:inline-block;background:${branding?.brand_color || '#1a1a1a'};color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:6px;">${escapeHtml(button.label)}</a>
       </div>`
     : '';
 
@@ -320,6 +325,17 @@ function sendAppointmentConfirmation(appointment, propertyName, branding, cancel
       : 'Need to change or cancel? Just give us a call.',
     '',
   ], branding, cancelUrl);
+}
+
+// A guest-rail booking held as 'pending' until this link is clicked (see
+// src/lib/spaBookingGuard.js). No cancel link: ignoring the email is how
+// you decline it.
+function sendAppointmentHoldRequest(appointment, propertyName, branding, confirmUrl, holdMinutes) {
+  return sendAppointmentEmail(appointment, propertyName, 'pending', [
+    `We're holding this time for you for ${holdMinutes} minutes. Confirm it with the button below and it's booked; otherwise the time is released.`,
+    "Didn't book this? Just ignore this email.",
+    '',
+  ], branding, null, '', [], { subject: 'Confirm your booking', label: 'Confirm booking', url: confirmUrl });
 }
 
 function sendAppointmentCancellation(appointment, propertyName, branding) {
@@ -564,6 +580,7 @@ module.exports = {
   sendInquiryForward,
   sendAppointmentConfirmation,
   sendAppointmentCancellation,
+  sendAppointmentHoldRequest,
   sendSpaReminder,
   sendReservationReminder,
   sendReviewRequest,

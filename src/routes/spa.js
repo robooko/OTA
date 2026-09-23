@@ -8,6 +8,9 @@ const { authenticateOrApiKey } = require('../middleware/auth');
 // behind authenticateOrApiKey.
 router.get('/review-opt-out/:appointment_id', ctrl.reviewOptOut);
 router.get('/reminder-opt-out/:appointment_id/:channel', ctrl.reminderOptOut);
+// The "confirm your booking" link for a guest hold -- the token in the URL
+// is the capability (see ctrl.confirmBooking).
+router.get('/confirm-booking/:appointment_id/:token', ctrl.confirmBooking);
 
 // Spas
 router.get('/', authenticateOrApiKey, ctrl.listSpas);

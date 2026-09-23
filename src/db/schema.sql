@@ -555,6 +555,12 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
   -- Frozen at booking time -- see migrate-2026-09-21-spa-member-pricing.sql.
   price                    NUMERIC(10,2),
   member_rate              BOOLEAN NOT NULL DEFAULT false,
+  -- Guest-rail per-email cap + email-confirmation hold ('pending' status)
+  -- -- see migrate-2026-09-23-spa-booking-guards.sql.
+  contact_email_key        VARCHAR(255),
+  confirm_token_hash       TEXT,
+  hold_expires_at          TIMESTAMPTZ,
+  pending_email_opts       JSONB,
   created_at                    TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT spa_appointment_payment_status CHECK (payment_status IN ('unpaid', 'paid'))
 );
@@ -582,6 +588,8 @@ CREATE TABLE IF NOT EXISTS reminder_opt_out (
 
 CREATE INDEX IF NOT EXISTS idx_spa_treatment_spa       ON spa_treatment(spa_id);
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_property_email ON spa_appointment (property_id, lower(contact_email));
+CREATE INDEX IF NOT EXISTS idx_spa_appointment_property_email_key ON spa_appointment (property_id, contact_email_key);
+CREATE INDEX IF NOT EXISTS idx_spa_appointment_pending_hold ON spa_appointment (hold_expires_at) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_spa       ON spa_therapist(spa_id);
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_clerk_user ON spa_therapist(clerk_user_id);
 CREATE INDEX IF NOT EXISTS idx_spa_slot_therapist_date ON spa_slot(therapist_id, slot_date);

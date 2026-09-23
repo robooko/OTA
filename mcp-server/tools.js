@@ -856,7 +856,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'create_spa_appointment',
-    description: 'Book a spa appointment. Preferred: treatment_id + date + time (computed against working hours, therapist_id optional -- omit to auto-pick whoever is free). Legacy: slot_id alone, against a pre-generated spa_slot. Provide one or the other, not both. A confirmation email sends automatically when contact_email is given.',
+    description: 'Book a spa appointment. Preferred: treatment_id + date + time (computed against working hours, therapist_id optional -- omit to auto-pick whoever is free). Legacy: slot_id alone, against a pre-generated spa_slot. Provide one or the other, not both. A confirmation email sends automatically when contact_email is given. With an X-Api-Key (guest booking): contact_email is required, each email can hold at most 3 upcoming bookings (429 past that), and the booking comes back status "pending" with awaiting_email_confirmation: true -- the guest must click the link emailed to them within 30 minutes or the time is released. Tell the guest to check their inbox.',
     inputSchema: {
       spa_id: z.string(),
       slot_id: z.string().optional().describe('Legacy flow: book this pre-generated slot directly'),
