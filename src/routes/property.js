@@ -37,11 +37,6 @@ router.get('/ai-replies', authenticateOrApiKey, ctrl.getAiReplySettings);
 router.put('/ai-replies', authenticate, requireRole('admin'), ctrl.updateAiReplySettings);
 router.put('/ai-replies/instructions', authenticateOrApiKey, ctrl.updateAiReplyInstructions);
 
-// Both on the API-key rail: the venue site's server proxy reads the cached
-// reviews, and onboarding tooling/MCP sets the place id.
-router.get('/google-reviews', authenticateOrApiKey, ctrl.getGoogleReviews);
-router.put('/google-place-id', authenticateOrApiKey, ctrl.setGooglePlaceId);
-
 // On the API-key rail for the same reason as /me above -- logo, colour and
 // cancel link are the venue's own presentation settings, not something that
 // changes what runs unsupervised -- so the MCP get/update_email_branding

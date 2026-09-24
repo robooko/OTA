@@ -3,17 +3,7 @@ const pool = require('../db');
 const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate, isValidUuid, validateBranding, validateCancelUrl } = require('../middleware/validate');
 const { isConfigured: aiConfigured, MODEL: AI_MODEL } = require('../lib/aiReplies');
 const twilio = require('../lib/twilio');
-const googleReviews = require('../lib/googleReviews');
 const googleAnalytics = require('../lib/googleAnalytics');
-
-// One Places call per property per window; stale cache always beats an
-// error, so a Google outage degrades to yesterday's numbers, not a broken
-// section on the venue's site.
-const GOOGLE_REVIEWS_TTL_MS = 12 * 60 * 60 * 1000;
-// Kill switch, off by default (2026-09-10): no Places call is made and no
-// cached copy is served until GOOGLE_REVIEWS_ENABLED=true is set on the
-// server. Websites already treat a non-200 as "hide the reviews section".
-const GOOGLE_REVIEWS_ENABLED = process.env.GOOGLE_REVIEWS_ENABLED === 'true';
 
 // Toggleable sidebar modules/dashboard sections -- see
 // migrate-2026-09-12-property-enabled-modules.sql. Dashboard/Settings/Docs/
@@ -112,67 +102,6 @@ async function updateCurrentProperty(req, res, next) {
         enabled_modules != null ? JSON.stringify(enabled_modules) : null, enabled_modules !== undefined,
         req.property_id]
     );
-    res.json(rows[0]);
-  } catch (err) {
-    next(err);
-  }
-}
-
-// Live Google reviews for the property's website (rating, count, latest
-// quotes, write-a-review link), lazily cached in google_reviews_cache.
-async function getGoogleReviews(req, res, next) {
-  try {
-    if (!GOOGLE_REVIEWS_ENABLED) {
-      return res.status(503).json({ error: 'Google reviews are turned off on this server' });
-    }
-    const { rows } = await pool.query('SELECT google_place_id FROM property WHERE id = $1', [req.property_id]);
-    const placeId = rows[0]?.google_place_id;
-    if (!placeId) {
-      return res.status(404).json({ error: 'No Google place id configured for this property' });
-    }
-    const cached = await pool.query(
-      'SELECT payload, fetched_at FROM google_reviews_cache WHERE property_id = $1',
-      [req.property_id]
-    );
-    const cacheRow = cached.rows[0];
-    const fresh = cacheRow && Date.now() - new Date(cacheRow.fetched_at).getTime() < GOOGLE_REVIEWS_TTL_MS;
-    if (fresh) {
-      return res.json({ ...cacheRow.payload, fetched_at: cacheRow.fetched_at });
-    }
-    if (!googleReviews.isConfigured()) {
-      if (cacheRow) return res.json({ ...cacheRow.payload, fetched_at: cacheRow.fetched_at });
-      return res.status(503).json({ error: 'Google reviews are not configured on this server' });
-    }
-    const payload = await googleReviews.fetchPlaceReviews(placeId);
-    if (!payload) {
-      if (cacheRow) return res.json({ ...cacheRow.payload, fetched_at: cacheRow.fetched_at });
-      return res.status(502).json({ error: 'Failed to fetch reviews from Google' });
-    }
-    await pool.query(
-      `INSERT INTO google_reviews_cache (property_id, payload, fetched_at)
-       VALUES ($1, $2, now())
-       ON CONFLICT (property_id) DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now()`,
-      [req.property_id, payload]
-    );
-    res.json({ ...payload, fetched_at: new Date().toISOString() });
-  } catch (err) {
-    next(err);
-  }
-}
-
-// On the API-key rail (like ai-replies/instructions) so onboarding tooling
-// and the MCP can set it. Changing the place id invalidates the cache.
-async function setGooglePlaceId(req, res, next) {
-  try {
-    const { place_id } = req.body;
-    if (place_id !== null && (typeof place_id !== 'string' || !place_id.trim() || place_id.length > 300)) {
-      return res.status(400).json({ error: 'place_id must be a non-empty string (or null to clear)' });
-    }
-    const { rows } = await pool.query(
-      'UPDATE property SET google_place_id = $1 WHERE id = $2 RETURNING id, google_place_id',
-      [place_id === null ? null : place_id.trim(), req.property_id]
-    );
-    await pool.query('DELETE FROM google_reviews_cache WHERE property_id = $1', [req.property_id]);
     res.json(rows[0]);
   } catch (err) {
     next(err);
@@ -858,5 +787,4 @@ module.exports = {
   setVercelPat, clearVercelPat,
   getStripeStatus, setStripeKey, clearStripeKey,
   getAiReplySettings, updateAiReplySettings, updateAiReplyInstructions,
-  getGoogleReviews, setGooglePlaceId,
 };
