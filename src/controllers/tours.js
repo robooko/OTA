@@ -59,14 +59,40 @@ async function createTour(req, res, next) {
 }
 
 async function updateTour(req, res, next) {
+  const { name, description, duration_mins, max_group_size, price, status, departure_times } = req.body;
+  const timetableError = timetableValidationError(req.body);
+  if (timetableError) return res.status(400).json({ error: timetableError });
+  if (max_group_size != null && (!Number.isInteger(max_group_size) || max_group_size < 1)) {
+    return res.status(400).json({ error: 'max_group_size must be a positive integer' });
+  }
+  // departure_days is the one field where an explicit null means something
+  // (back to every day), so it can't go through COALESCE like the rest.
+  const setDays = 'departure_days' in req.body;
+  const client = await pool.connect();
   try {
-    const { name, description, duration_mins, max_group_size, price, status, departure_times } = req.body;
-    const timetableError = timetableValidationError(req.body);
-    if (timetableError) return res.status(400).json({ error: timetableError });
-    // departure_days is the one field where an explicit null means something
-    // (back to every day), so it can't go through COALESCE like the rest.
-    const setDays = 'departure_days' in req.body;
-    const { rows } = await pool.query(
+    await client.query('BEGIN');
+    // A capacity cut must not strand seats already sold on an upcoming
+    // slot. The tour row lock conflicts with createBooking's FOR SHARE, so
+    // no booking can slip in between this check and the update.
+    if (max_group_size != null) {
+      const { rows: [tour] } = await client.query(
+        'SELECT id FROM tour WHERE id = $1 AND property_id = $2 FOR UPDATE', [req.params.id, req.property_id]
+      );
+      if (!tour) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tour not found' }); }
+      const { rows: [{ peak }] } = await client.query(
+        `SELECT COALESCE(MAX(booked), 0)::int AS peak FROM (
+           SELECT SUM(tb.group_size) AS booked
+           FROM tour_booking tb JOIN tour_slot ts ON ts.id = tb.slot_id
+           WHERE ts.tour_id = $1 AND ts.slot_date >= CURRENT_DATE AND tb.status != 'cancelled'
+           GROUP BY ts.id
+         ) s`, [req.params.id]
+      );
+      if (max_group_size < peak) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: `An upcoming slot already has ${peak} seats booked -- max_group_size can't go below that` });
+      }
+    }
+    const { rows } = await client.query(
       `UPDATE tour SET
          name            = COALESCE($1, name),
          description     = COALESCE($2, description),
@@ -79,12 +105,18 @@ async function updateTour(req, res, next) {
        WHERE id = $10 AND property_id = $11 RETURNING *`,
       [name, description, duration_mins, max_group_size, price, status, departure_times, setDays, req.body.departure_days ?? null, req.params.id, req.property_id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Tour not found' });
+    if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tour not found' }); }
+    await client.query('COMMIT');
     // Existing slots may carry bookings or staff edits -- a timetable change
     // only shapes slots not yet materialised.
     seedIfScheduled(rows[0]);
     res.json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
 }
 
 // Hard delete of a tour or a single slot, taking its slots and bookings with
@@ -226,20 +258,32 @@ async function listBookings(req, res, next) {
 
 async function createBooking(req, res, next) {
   const { slot_id, guest_id, contact_name, contact_email, contact_phone, group_size, notes } = req.body;
-  if (!slot_id || !contact_name || !group_size) {
+  if (!slot_id || !contact_name || group_size == null) {
     return res.status(400).json({ error: 'slot_id, contact_name, and group_size are required' });
+  }
+  if (!Number.isInteger(group_size) || group_size < 1) {
+    return res.status(400).json({ error: 'group_size must be a positive integer' });
   }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    // Locking the slot row serialises concurrent bookings for it, so two
+    // requests can't both pass the seat check below on the same stale
+    // count. FOR SHARE on the tour blocks a concurrent capacity cut
+    // (updateTour) without serialising bookings across different slots.
     const slotRes = await client.query(
-      `SELECT ts.*, t.max_group_size, t.price
+      `SELECT ts.*, t.max_group_size, t.price, t.status AS tour_status
        FROM tour_slot ts JOIN tour t ON t.id = ts.tour_id
-       WHERE ts.id = $1 AND ts.property_id = $2`, [slot_id, req.property_id]
+       WHERE ts.id = $1 AND ts.property_id = $2
+       FOR UPDATE OF ts FOR SHARE OF t`, [slot_id, req.property_id]
     );
     if (!slotRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Slot not found' }); }
+    if (slotRes.rows[0].status !== 'active' || slotRes.rows[0].tour_status !== 'active') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'This slot is not available for booking' });
+    }
 
     if (guest_id) {
       const guestRes = await client.query('SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, req.property_id]);
@@ -275,18 +319,48 @@ async function createBooking(req, res, next) {
 }
 
 async function updateBooking(req, res, next) {
+  const { status, notes } = req.body;
+  const client = await pool.connect();
   try {
-    const { status, notes } = req.body;
-    const { rows } = await pool.query(
+    await client.query('BEGIN');
+    const { rows: current } = await client.query(
+      'SELECT status, slot_id, group_size FROM tour_booking WHERE id = $1 AND property_id = $2 FOR UPDATE',
+      [req.params.id, req.property_id]
+    );
+    if (!current.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Booking not found' }); }
+
+    // Reinstating a cancelled booking takes its seats back -- same locked
+    // seat check as createBooking.
+    if (current[0].status === 'cancelled' && status != null && status !== 'cancelled') {
+      const { rows: [slot] } = await client.query(
+        `SELECT t.max_group_size FROM tour_slot ts JOIN tour t ON t.id = ts.tour_id
+         WHERE ts.id = $1 FOR UPDATE OF ts FOR SHARE OF t`, [current[0].slot_id]
+      );
+      const { rows: [{ booked }] } = await client.query(
+        `SELECT COALESCE(SUM(group_size), 0)::int AS booked FROM tour_booking WHERE slot_id = $1 AND status != 'cancelled'`,
+        [current[0].slot_id]
+      );
+      if (booked + current[0].group_size > slot.max_group_size) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: `Only ${Math.max(slot.max_group_size - booked, 0)} spots remaining` });
+      }
+    }
+
+    const { rows } = await client.query(
       `UPDATE tour_booking SET
          status = COALESCE($1, status),
          notes  = COALESCE($2, notes)
-       WHERE id = $3 AND property_id = $4 RETURNING *`,
-      [status, notes, req.params.id, req.property_id]
+       WHERE id = $3 RETURNING *`,
+      [status, notes, req.params.id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
+    await client.query('COMMIT');
     res.json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
 }
 
 async function updateSlot(req, res, next) {
