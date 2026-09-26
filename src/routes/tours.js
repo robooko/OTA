@@ -6,11 +6,13 @@ const { authenticateOrApiKey } = require('../middleware/auth');
 router.get('/', authenticateOrApiKey, ctrl.listTours);
 router.post('/', authenticateOrApiKey, ctrl.createTour);
 router.put('/:id', authenticateOrApiKey, ctrl.updateTour);
+router.delete('/:id', authenticateOrApiKey, ctrl.deleteTour);
 
 // Slots
 router.post('/slots/bulk', authenticateOrApiKey, ctrl.bulkCreateSlots);
 router.get('/slots/search', authenticateOrApiKey, ctrl.searchSlots);
 router.put('/slots/:id', authenticateOrApiKey, ctrl.updateSlot);
+router.delete('/slots/:id', authenticateOrApiKey, ctrl.deleteSlot);
 
 // Bookings
 router.get('/bookings', authenticateOrApiKey, ctrl.listBookings);

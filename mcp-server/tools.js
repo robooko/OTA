@@ -268,6 +268,12 @@ function createTools(apiRequest) {
     run: ({ id, ...body }) => apiRequest('PUT', `/api/tours/${id}`, { body }),
   },
   {
+    name: 'delete_tour',
+    description: 'Permanently delete a tour with all its slots and past/cancelled bookings. Refuses (409) while any upcoming booking is still active — cancel those first. Use update_tour with status "inactive" to hide it instead.',
+    inputSchema: { id: z.string() },
+    run: ({ id }) => apiRequest('DELETE', `/api/tours/${id}`),
+  },
+  {
     name: 'bulk_create_tour_slots',
     description: 'Manually create tour slots for a date range and list of times (existing slots are skipped)',
     inputSchema: {
@@ -293,6 +299,12 @@ function createTools(apiRequest) {
     description: 'Update a tour slot\'s status (e.g. set to "inactive" to hide it from search without deleting it)',
     inputSchema: { id: z.string(), status: z.string() },
     run: ({ id, status }) => apiRequest('PUT', `/api/tours/slots/${id}`, { body: { status } }),
+  },
+  {
+    name: 'delete_tour_slot',
+    description: 'Permanently delete a tour slot and its past/cancelled bookings. Refuses (409) while an upcoming booking is active, or if the tour runs on a timetable (the slot would be regenerated — set status "inactive" instead).',
+    inputSchema: { id: z.string() },
+    run: ({ id }) => apiRequest('DELETE', `/api/tours/slots/${id}`),
   },
   {
     name: 'list_tour_bookings',

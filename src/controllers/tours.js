@@ -87,6 +87,58 @@ async function updateTour(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Hard delete of a tour or a single slot, taking its slots and bookings with
+// it. Refuses while any upcoming booking is still live, so a guest's seat is
+// never silently dropped -- cancel those first. Past/cancelled bookings go.
+async function hardDelete(req, res, next, kind) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const target = kind === 'tour'
+      ? await client.query('SELECT id FROM tour WHERE id = $1 AND property_id = $2 FOR UPDATE', [req.params.id, req.property_id])
+      : await client.query(
+          `SELECT ts.id, t.departure_times FROM tour_slot ts JOIN tour t ON t.id = ts.tour_id
+           WHERE ts.id = $1 AND ts.property_id = $2 FOR UPDATE OF ts`, [req.params.id, req.property_id]
+        );
+    if (!target.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: kind === 'tour' ? 'Tour not found' : 'Slot not found' });
+    }
+    // The timetable seeder would just recreate a deleted slot on its next sweep.
+    if (kind === 'slot' && target.rows[0].departure_times?.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'This tour runs on a timetable, so a deleted slot would be regenerated -- set the slot\'s status to "inactive" instead' });
+    }
+
+    const slotFilter = kind === 'tour' ? 'ts.tour_id = $1' : 'ts.id = $1';
+    const { rows: live } = await client.query(
+      `SELECT COUNT(*)::int AS n FROM tour_booking tb JOIN tour_slot ts ON ts.id = tb.slot_id
+       WHERE ${slotFilter} AND tb.status != 'cancelled' AND ts.slot_date >= CURRENT_DATE`,
+      [req.params.id]
+    );
+    if (live[0].n) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `${live[0].n} upcoming booking(s) still active -- cancel them first` });
+    }
+
+    await client.query(
+      `DELETE FROM tour_booking tb USING tour_slot ts WHERE ts.id = tb.slot_id AND ${slotFilter}`, [req.params.id]
+    );
+    await client.query(`DELETE FROM tour_slot ts WHERE ${slotFilter}`, [req.params.id]);
+    if (kind === 'tour') await client.query('DELETE FROM tour WHERE id = $1', [req.params.id]);
+    await client.query('COMMIT');
+    res.status(204).end();
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
+const deleteTour = (req, res, next) => hardDelete(req, res, next, 'tour');
+const deleteSlot = (req, res, next) => hardDelete(req, res, next, 'slot');
+
 // ── Tour slots ────────────────────────────────────────────────────────────────
 
 async function bulkCreateSlots(req, res, next) {
@@ -253,7 +305,7 @@ async function updateSlot(req, res, next) {
 }
 
 module.exports = {
-  listTours, createTour, updateTour,
-  bulkCreateSlots, searchSlots, updateSlot,
+  listTours, createTour, updateTour, deleteTour,
+  bulkCreateSlots, searchSlots, updateSlot, deleteSlot,
   listBookings, createBooking, updateBooking,
 };
