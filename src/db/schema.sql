@@ -648,7 +648,13 @@ CREATE TABLE IF NOT EXISTS tour (
   duration_mins  INT           NOT NULL,
   max_group_size INT           NOT NULL,
   price          NUMERIC(10,2) NOT NULL,
-  status         VARCHAR(20)   DEFAULT 'active'
+  status         VARCHAR(20)   DEFAULT 'active',
+  -- Optional fixed timetable (e.g. a ferry): when departure_times is
+  -- non-empty, the boot/daily seeder (src/lib/tourSlotSeeder.js) creates
+  -- tour_slot rows out to a rolling horizon. departure_days = weekdays
+  -- (0 = Sunday .. 6 = Saturday), NULL = every day.
+  departure_times TIME[],
+  departure_days  SMALLINT[]
 );
 
 CREATE TABLE IF NOT EXISTS tour_slot (

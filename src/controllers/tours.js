@@ -1,5 +1,32 @@
 const pool = require('../db');
-const { isValidDate } = require('../middleware/validate');
+const { isValidDate, isValidTime } = require('../middleware/validate');
+const { seedTourSlots } = require('../lib/tourSlotSeeder');
+
+// 400-message for an invalid timetable, null when acceptable. Both fields
+// are optional; departure_times: [] clears the timetable (already-seeded
+// slots stay -- deactivate them individually).
+function timetableValidationError({ departure_times, departure_days }) {
+  if (departure_times != null) {
+    if (!Array.isArray(departure_times) || !departure_times.every(isValidTime)) {
+      return 'departure_times must be an array of HH:MM times';
+    }
+  }
+  if (departure_days != null) {
+    if (!Array.isArray(departure_days) || !departure_days.length
+        || !departure_days.every((d) => Number.isInteger(d) && d >= 0 && d <= 6)) {
+      return 'departure_days must be a non-empty array of weekdays 0-6 (0 = Sunday), or null for every day';
+    }
+  }
+  return null;
+}
+
+// Extend the timetable out to the horizon right away (the daily sweep would
+// catch it anyway) -- fire-and-forget like the tee-sheet seeder.
+function seedIfScheduled(tour) {
+  if (tour.status === 'active' && tour.departure_times?.length) {
+    seedTourSlots(tour.id).catch((err) => console.error('Tour timetable seed failed:', err.message));
+  }
+}
 
 // ── Tours ─────────────────────────────────────────────────────────────────────
 
@@ -15,34 +42,47 @@ async function listTours(req, res, next) {
 
 async function createTour(req, res, next) {
   try {
-    const { name, description, duration_mins, max_group_size, price } = req.body;
+    const { name, description, duration_mins, max_group_size, price, departure_times, departure_days } = req.body;
     if (!name || duration_mins == null || max_group_size == null || price == null) {
       return res.status(400).json({ error: 'name, duration_mins, max_group_size, and price are required' });
     }
+    const timetableError = timetableValidationError(req.body);
+    if (timetableError) return res.status(400).json({ error: timetableError });
     const { rows } = await pool.query(
-      `INSERT INTO tour (property_id, name, description, duration_mins, max_group_size, price)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.property_id, name, description ?? null, duration_mins, max_group_size, price]
+      `INSERT INTO tour (property_id, name, description, duration_mins, max_group_size, price, departure_times, departure_days)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.property_id, name, description ?? null, duration_mins, max_group_size, price, departure_times ?? null, departure_days ?? null]
     );
+    seedIfScheduled(rows[0]);
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
 }
 
 async function updateTour(req, res, next) {
   try {
-    const { name, description, duration_mins, max_group_size, price, status } = req.body;
+    const { name, description, duration_mins, max_group_size, price, status, departure_times } = req.body;
+    const timetableError = timetableValidationError(req.body);
+    if (timetableError) return res.status(400).json({ error: timetableError });
+    // departure_days is the one field where an explicit null means something
+    // (back to every day), so it can't go through COALESCE like the rest.
+    const setDays = 'departure_days' in req.body;
     const { rows } = await pool.query(
       `UPDATE tour SET
-         name           = COALESCE($1, name),
-         description    = COALESCE($2, description),
-         duration_mins  = COALESCE($3, duration_mins),
-         max_group_size = COALESCE($4, max_group_size),
-         price          = COALESCE($5, price),
-         status         = COALESCE($6, status)
-       WHERE id = $7 AND property_id = $8 RETURNING *`,
-      [name, description, duration_mins, max_group_size, price, status, req.params.id, req.property_id]
+         name            = COALESCE($1, name),
+         description     = COALESCE($2, description),
+         duration_mins   = COALESCE($3, duration_mins),
+         max_group_size  = COALESCE($4, max_group_size),
+         price           = COALESCE($5, price),
+         status          = COALESCE($6, status),
+         departure_times = COALESCE($7::time[], departure_times),
+         departure_days  = CASE WHEN $8 THEN $9::smallint[] ELSE departure_days END
+       WHERE id = $10 AND property_id = $11 RETURNING *`,
+      [name, description, duration_mins, max_group_size, price, status, departure_times, setDays, req.body.departure_days ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Tour not found' });
+    // Existing slots may carry bookings or staff edits -- a timetable change
+    // only shapes slots not yet materialised.
+    seedIfScheduled(rows[0]);
     res.json(rows[0]);
   } catch (err) { next(err); }
 }
