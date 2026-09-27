@@ -253,7 +253,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'update_tour',
-    description: 'Update a tour. Set status to "inactive" to delete it — there is no hard-delete endpoint. Timetable changes only add new future slots; existing slots stay (deactivate them with update_tour_slot). departure_times: [] turns the timetable off; departure_days: null means every day.',
+    description: 'Update a tour. Set status to "inactive" to delete it — there is no hard-delete endpoint. Changing departure_times/departure_days deletes upcoming timetable slots that no longer match unless they have an active booking; hand-added slots (bulk_create_tour_slots) stay. departure_times: [] turns the timetable off; departure_days: null means every day.',
     inputSchema: {
       id: z.string(),
       name: z.string().optional(),
@@ -275,7 +275,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'bulk_create_tour_slots',
-    description: 'Manually create tour slots for a date range and list of times (existing slots are skipped)',
+    description: 'Hand-add tour slots for a date range and list of times, e.g. an extra departure. Kept through timetable changes; an existing active slot is skipped, an inactive one reactivated.',
     inputSchema: {
       tour_id: z.string(),
       from: z.string().describe('YYYY-MM-DD'),
@@ -286,9 +286,11 @@ function createTools(apiRequest) {
   },
   {
     name: 'search_tour_slots',
-    description: 'Search tour slots on a date with booked/available seats, optionally filtered by tour or minimum free seats',
+    description: 'Search tour slots on a date, or a from/to range of up to 31 days, with booked/available seats, optionally filtered by tour or minimum free seats',
     inputSchema: {
-      date: z.string().describe('YYYY-MM-DD'),
+      date: z.string().optional().describe('YYYY-MM-DD; or pass from and to instead'),
+      from: z.string().optional().describe('YYYY-MM-DD, range start (with to)'),
+      to: z.string().optional().describe('YYYY-MM-DD, range end, inclusive'),
       tour_id: z.string().optional(),
       group_size: z.number().int().optional(),
     },
@@ -302,7 +304,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'delete_tour_slot',
-    description: 'Permanently delete a tour slot and its past/cancelled bookings. Refuses (409) while an upcoming booking is active, or if the tour runs on a timetable (the slot would be regenerated — set status "inactive" instead).',
+    description: 'Permanently delete a tour slot and its past/cancelled bookings. Refuses (409) while an upcoming booking is active, or if it came from the tour\'s timetable (it would be regenerated — set status "inactive" instead).',
     inputSchema: { id: z.string() },
     run: ({ id }) => apiRequest('DELETE', `/api/tours/slots/${id}`),
   },

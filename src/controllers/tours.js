@@ -3,8 +3,8 @@ const { isValidDate, isValidTime } = require('../middleware/validate');
 const { seedTourSlots } = require('../lib/tourSlotSeeder');
 
 // 400-message for an invalid timetable, null when acceptable. Both fields
-// are optional; departure_times: [] clears the timetable (already-seeded
-// slots stay -- deactivate them individually).
+// are optional; departure_times: [] clears the timetable (and prunes its
+// upcoming unbooked slots -- see pruneOffTimetableSlots).
 function timetableValidationError({ departure_times, departure_days }) {
   if (departure_times != null) {
     if (!Array.isArray(departure_times) || !departure_times.every(isValidTime)) {
@@ -58,6 +58,27 @@ async function createTour(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// After a timetable edit, drop the upcoming generated slots it no longer
+// produces, so a removed time or day stops being bookable. Slots with a
+// live booking stay (cancel those first), as do hand-added extras
+// (is_extra). Cancelled bookings go with their slot, as in hardDelete.
+async function pruneOffTimetableSlots(client, tourId) {
+  const { rows } = await client.query(
+    `SELECT ts.id FROM tour_slot ts JOIN tour t ON t.id = ts.tour_id
+     WHERE ts.tour_id = $1 AND ts.slot_date >= CURRENT_DATE AND NOT ts.is_extra
+       AND NOT (
+         ts.slot_time = ANY(COALESCE(t.departure_times, '{}'))
+         AND (t.departure_days IS NULL OR EXTRACT(DOW FROM ts.slot_date)::int = ANY(t.departure_days))
+       )
+       AND NOT EXISTS (SELECT 1 FROM tour_booking tb WHERE tb.slot_id = ts.id AND tb.status != 'cancelled')
+     FOR UPDATE OF ts`, [tourId]
+  );
+  if (!rows.length) return;
+  const ids = rows.map((r) => r.id);
+  await client.query('DELETE FROM tour_booking WHERE slot_id = ANY($1::uuid[])', [ids]);
+  await client.query('DELETE FROM tour_slot WHERE id = ANY($1::uuid[])', [ids]);
+}
+
 async function updateTour(req, res, next) {
   const { name, description, duration_mins, max_group_size, price, status, departure_times } = req.body;
   const timetableError = timetableValidationError(req.body);
@@ -106,9 +127,9 @@ async function updateTour(req, res, next) {
       [name, description, duration_mins, max_group_size, price, status, departure_times, setDays, req.body.departure_days ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tour not found' }); }
+    if (departure_times != null || setDays) await pruneOffTimetableSlots(client, rows[0].id);
     await client.query('COMMIT');
-    // Existing slots may carry bookings or staff edits -- a timetable change
-    // only shapes slots not yet materialised.
+    // New times/days only get their slots on the next seed.
     seedIfScheduled(rows[0]);
     res.json(rows[0]);
   } catch (err) {
@@ -129,7 +150,7 @@ async function hardDelete(req, res, next, kind) {
     const target = kind === 'tour'
       ? await client.query('SELECT id FROM tour WHERE id = $1 AND property_id = $2 FOR UPDATE', [req.params.id, req.property_id])
       : await client.query(
-          `SELECT ts.id, t.departure_times FROM tour_slot ts JOIN tour t ON t.id = ts.tour_id
+          `SELECT ts.id, ts.is_extra, t.departure_times FROM tour_slot ts JOIN tour t ON t.id = ts.tour_id
            WHERE ts.id = $1 AND ts.property_id = $2 FOR UPDATE OF ts`, [req.params.id, req.property_id]
         );
     if (!target.rows.length) {
@@ -137,9 +158,9 @@ async function hardDelete(req, res, next, kind) {
       return res.status(404).json({ error: kind === 'tour' ? 'Tour not found' : 'Slot not found' });
     }
     // The timetable seeder would just recreate a deleted slot on its next sweep.
-    if (kind === 'slot' && target.rows[0].departure_times?.length) {
+    if (kind === 'slot' && target.rows[0].departure_times?.length && !target.rows[0].is_extra) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'This tour runs on a timetable, so a deleted slot would be regenerated -- set the slot\'s status to "inactive" instead' });
+      return res.status(409).json({ error: 'This slot comes from the tour\'s timetable, so it would be regenerated -- set the slot\'s status to "inactive" instead' });
     }
 
     const slotFilter = kind === 'tour' ? 'ts.tour_id = $1' : 'ts.id = $1';
@@ -191,9 +212,13 @@ async function bulkCreateSlots(req, res, next) {
       const date = d.toISOString().slice(0, 10);
       for (const time of times) {
         const { rows } = await pool.query(
-          `INSERT INTO tour_slot (property_id, tour_id, slot_date, slot_time)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (tour_id, slot_date, slot_time) DO NOTHING
+          // Hand-added, so timetable edits leave it alone (is_extra). A
+          // matching slot that was switched off comes back on; an active
+          // one is skipped.
+          `INSERT INTO tour_slot (property_id, tour_id, slot_date, slot_time, is_extra)
+           VALUES ($1, $2, $3, $4, true)
+           ON CONFLICT (tour_id, slot_date, slot_time) DO UPDATE SET status = 'active'
+             WHERE tour_slot.status != 'active'
            RETURNING *`,
           [req.property_id, tour_id, date, time]
         );
@@ -208,8 +233,13 @@ async function bulkCreateSlots(req, res, next) {
 async function searchSlots(req, res, next) {
   try {
     const { date, tour_id, group_size } = req.query;
-    if (!date) return res.status(400).json({ error: 'date is required' });
-    if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
+    // One date, or an inclusive from/to range (e.g. a week) of up to 31 days.
+    const from = date ?? req.query.from;
+    const to = date ?? req.query.to;
+    if (!from || !to) return res.status(400).json({ error: 'date, or from and to, is required' });
+    if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'Invalid date format' });
+    const spanDays = (new Date(to) - new Date(from)) / 86400000;
+    if (spanDays < 0 || spanDays > 30) return res.status(400).json({ error: 'from must be on or before to, at most 31 days apart' });
 
     let query = `
       SELECT ts.*, t.name AS tour_name, t.description, t.duration_mins,
@@ -219,16 +249,16 @@ async function searchSlots(req, res, next) {
       FROM tour_slot ts
       JOIN tour t ON t.id = ts.tour_id
       LEFT JOIN tour_booking tb ON tb.slot_id = ts.id
-      WHERE ts.slot_date = $1
+      WHERE ts.slot_date BETWEEN $1 AND $2
         AND ts.status = 'active'
         AND t.status = 'active'
-        AND ts.property_id = $2
+        AND ts.property_id = $3
     `;
-    const params = [date, req.property_id];
+    const params = [from, to, req.property_id];
     if (tour_id) { params.push(tour_id); query += ` AND ts.tour_id = $${params.length}`; }
     query += ` GROUP BY ts.id, t.id`;
     if (group_size) { query += ` HAVING t.max_group_size - COALESCE(SUM(tb.group_size) FILTER (WHERE tb.status != 'cancelled'), 0) >= ${parseInt(group_size, 10)}`; }
-    query += ' ORDER BY ts.slot_time';
+    query += ' ORDER BY ts.slot_date, ts.slot_time';
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) { next(err); }

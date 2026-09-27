@@ -664,6 +664,9 @@ CREATE TABLE IF NOT EXISTS tour_slot (
   slot_date   DATE         NOT NULL,
   slot_time   TIME         NOT NULL,
   status      VARCHAR(20)  DEFAULT 'active',
+  -- Added by hand (POST /api/tours/slots/bulk) rather than generated from
+  -- the tour's timetable; timetable edits never prune these.
+  is_extra    BOOLEAN      NOT NULL DEFAULT false,
   UNIQUE (tour_id, slot_date, slot_time)
 );
 
