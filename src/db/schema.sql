@@ -648,6 +648,7 @@ CREATE TABLE IF NOT EXISTS tour (
   duration_mins  INT           NOT NULL,
   max_group_size INT           NOT NULL,
   price          NUMERIC(10,2) NOT NULL,
+  child_price    NUMERIC(10,2),  -- NULL = children pay the adult price
   status         VARCHAR(20)   DEFAULT 'active',
   -- Optional fixed timetable (e.g. a ferry): when departure_times is
   -- non-empty, the boot/daily seeder (src/lib/tourSlotSeeder.js) creates
@@ -678,7 +679,8 @@ CREATE TABLE IF NOT EXISTS tour_booking (
   contact_name  VARCHAR(100)  NOT NULL,
   contact_email VARCHAR(255),
   contact_phone VARCHAR(30),
-  group_size    INT           NOT NULL,
+  group_size    INT           NOT NULL,  -- total headcount, children included
+  children      INT           NOT NULL DEFAULT 0,
   total_price   NUMERIC(10,2) NOT NULL,
   status        VARCHAR(20)   DEFAULT 'confirmed',
   notes         TEXT,

@@ -20,6 +20,9 @@ function timetableValidationError({ departure_times, departure_days }) {
   return null;
 }
 
+// child_price: a non-negative number, or null for "same as the adult price".
+const childPriceInvalid = (v) => v != null && !(typeof v === 'number' && Number.isFinite(v) && v >= 0);
+
 // Extend the timetable out to the horizon right away (the daily sweep would
 // catch it anyway) -- fire-and-forget like the tee-sheet seeder.
 function seedIfScheduled(tour) {
@@ -42,16 +45,17 @@ async function listTours(req, res, next) {
 
 async function createTour(req, res, next) {
   try {
-    const { name, description, duration_mins, max_group_size, price, departure_times, departure_days } = req.body;
+    const { name, description, duration_mins, max_group_size, price, child_price, departure_times, departure_days } = req.body;
     if (!name || duration_mins == null || max_group_size == null || price == null) {
       return res.status(400).json({ error: 'name, duration_mins, max_group_size, and price are required' });
     }
+    if (childPriceInvalid(child_price)) return res.status(400).json({ error: 'child_price must be a non-negative number, or null for the adult price' });
     const timetableError = timetableValidationError(req.body);
     if (timetableError) return res.status(400).json({ error: timetableError });
     const { rows } = await pool.query(
-      `INSERT INTO tour (property_id, name, description, duration_mins, max_group_size, price, departure_times, departure_days)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.property_id, name, description ?? null, duration_mins, max_group_size, price, departure_times ?? null, departure_days ?? null]
+      `INSERT INTO tour (property_id, name, description, duration_mins, max_group_size, price, child_price, departure_times, departure_days)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.property_id, name, description ?? null, duration_mins, max_group_size, price, child_price ?? null, departure_times ?? null, departure_days ?? null]
     );
     seedIfScheduled(rows[0]);
     res.status(201).json(rows[0]);
@@ -86,9 +90,14 @@ async function updateTour(req, res, next) {
   if (max_group_size != null && (!Number.isInteger(max_group_size) || max_group_size < 1)) {
     return res.status(400).json({ error: 'max_group_size must be a positive integer' });
   }
-  // departure_days is the one field where an explicit null means something
-  // (back to every day), so it can't go through COALESCE like the rest.
+  if (childPriceInvalid(req.body.child_price)) {
+    return res.status(400).json({ error: 'child_price must be a non-negative number, or null for the adult price' });
+  }
+  // departure_days and child_price are the fields where an explicit null
+  // means something (every day / the adult price), so they can't go through
+  // COALESCE like the rest.
   const setDays = 'departure_days' in req.body;
+  const setChildPrice = 'child_price' in req.body;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -122,9 +131,10 @@ async function updateTour(req, res, next) {
          price           = COALESCE($5, price),
          status          = COALESCE($6, status),
          departure_times = COALESCE($7::time[], departure_times),
-         departure_days  = CASE WHEN $8 THEN $9::smallint[] ELSE departure_days END
+         departure_days  = CASE WHEN $8 THEN $9::smallint[] ELSE departure_days END,
+         child_price     = CASE WHEN $12 THEN $13::numeric ELSE child_price END
        WHERE id = $10 AND property_id = $11 RETURNING *`,
-      [name, description, duration_mins, max_group_size, price, status, departure_times, setDays, req.body.departure_days ?? null, req.params.id, req.property_id]
+      [name, description, duration_mins, max_group_size, price, status, departure_times, setDays, req.body.departure_days ?? null, req.params.id, req.property_id, setChildPrice, req.body.child_price ?? null]
     );
     if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tour not found' }); }
     if (departure_times != null || setDays) await pruneOffTimetableSlots(client, rows[0].id);
@@ -243,7 +253,7 @@ async function searchSlots(req, res, next) {
 
     let query = `
       SELECT ts.*, t.name AS tour_name, t.description, t.duration_mins,
-             t.max_group_size, t.price,
+             t.max_group_size, t.price, t.child_price,
              COALESCE(SUM(tb.group_size) FILTER (WHERE tb.status != 'cancelled'), 0) AS booked_seats,
              t.max_group_size - COALESCE(SUM(tb.group_size) FILTER (WHERE tb.status != 'cancelled'), 0) AS available_seats
       FROM tour_slot ts
@@ -270,7 +280,7 @@ async function listBookings(req, res, next) {
   try {
     const { date, status, guest_id } = req.query;
     let query = `
-      SELECT tb.*, ts.slot_date, ts.slot_time, t.name AS tour_name, t.price
+      SELECT tb.*, ts.slot_date, ts.slot_time, t.name AS tour_name, t.price, t.child_price
       FROM tour_booking tb
       JOIN tour_slot ts ON ts.id = tb.slot_id
       JOIN tour t ON t.id = ts.tour_id
@@ -287,12 +297,22 @@ async function listBookings(req, res, next) {
 }
 
 async function createBooking(req, res, next) {
-  const { slot_id, guest_id, contact_name, contact_email, contact_phone, group_size, notes } = req.body;
+  const { slot_id, guest_id, contact_name, contact_email, contact_phone, adults, notes } = req.body;
+  const children = req.body.children ?? 0;
+  // Either adults (+ children), or the older group_size, with any children
+  // counted within it.
+  const group_size = adults != null ? adults + children : req.body.group_size;
   if (!slot_id || !contact_name || group_size == null) {
-    return res.status(400).json({ error: 'slot_id, contact_name, and group_size are required' });
+    return res.status(400).json({ error: 'slot_id, contact_name, and adults or group_size are required' });
+  }
+  if ((adults != null && (!Number.isInteger(adults) || adults < 0)) || !Number.isInteger(children) || children < 0) {
+    return res.status(400).json({ error: 'adults and children must be non-negative integers' });
   }
   if (!Number.isInteger(group_size) || group_size < 1) {
-    return res.status(400).json({ error: 'group_size must be a positive integer' });
+    return res.status(400).json({ error: 'A booking needs at least one ticket' });
+  }
+  if (children > group_size) {
+    return res.status(400).json({ error: "children can't exceed group_size" });
   }
 
   const client = await pool.connect();
@@ -304,7 +324,7 @@ async function createBooking(req, res, next) {
     // count. FOR SHARE on the tour blocks a concurrent capacity cut
     // (updateTour) without serialising bookings across different slots.
     const slotRes = await client.query(
-      `SELECT ts.*, t.max_group_size, t.price, t.status AS tour_status
+      `SELECT ts.*, t.max_group_size, t.price, t.child_price, t.status AS tour_status
        FROM tour_slot ts JOIN tour t ON t.id = ts.tour_id
        WHERE ts.id = $1 AND ts.property_id = $2
        FOR UPDATE OF ts FOR SHARE OF t`, [slot_id, req.property_id]
@@ -331,11 +351,13 @@ async function createBooking(req, res, next) {
       return res.status(409).json({ error: `Only ${slot.max_group_size - booked} spots remaining` });
     }
 
-    const total_price = parseFloat(slot.price) * group_size;
+    const adultPrice = parseFloat(slot.price);
+    const childPrice = slot.child_price != null ? parseFloat(slot.child_price) : adultPrice;
+    const total_price = adultPrice * (group_size - children) + childPrice * children;
     const { rows } = await client.query(
-      `INSERT INTO tour_booking (property_id, slot_id, guest_id, contact_name, contact_email, contact_phone, group_size, total_price, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.property_id, slot_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, group_size, total_price.toFixed(2), notes ?? null]
+      `INSERT INTO tour_booking (property_id, slot_id, guest_id, contact_name, contact_email, contact_phone, group_size, children, total_price, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [req.property_id, slot_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, group_size, children, total_price.toFixed(2), notes ?? null]
     );
 
     await client.query('COMMIT');
