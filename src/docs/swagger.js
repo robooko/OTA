@@ -1,7 +1,7 @@
 const swaggerSpec = {
   openapi: '3.0.0',
   info: {
-    title: 'Hotel PMS API',
+    title: 'Hotal PMS API',
     version: '1.0.0',
     description: 'Property Management System API — rooms, restaurants, spa, beach club, tours, equipment hire, and golf.',
   },
