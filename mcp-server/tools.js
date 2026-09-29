@@ -485,7 +485,6 @@ function createTools(apiRequest) {
     inputSchema: {
       shop_id: z.string(),
       name: z.string(),
-      description: z.string().optional(),
       category: z.string().optional(),
       price: z.number(),
       stock_quantity: z.number().int().min(0).optional().describe('Omit for untracked/unlimited stock'),
@@ -500,7 +499,6 @@ function createTools(apiRequest) {
     inputSchema: {
       id: z.string(),
       name: z.string().optional(),
-      description: z.string().optional(),
       category: z.string().optional(),
       price: z.number().optional(),
       status: z.enum(['active', 'inactive']).optional(),

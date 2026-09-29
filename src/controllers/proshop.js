@@ -86,7 +86,7 @@ function isValidStockQuantity(value) {
 
 async function createItem(req, res, next) {
   try {
-    const { name, description, category, price, shop_id, stock_quantity, product_group, variant_label } = req.body;
+    const { name, category, price, shop_id, stock_quantity, product_group, variant_label } = req.body;
     if (!name || price == null) return res.status(400).json({ error: 'name and price are required' });
     if (!shop_id) return res.status(400).json({ error: 'shop_id is required' });
     if (!isValidStockQuantity(stock_quantity)) {
@@ -99,9 +99,9 @@ async function createItem(req, res, next) {
     if (!shops.length) return res.status(404).json({ error: 'Shop not found' });
 
     const { rows } = await pool.query(
-      `INSERT INTO proshop_item (property_id, shop_id, name, description, category, price, stock_quantity, product_group, variant_label)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.property_id, shop_id, name, description || null, category || null, price, stock_quantity ?? null, product_group || null, variant_label || null]
+      `INSERT INTO proshop_item (property_id, shop_id, name, category, price, stock_quantity, product_group, variant_label)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.property_id, shop_id, name, category || null, price, stock_quantity ?? null, product_group || null, variant_label || null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -109,7 +109,7 @@ async function createItem(req, res, next) {
 
 async function updateItem(req, res, next) {
   try {
-    const { name, description, category, price, status, stock_quantity, product_group, variant_label } = req.body;
+    const { name, category, price, status, stock_quantity, product_group, variant_label } = req.body;
     if (stock_quantity !== undefined && !isValidStockQuantity(stock_quantity)) {
       return res.status(400).json({ error: 'stock_quantity must be a non-negative integer, or null for unlimited' });
     }
@@ -122,16 +122,15 @@ async function updateItem(req, res, next) {
     const { rows } = await pool.query(
       `UPDATE proshop_item SET
          name           = COALESCE($1, name),
-         description    = COALESCE($2, description),
-         category       = COALESCE($3, category),
-         price          = COALESCE($4, price),
-         status         = COALESCE($5, status),
-         stock_quantity = CASE WHEN $6 THEN $7  ELSE stock_quantity END,
-         product_group  = CASE WHEN $8 THEN $9  ELSE product_group END,
-         variant_label  = CASE WHEN $10 THEN $11 ELSE variant_label END
-       WHERE id = $12 AND property_id = $13 RETURNING *`,
+         category       = COALESCE($2, category),
+         price          = COALESCE($3, price),
+         status         = COALESCE($4, status),
+         stock_quantity = CASE WHEN $5 THEN $6  ELSE stock_quantity END,
+         product_group  = CASE WHEN $7 THEN $8  ELSE product_group END,
+         variant_label  = CASE WHEN $9 THEN $10 ELSE variant_label END
+       WHERE id = $11 AND property_id = $12 RETURNING *`,
       [
-        name, description, category, price, status,
+        name, category, price, status,
         stock_quantity !== undefined, stock_quantity ?? null,
         product_group !== undefined, product_group ?? null,
         variant_label !== undefined, variant_label ?? null,

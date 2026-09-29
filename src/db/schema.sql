@@ -863,7 +863,6 @@ CREATE TABLE IF NOT EXISTS proshop_item (
   property_id    UUID          NOT NULL REFERENCES property(id),
   shop_id        UUID          REFERENCES shop(id),
   name           VARCHAR(100)  NOT NULL,
-  description    TEXT,
   category       VARCHAR(50),
   price          NUMERIC(10,2) NOT NULL,
   status         VARCHAR(20)   DEFAULT 'active',
