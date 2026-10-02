@@ -9,6 +9,12 @@ router.put('/menu/bulk-delete', authenticateOrApiKey, ctrl.bulkDeleteMenuItems);
 router.put('/menu/rename-category', authenticateOrApiKey, ctrl.renameMenuCategory);
 router.put('/menu/:id', authenticateOrApiKey, ctrl.updateMenuItem);
 
+// Board (in-shop what's on / sold out)
+router.get('/board', authenticateOrApiKey, ctrl.listBoardItems);
+router.get('/board/ably-token', authenticateOrApiKey, ctrl.getBoardAblyToken);
+router.post('/board', authenticateOrApiKey, ctrl.createBoardItem);
+router.put('/board/:id', authenticateOrApiKey, ctrl.updateBoardItem);
+
 // Orders
 router.get('/ably-token', authenticate, ctrl.getAblyToken);
 router.get('/', authenticateOrApiKey, ctrl.listOrders);

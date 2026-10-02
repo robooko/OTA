@@ -7,6 +7,7 @@ const {
   publishOrderStatusChangedForBooking,
   publishOrderStatusChangedForOrder,
   publishTableSessionOpened,
+  publishBoardItemUpdated,
   client: ablyClient,
 } = require('../lib/ably');
 const { generateJoinCode, verifyJoinCode } = require('../lib/joinCode');
@@ -662,6 +663,82 @@ async function confirmOrderPayment(req, res, next) {
   }
 }
 
+// ── Board (in-shop "what's on / sold out") ────────────────────────────────────
+// See migrate-2026-10-02-restaurant-board-item.sql. Every write publishes the
+// full row on property:{id}:board; removal is status 'inactive', same event.
+
+async function listBoardItems(req, res, next) {
+  try {
+    const { restaurant_id } = req.query;
+    let query = `SELECT * FROM restaurant_board_item WHERE status = 'active' AND property_id = $1`;
+    const params = [req.property_id];
+    if (restaurant_id) { params.push(restaurant_id); query += ` AND restaurant_id = $${params.length}`; }
+    query += ' ORDER BY position, name';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) { next(err); }
+}
+
+async function createBoardItem(req, res, next) {
+  try {
+    const { name, restaurant_id, sold_out } = req.body;
+    if (!name || !restaurant_id) return res.status(400).json({ error: 'name and restaurant_id are required' });
+    const restaurantRes = await pool.query('SELECT id FROM restaurant WHERE id = $1 AND property_id = $2', [
+      restaurant_id,
+      req.property_id,
+    ]);
+    if (!restaurantRes.rows.length) return res.status(404).json({ error: 'Restaurant not found' });
+
+    const { rows } = await pool.query(
+      `INSERT INTO restaurant_board_item (property_id, restaurant_id, name, sold_out, position)
+       VALUES ($1, $2, $3, $4,
+         (SELECT COALESCE(MAX(position), -1) + 1 FROM restaurant_board_item WHERE restaurant_id = $2 AND status = 'active'))
+       RETURNING *`,
+      [req.property_id, restaurant_id, name, sold_out === true]
+    );
+    publishBoardItemUpdated(req.property_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
+    res.status(201).json(rows[0]);
+  } catch (err) { next(err); }
+}
+
+async function updateBoardItem(req, res, next) {
+  try {
+    const { name, sold_out, position, status } = req.body;
+    if (sold_out !== undefined && typeof sold_out !== 'boolean') return res.status(400).json({ error: 'sold_out must be a boolean' });
+    if (position !== undefined && !Number.isInteger(position)) return res.status(400).json({ error: 'position must be an integer' });
+    if (status !== undefined && !['active', 'inactive'].includes(status)) {
+      return res.status(400).json({ error: "status must be 'active' or 'inactive'" });
+    }
+    const { rows } = await pool.query(
+      `UPDATE restaurant_board_item SET
+         name = COALESCE($1, name),
+         sold_out = COALESCE($2, sold_out),
+         position = COALESCE($3, position),
+         status = COALESCE($4, status)
+       WHERE id = $5 AND property_id = $6 RETURNING *`,
+      [name || null, sold_out ?? null, position ?? null, status ?? null, req.params.id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Board item not found' });
+    publishBoardItemUpdated(req.property_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
+// Subscribe-only token for the property's board channel. The board is
+// public information (it's on the shop wall), so any caller authenticated
+// to the property -- the website's server with its API key -- may hand one
+// to a browser.
+async function getBoardAblyToken(req, res, next) {
+  try {
+    if (!ablyClient) return res.status(503).json({ error: 'Realtime notifications are not configured' });
+    const channel = `property:${req.property_id}:board`;
+    const tokenRequest = await ablyClient.auth.createTokenRequest({
+      capability: { [channel]: ['subscribe'] },
+    });
+    res.json({ tokenRequest, channel });
+  } catch (err) { next(err); }
+}
+
 async function getAblyToken(req, res, next) {
   try {
     const { restaurant_id } = req.query;
@@ -704,4 +781,4 @@ async function getOrderAblyToken(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, renameMenuCategory, listOrders, getOrder, createOrder, updateOrder, updateOrderStatus, createOrderPaymentIntent, confirmOrderPayment, getAblyToken, getOrderAblyToken };
+module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, renameMenuCategory, listBoardItems, createBoardItem, updateBoardItem, getBoardAblyToken, listOrders, getOrder, createOrder, updateOrder, updateOrderStatus, createOrderPaymentIntent, confirmOrderPayment, getAblyToken, getOrderAblyToken };

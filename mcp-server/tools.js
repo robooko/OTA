@@ -426,6 +426,30 @@ function createTools(apiRequest) {
     run: (args) => apiRequest('PUT', '/api/restaurant-orders/menu/rename-category', { body: args }),
   },
   {
+    name: 'list_restaurant_board',
+    description: "List the in-shop board (what's on today, and whether each is sold out), optionally for one restaurant",
+    inputSchema: { restaurant_id: z.string().optional() },
+    run: (query) => apiRequest('GET', '/api/restaurant-orders/board', { query }),
+  },
+  {
+    name: 'create_restaurant_board_item',
+    description: 'Put an item on a restaurant\'s in-shop board (added at the end)',
+    inputSchema: { restaurant_id: z.string(), name: z.string(), sold_out: z.boolean().optional() },
+    run: (args) => apiRequest('POST', '/api/restaurant-orders/board', { body: args }),
+  },
+  {
+    name: 'update_restaurant_board_item',
+    description: 'Update a board item: mark it sold out / back on, rename or reorder it. Set status to "inactive" to take it off the board.',
+    inputSchema: {
+      id: z.string(),
+      name: z.string().optional(),
+      sold_out: z.boolean().optional(),
+      position: z.number().int().optional(),
+      status: z.enum(['active', 'inactive']).optional(),
+    },
+    run: ({ id, ...body }) => apiRequest('PUT', `/api/restaurant-orders/board/${id}`, { body }),
+  },
+  {
     name: 'get_restaurant_service_periods',
     description: "List a restaurant's service periods (bookable windows)",
     inputSchema: { restaurant_id: z.string() },

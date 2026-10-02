@@ -802,6 +802,20 @@ CREATE TABLE IF NOT EXISTS restaurant_menu_item (
   translations  JSONB         NOT NULL DEFAULT '{}'
 );
 
+-- The in-shop board: what's on today / sold out. Unpriced, copy lives in
+-- the website's CMS -- see migrate-2026-10-02-restaurant-board-item.sql.
+CREATE TABLE IF NOT EXISTS restaurant_board_item (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID          NOT NULL REFERENCES property(id),
+  restaurant_id UUID          NOT NULL REFERENCES restaurant(id),
+  name          VARCHAR(100)  NOT NULL,
+  sold_out      BOOLEAN       NOT NULL DEFAULT false,
+  position      INTEGER       NOT NULL DEFAULT 0,
+  status        VARCHAR(20)   NOT NULL DEFAULT 'active'
+);
+
+CREATE INDEX IF NOT EXISTS restaurant_board_item_restaurant_idx ON restaurant_board_item (restaurant_id, position);
+
 CREATE TABLE IF NOT EXISTS restaurant_order (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id   UUID         NOT NULL REFERENCES property(id),

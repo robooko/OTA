@@ -271,6 +271,14 @@ async function publishGolfBookingStatusChangedForProperty(propertyId, payload) {
 // itself. Property-wide only: addBookingItem/removeBookingItem take no
 // shop_id, so there's no per-shop channel to scope to (unlike spa's
 // spa:{id}:appointments).
+// One event for every board change -- the payload is always the full row,
+// so a consumer upserts it and drops it once status is no longer 'active'.
+async function publishBoardItemUpdated(propertyId, item) {
+  if (!client) return;
+  const channel = client.channels.get(`property:${propertyId}:board`);
+  await channel.publish('board-item-updated', item);
+}
+
 async function publishProshopItemAdded(propertyId, payload) {
   if (!client) return;
   const channel = client.channels.get(`property:${propertyId}:proshop`);
@@ -338,6 +346,7 @@ module.exports = {
   publishNewReplyForSpa,
   publishNewGolfBookingForProperty,
   publishGolfBookingStatusChangedForProperty,
+  publishBoardItemUpdated,
   publishProshopItemAdded,
   publishProshopItemRemoved,
   publishNewProshopOrder,
