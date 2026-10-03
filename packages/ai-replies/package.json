@@ -1,0 +1,15 @@
+{
+  "name": "@forgebuild/ai-replies",
+  "version": "0.1.0",
+  "description": "Claude-drafted, self-assessed replies to customer enquiries. Venue-agnostic: the host supplies venue facts, an optional availability tool and booking schema.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts"],
+  "scripts": { "check": "node check.js" },
+  "peerDependencies": {
+    "@anthropic-ai/sdk": ">=0.117.0",
+    "zod": "^4.0.0"
+  },
+  "publishConfig": { "access": "public" },
+  "license": "UNLICENSED"
+}
