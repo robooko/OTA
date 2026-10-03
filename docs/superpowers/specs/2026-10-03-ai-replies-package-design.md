@@ -65,9 +65,10 @@ packages/ai-replies/
 ```
 
 Root `package.json` gains `"workspaces": ["packages/*"]` and
-`"@forgebuild/ai-replies": "^0.1.0"` in `dependencies`; npm links the
-workspace (locally and in Render's `npm install`) because the version
-satisfies the range. The peer deps resolve from the root `node_modules`.
+`"@forgebuild/ai-replies": "*"` in `dependencies`; npm links the
+workspace (locally and in Render's `npm install`) because `*` accepts any
+workspace version -- a pinned range like `^0.1.0` would silently fall back
+to the registry after a version bump. The peer deps resolve from the root `node_modules`.
 
 ## API
 

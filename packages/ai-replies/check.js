@@ -18,7 +18,7 @@ const tool = {
 };
 const userText = (req) => req.messages[0].content;
 const ok = (parsed, extra = {}) => ({
-  stop_reason: 'end_turn', content: [], parsed_output: parsed, model: 'fake-model',
+  stop_reason: 'end_turn', content: parsed ? [{ type: 'text', text: JSON.stringify(parsed) }] : [], model: 'fake-model',
   usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3 }, ...extra,
 });
 const draft = (over = {}) => ({
@@ -29,11 +29,20 @@ function fakeClient(responses) {
   return {
     calls,
     messages: {
-      parse: async (req) => {
+      create: async (req) => {
         calls.push({ ...req, messages: [...req.messages] });
         const r = responses.shift();
         if (r instanceof Error) throw r;
         return r;
+      },
+      async parse(req) {
+        const r = await this.create(req);
+        let parsed = null;
+        for (const b of r.content) {
+          if (b.type !== 'text') continue;
+          try { parsed = JSON.parse(b.text); } catch { throw new Anthropic.AnthropicError('Failed to parse structured output'); }
+        }
+        return { ...r, parsed_output: parsed };
       },
     },
   };
@@ -156,7 +165,7 @@ check('result shaping', async () => {
   const h = await generateReply({ venue, inquiry, client: fakeClient([ok(draft({ requires_human: true, requires_human_reason: '', quality_score: 90 }))]) });
   assert.equal(h.quality_score, 40);
   assert.equal(h.requires_human_reason, 'Flagged by the model');
-  const n = await generateReply({ venue, inquiry, client: fakeClient([ok(draft({ quality_score: Number.NaN }))]) });
+  const n = await generateReply({ venue, inquiry, client: fakeClient([ok(draft({ quality_score: -5 }))]) });
   assert.equal(n.quality_score, 0);
 });
 
@@ -214,10 +223,45 @@ check('stop reasons', async () => {
   assert.equal(await kind(ok(null)), 'parse');
 });
 
+check('text around tool calls and stops', async () => {
+  // Preamble text before a tool call must not be parsed as the draft.
+  const preamble = fakeClient([
+    ok(null, { stop_reason: 'tool_use', content: [
+      { type: 'text', text: 'Let me check.' },
+      { type: 'tool_use', id: 't1', name: 'check_availability', input: { date: '2026-11-02' } },
+    ] }),
+    ok(draft()),
+  ]);
+  assert.equal((await generateReply({ venue, inquiry, availabilityTool: tool, client: preamble })).body, 'Hi Sam, yes we can.');
+  // A refusal with prose is a refusal, not a parse failure.
+  const refusal = fakeClient([ok(null, { stop_reason: 'refusal', content: [{ type: 'text', text: 'I cannot help.' }] })]);
+  await assert.rejects(generateReply({ venue, inquiry, client: refusal }), (e) => e.kind === 'refusal');
+  // A truncated reply says so.
+  const cut = fakeClient([ok(null, { stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"summary": "x", "bo' }] })]);
+  await assert.rejects(generateReply({ venue, inquiry, client: cut }), (e) => e.kind === 'parse' && /max_tokens/.test(e.message));
+  // Output that fails the schema is a parse failure.
+  const bad = fakeClient([ok({ ...draft(), quality_score: 'high' })]);
+  await assert.rejects(generateReply({ venue, inquiry, client: bad }), (e) => e instanceof AiReplyError && e.kind === 'parse');
+});
+
+check('error classes from a host SDK copy', async () => {
+  // An ESM host's SDK build has its own error classes (not === the CJS ones).
+  class HostRateLimitError extends Error {}
+  class HostAPIError extends Error {}
+  class HostSdk { static RateLimitError = HostRateLimitError; static APIError = HostAPIError; }
+  const kind = async (err) => {
+    const client = new HostSdk();
+    client.messages = fakeClient([err]).messages;
+    return generateReply({ venue, inquiry, client }).then(() => null, (e) => (e instanceof AiReplyError ? e.kind : 'raw'));
+  };
+  assert.equal(await kind(new HostRateLimitError('429')), 'rate_limit');
+  assert.equal(await kind(Object.assign(new HostAPIError('500'), { status: 500 })), 'api');
+});
+
 check('error mapping', async () => {
   const kind = (err) => generateReply({ venue, inquiry, client: fakeClient([err]) }).then(() => null, (e) => (e instanceof AiReplyError ? e.kind : 'raw'));
   assert.equal(await kind(new Anthropic.APIConnectionError({ message: 'down' })), 'network');
-  assert.equal(await kind(new Anthropic.AnthropicError('client-side parse failed')), 'parse');
+  assert.equal(await kind(new Anthropic.AnthropicError('sdk failure')), 'api');
   assert.equal(await kind(new TypeError('host bug')), 'raw');
 });
 

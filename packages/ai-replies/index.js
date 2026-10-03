@@ -214,6 +214,12 @@ function buildRequest({
   };
 }
 
+// An ESM host that passes its own client has its own copy of the SDK's error
+// classes (not === the CJS ones this file requires), so check both.
+function isSdkError(err, client, name) {
+  return [Anthropic[name], client?.constructor?.[name]].some((C) => typeof C === 'function' && err instanceof C);
+}
+
 function clampScore(n) {
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.min(100, Math.round(n)));
@@ -225,6 +231,7 @@ async function generateReply(opts) {
   const client = opts.client || getDefaultClient();
   if (!client) throw new AiReplyError('AI replies are not configured (ANTHROPIC_API_KEY is unset)', { kind: 'not_configured' });
   const { messages: [firstMessage], ...baseRequest } = buildRequest(opts);
+  const format = baseRequest.output_config.format;
   const tool = opts.availabilityTool || null;
 
   let response;
@@ -234,7 +241,10 @@ async function generateReply(opts) {
     // tool_use/tool_result trajectory belongs to that attempt.
     const messages = [firstMessage];
     try {
-      response = await client.messages.parse({ ...baseRequest, messages });
+      // create, not parse: parse() JSON-parses every text block before
+      // stop_reason can be checked, so a refusal's prose or a "Let me check."
+      // before a tool call would fail as unparseable. Parsed below instead.
+      response = await client.messages.create({ ...baseRequest, messages });
       for (let round = 0; response.stop_reason === 'tool_use' && round < MAX_TOOL_ROUNDS; round++) {
         messages.push({ role: 'assistant', content: response.content });
         const toolUses = response.content.filter((block) => block.type === 'tool_use');
@@ -248,16 +258,16 @@ async function generateReply(opts) {
           return { type: 'tool_result', tool_use_id: block.id, content };
         }));
         messages.push({ role: 'user', content: toolResults });
-        response = await client.messages.parse({ ...baseRequest, messages });
+        response = await client.messages.create({ ...baseRequest, messages });
       }
     } catch (err) {
       // Most-specific first; the message (with status) is what a host stores
       // on a failed draft for diagnosis.
-      if (err instanceof Anthropic.RateLimitError) throw new AiReplyError(`Rate limited by the Claude API: ${err.message}`, { kind: 'rate_limit', cause: err });
-      if (err instanceof Anthropic.APIConnectionError) throw new AiReplyError(`Could not reach the Claude API: ${err.message}`, { kind: 'network', cause: err });
-      if (err instanceof Anthropic.APIError) throw new AiReplyError(`Claude API error ${err.status}: ${err.message}`, { kind: 'api', cause: err });
-      // Client-side SDK failures, e.g. parsed_output failing the zod schema.
-      if (err instanceof Anthropic.AnthropicError) throw new AiReplyError(`Could not parse the draft: ${err.message}`, { kind: 'parse', cause: err });
+      if (isSdkError(err, client, 'RateLimitError')) throw new AiReplyError(`Rate limited by the Claude API: ${err.message}`, { kind: 'rate_limit', cause: err });
+      if (isSdkError(err, client, 'APIConnectionError')) throw new AiReplyError(`Could not reach the Claude API: ${err.message}`, { kind: 'network', cause: err });
+      if (isSdkError(err, client, 'APIError')) throw new AiReplyError(`Claude API error ${err.status}: ${err.message}`, { kind: 'api', cause: err });
+      // Any other SDK failure (bad client config, aborted request, ...).
+      if (isSdkError(err, client, 'AnthropicError')) throw new AiReplyError(`Claude SDK error: ${err.message}`, { kind: 'api', cause: err });
       throw err;
     }
 
@@ -268,7 +278,12 @@ async function generateReply(opts) {
     }
     if (response.stop_reason === 'max_tokens') throw new AiReplyError('Draft was cut off (max_tokens reached)', { kind: 'parse' });
     if (response.stop_reason === 'tool_use') throw new AiReplyError(`Model kept calling ${TOOL_NAME} without producing a final draft`, { kind: 'parse' });
-    parsed = response.parsed_output;
+    const finalText = response.content.filter((block) => block.type === 'text').at(-1)?.text;
+    try {
+      parsed = format.parse(finalText ?? '');
+    } catch (err) {
+      throw new AiReplyError(`Could not parse the draft: ${err.message}`, { kind: 'parse', cause: err });
+    }
     if (!parsed || !parsed.body?.trim()) throw new AiReplyError('Model returned an unparseable or empty draft', { kind: 'parse' });
 
     const corruption = findCorruption(parsed.body);
