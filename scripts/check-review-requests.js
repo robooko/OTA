@@ -2,6 +2,8 @@
 // fixture lives inside one transaction that is rolled back, so nothing
 // persists. Never point this at the live DB.
 //   node -r dotenv/config scripts/check-review-requests.js
+// No key, no client: a stub that fails to apply errors instead of emailing.
+delete process.env.RESEND_API_KEY;
 const assert = require('node:assert/strict');
 const { Client } = require('pg');
 const { claimDue, claimRetries } = require('../src/lib/reviewRequester');
@@ -142,6 +144,64 @@ const T = (s) => new Date(s); // all fixture instants in UTC; property is Europe
       assert.equal(rows.length, 1);
       await dinner('late@example.com', '2026-07-28', '19:00', '21:00');
       assert.deepEqual(mine(await claimDue(db, T('2026-07-28T21:00:00Z'))).filter((x) => x.email === 'late@example.com'), []);
+    });
+    // Stubs: reviewRequester calls resend and spa through their module
+    // objects, so sends can be observed without emailing anyone.
+    const resend = require('../src/lib/resend');
+    const spa = require('../src/controllers/spa');
+    const { sweep } = require('../src/lib/reviewRequester');
+    const realSend = resend.sendReviewRequest;
+    const realBranding = spa.resolveEmailBranding;
+    const sends = [];
+    resend.sendReviewRequest = async (args) => { sends.push(args); return `em_${sends.length}`; };
+
+    await check('sweep: an early failure in one send does not drop the rest', async () => {
+      await dinner('s1@example.com', '2026-07-29', '18:00', '19:00');
+      await dinner('s2@example.com', '2026-07-29', '18:30', '19:30');
+      let first = true;
+      spa.resolveEmailBranding = async (...a) => { if (first) { first = false; throw new Error('boom'); } return realBranding(...a); };
+      try {
+        await sweep(db, T('2026-07-29T19:00:00Z'));
+      } finally {
+        spa.resolveEmailBranding = realBranding;
+      }
+      const { rows } = await db.query(`SELECT email, sent_at, resend_email_id FROM review_request WHERE property_id = $1 AND email IN ('s1@example.com', 's2@example.com')`, [P]);
+      assert.equal(rows.length, 2);
+      assert.equal(rows.filter((r) => r.sent_at === null).length, 1, 'the failed one is released for retry');
+      assert.equal(rows.filter((r) => r.resend_email_id).length, 1, 'the other one was still sent');
+    });
+
+    await check('send: per-request idempotency key, venue as reply-to', async () => {
+      await db.query(`UPDATE property SET fallback_email = 'frontdesk@example.com' WHERE id = $1`, [P]);
+      await dinner('s3@example.com', '2026-07-30', '18:00', '19:00');
+      sends.length = 0;
+      await sweep(db, T('2026-07-30T19:00:00Z'));
+      const sent = sends.filter((x) => x.to === 's3@example.com');
+      assert.equal(sent.length, 1);
+      const { rows: [r] } = await db.query(`SELECT id FROM review_request WHERE property_id = $1 AND email = 's3@example.com'`, [P]);
+      assert.equal(sent[0].idempotencyKey, `review-request/${r.id}`);
+      assert.equal(sent[0].replyTo, 'frontdesk@example.com');
+    });
+
+    resend.sendReviewRequest = realSend;
+
+    await check('legacy opt-out stored with whitespace still blocks', async () => {
+      await db.query(`INSERT INTO review_request_opt_out (property_id, email) VALUES ($1, 'legacy@example.com ')`, [P]);
+      await dinner('legacy@example.com', '2026-07-31', '18:00', '19:00');
+      assert.deepEqual(mine(await claimDue(db, T('2026-07-31T19:00:00Z'))).filter((x) => x.email === 'legacy@example.com'), []);
+    });
+
+    await check('regular: a weekly diner is still asked (the lookahead is the visit, not "back soon")', async () => {
+      await dinner('weekly@example.com', '2026-08-03', '18:00', '19:00');
+      await dinner('weekly@example.com', '2026-08-10', '18:00', '19:00');
+      assert.equal(mine(await claimDue(db, T('2026-08-03T19:00:00Z'))).filter((x) => x.email === 'weekly@example.com').length, 1);
+    });
+
+    await check('same visit: a dinner the night before a stay waits for check-out', async () => {
+      const g = await guest('arrive@example.com');
+      await dinner('arrive@example.com', '2026-08-05', '18:00', '19:00'); // ends 18:00Z on the 5th
+      await stay(g.id, '2026-08-06', '2026-08-08');                          // check-in 15:00 BST on the 6th
+      assert.deepEqual(mine(await claimDue(db, T('2026-08-05T19:00:00Z'))).filter((x) => x.email === 'arrive@example.com'), []);
     });
   } finally {
     await db.query('ROLLBACK');

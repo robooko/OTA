@@ -421,7 +421,7 @@ async function sendReservationReminder(reservation, propertyName, branding, optO
 // Google's review policy. `reviewUrl` is the property's "Ask for reviews"
 // short link (https://g.page/r/…/review); `optOutUrl` is this request's own
 // unauthenticated, property-wide opt-out link.
-async function sendReviewRequest({ to, name, propertyName, branding, reviewUrl, optOutUrl }) {
+async function sendReviewRequest({ to, name, propertyName, branding, reviewUrl, optOutUrl, replyTo, idempotencyKey }) {
   if (!client) throw new Error('Resend not configured');
   const subject = `How was your visit to ${propertyName}?`;
   const greeting = name ? `Hi ${name},` : 'Hi there,';
@@ -438,6 +438,8 @@ async function sendReviewRequest({ to, name, propertyName, branding, reviewUrl, 
   const { data, error } = await client.emails.send({
     from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
     to,
+    // Guests answer review emails (thanks, complaints): send them to the venue.
+    ...(replyTo ? { replyTo } : {}),
     subject,
     text,
     html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;margin:0 auto;">
@@ -447,7 +449,7 @@ async function sendReviewRequest({ to, name, propertyName, branding, reviewUrl, 
       ${ctaHtml}
       <p style="margin:24px 0 0;font-size:12px;">${unsubscribeHtml}</p>
     </div>`,
-  });
+  }, idempotencyKey ? { idempotencyKey } : undefined);
   if (error) throw new Error(error.message);
   return data.id;
 }

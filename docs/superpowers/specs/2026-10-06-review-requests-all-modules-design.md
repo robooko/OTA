@@ -107,9 +107,12 @@ guest (property `P`, email `E`) is due when:
 2. some candidate of E at P ended between 2 days ago and
    `now() - review_request_delay_mins` (the 2-day floor means switching
    the feature on never backfills history);
-3. **no candidate of E at P ends after now and within the next 14 days**
-   (they're still on-site or coming back soon; they'll be asked after
-   that booking instead);
+3. **their visit is over**: no room stay of E at P is in progress or
+   starts within 24 hours (a stay starts at 15:00 local on check-in), and
+   no other booking of E at P ends within the next 24 hours. A regular
+   who's back next week is asked now; the cooldown handles repeat visits.
+   (Revised after review: a 14-day lookahead meant weekly regulars were
+   never asked.)
 4. no `review_request` for E at P was created within
    `review_request_cooldown_days`;
 5. E has not opted out at P.
@@ -174,3 +177,10 @@ two dinners; it calls the claim with an injectable `now`:
 
 Then on the local server with a real Resend key and a test inbox: one
 end-to-end send, and the opt-out link writes `review_request_opt_out`.
+
+## Deploy order
+
+Deploy the code first, then run the migration on the live DB. The other
+order lets the old spa sender keep claiming after the backfill snapshot,
+so a spa guest could be asked twice; deploy-first only costs
+`review_candidate does not exist` log lines until the migration runs.

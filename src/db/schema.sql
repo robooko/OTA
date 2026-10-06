@@ -598,27 +598,30 @@ SELECT * FROM (
   -- rooms: departure counted as 11:00 local on the check-out date
   SELECT b.property_id, lower(trim(g.email))::varchar(255) AS email, g.first_name::varchar(100) AS contact_name,
          'rooms'::varchar(30) AS module, b.id AS booking_id,
-         (b.check_out + time '11:00') AT TIME ZONE p.timezone AS ended_at
+         (b.check_out + time '11:00') AT TIME ZONE p.timezone AS ended_at,
+         -- a stay "starts" at 15:00 local on check-in; anything of theirs
+         -- before then is the same visit
+         (b.check_in + time '15:00') AT TIME ZONE p.timezone AS started_at
   FROM booking b JOIN guest g ON g.id = b.guest_id JOIN property p ON p.id = b.property_id
   WHERE coalesce(b.status, 'confirmed') NOT IN ('cancelled', 'no_show')
   UNION ALL
   SELECT r.property_id, lower(trim(r.contact_email)), r.contact_name, 'restaurant_reservations', r.id,
-         (r.reservation_date + r.end_time) AT TIME ZONE p.timezone
+         (r.reservation_date + r.end_time) AT TIME ZONE p.timezone, NULL::timestamptz
   FROM restaurant_reservation r JOIN property p ON p.id = r.property_id
   WHERE coalesce(r.status, 'confirmed') NOT IN ('cancelled', 'no_show')
   UNION ALL
-  SELECT o.property_id, lower(trim(o.contact_email)), o.contact_name, 'restaurants', o.id, o.paid_at
+  SELECT o.property_id, lower(trim(o.contact_email)), o.contact_name, 'restaurants', o.id, o.paid_at, NULL::timestamptz
   FROM restaurant_order o
   WHERE o.payment_status = 'paid' AND o.paid_at IS NOT NULL
   UNION ALL
   SELECT s.property_id, lower(trim(s.contact_email)), s.contact_name, 'spa', s.id,
-         (s.appointment_date + s.end_time) AT TIME ZONE p.timezone
+         (s.appointment_date + s.end_time) AT TIME ZONE p.timezone, NULL::timestamptz
   FROM spa_appointment s JOIN property p ON p.id = s.property_id
   WHERE coalesce(s.status, 'confirmed') NOT IN ('cancelled', 'no_show')
   UNION ALL
   -- tours: the tour's own duration after the slot starts
   SELECT tb.property_id, lower(trim(coalesce(tb.contact_email, g.email))), tb.contact_name, 'tours', tb.id,
-         (ts.slot_date + ts.slot_time + make_interval(mins => t.duration_mins)) AT TIME ZONE p.timezone
+         (ts.slot_date + ts.slot_time + make_interval(mins => t.duration_mins)) AT TIME ZONE p.timezone, NULL::timestamptz
   FROM tour_booking tb
   JOIN tour_slot ts ON ts.id = tb.slot_id JOIN tour t ON t.id = ts.tour_id
   JOIN property p ON p.id = tb.property_id LEFT JOIN guest g ON g.id = tb.guest_id
@@ -626,7 +629,7 @@ SELECT * FROM (
   UNION ALL
   -- golf: a round counted as 4 hours from the tee time
   SELECT gb.property_id, lower(trim(coalesce(gb.contact_email, g.email))), gb.contact_name, 'golf', gb.id,
-         (tt.tee_date + tt.tee_time + interval '4 hours') AT TIME ZONE p.timezone
+         (tt.tee_date + tt.tee_time + interval '4 hours') AT TIME ZONE p.timezone, NULL::timestamptz
   FROM golf_booking gb
   JOIN tee_time tt ON tt.id = gb.tee_time_id
   JOIN property p ON p.id = gb.property_id LEFT JOIN guest g ON g.id = gb.guest_id
@@ -635,7 +638,7 @@ SELECT * FROM (
   -- equipment: start + duration hours; a hire with no start time ends at the end of its day
   SELECT e.property_id, lower(trim(coalesce(e.contact_email, g.email))), e.contact_name, 'equipment', e.id,
          (CASE WHEN e.start_time IS NULL THEN e.hire_date + time '00:00' + interval '24 hours'
-               ELSE e.hire_date + e.start_time + make_interval(secs => coalesce(e.duration, 1) * 3600) END) AT TIME ZONE p.timezone
+               ELSE e.hire_date + e.start_time + make_interval(secs => coalesce(e.duration, 1) * 3600) END) AT TIME ZONE p.timezone, NULL::timestamptz
   FROM equipment_hire e
   JOIN property p ON p.id = e.property_id LEFT JOIN guest g ON g.id = e.guest_id
   WHERE coalesce(e.status, 'confirmed') NOT IN ('cancelled', 'no_show')
