@@ -27,6 +27,7 @@ const eventInquiryRoutes = require('./routes/eventInquiries');
 const mcpRoutes = require('./routes/mcp');
 const billingRoutes = require('./routes/billing');
 const reviewRoutes = require('./routes/reviews');
+const reviewRequestRoutes = require('./routes/reviewRequests');
 
 const app = express();
 
@@ -77,6 +78,7 @@ app.use('/api/event-inquiries', eventInquiryRoutes);
 app.use('/api/mcp', mcpRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/review-opt-out', reviewRoutes);
+app.use('/api/review-requests', reviewRequestRoutes);
 
 app.use(errorHandler);
 
