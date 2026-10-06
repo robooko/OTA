@@ -10,6 +10,7 @@ const {
   client: ablyClient,
 } = require('../lib/ably');
 const { sendAppointmentConfirmation, sendAppointmentCancellation, sendAppointmentHoldRequest, escapeHtml, formatAppointmentDate } = require('../lib/resend');
+const { optOut } = require('./reviews');
 const { memberRateUntil, resolveRate } = require('../lib/spaMemberRate');
 const guard = require('../lib/spaBookingGuard');
 
@@ -1550,13 +1551,7 @@ async function reviewOptOut(req, res, next) {
     const appointment = rows[0];
     if (!appointment) return res.status(404).send('<p>That link is no longer valid.</p>');
 
-    if (appointment.contact_email) {
-      await pool.query(
-        `INSERT INTO review_request_opt_out (property_id, email) VALUES ($1, lower($2))
-         ON CONFLICT DO NOTHING`,
-        [appointment.property_id, appointment.contact_email]
-      );
-    }
+    await optOut(pool, appointment.property_id, appointment.contact_email);
 
     res.send(`<p>You won't be asked for a review by ${escapeHtml(appointment.property_name)} again.</p>`);
   } catch (err) { next(err); }

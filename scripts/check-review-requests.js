@@ -5,6 +5,7 @@
 const assert = require('node:assert/strict');
 const { Client } = require('pg');
 const { claimDue, claimRetries } = require('../src/lib/reviewRequester');
+const { optOut } = require('../src/controllers/reviews');
 
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
@@ -133,6 +134,14 @@ const T = (s) => new Date(s); // all fixture instants in UTC; property is Europe
       await db.query('UPDATE review_request SET sent_at = NULL WHERE id = $1', [r.id]);
       assert.deepEqual(mine(await claimRetries(db, T('2026-07-27T21:30:00Z'))), [], 'gives up after 3');
       assert.deepEqual(mine(await claimDue(db, T('2026-07-27T21:30:00Z'))), [], 'and is not claimed afresh');
+    });
+    await check('opt-out writer: lowercases, idempotent, then blocks claims', async () => {
+      await optOut(db, P, ' Late@Example.com');
+      await optOut(db, P, 'late@example.com');
+      const { rows } = await db.query(`SELECT email FROM review_request_opt_out WHERE property_id = $1 AND email = 'late@example.com'`, [P]);
+      assert.equal(rows.length, 1);
+      await dinner('late@example.com', '2026-07-28', '19:00', '21:00');
+      assert.deepEqual(mine(await claimDue(db, T('2026-07-28T21:00:00Z'))).filter((x) => x.email === 'late@example.com'), []);
     });
   } finally {
     await db.query('ROLLBACK');
