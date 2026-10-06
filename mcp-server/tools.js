@@ -712,7 +712,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'get_property',
-    description: 'The property (venue/org) this API key operates for: id, name, currency, timezone',
+    description: 'The property (venue/org) this API key operates for: id, clerk_org_id (the Clerk organization, null if none is linked), name, currency, timezone, tax settings, enabled modules',
     inputSchema: {},
     run: () => apiRequest('GET', '/api/property/me'),
   },

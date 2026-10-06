@@ -52,7 +52,7 @@ function generateApiKey() {
 async function getCurrentProperty(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules FROM property WHERE id = $1',
+      'SELECT id, clerk_org_id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules FROM property WHERE id = $1',
       [req.property_id]
     );
     res.json(rows[0]);
