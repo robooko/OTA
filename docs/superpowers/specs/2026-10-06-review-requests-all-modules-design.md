@@ -56,7 +56,7 @@ meaning all modules on, as elsewhere).
 | `restaurant_reservations` | `restaurant_reservation` | `contact_email` | `reservation_date + end_time` (or `start_time` + 2 h when `end_time` is null) | not `cancelled` / `no_show` |
 | `restaurants` | `restaurant_order` | `contact_email` | `paid_at` | `payment_status = 'paid'` |
 | `spa` | `spa_appointment` | `contact_email` | `appointment_date + end_time` | not `cancelled` / `no_show` |
-| `tours` | `tour_booking` join `tour_slot` | `contact_email` (else `guest.email`) | `slot_date + slot_time` + 3 h | not `cancelled` |
+| `tours` | `tour_booking` join `tour_slot` join `tour` | `contact_email` (else `guest.email`) | `slot_date + slot_time + tour.duration_mins` | not `cancelled` / `no_show` |
 | `golf` | `golf_booking` join `tee_time` | `contact_email` (else `guest.email`) | `tee_date + tee_time` + 4 h | not `cancelled` |
 | `equipment` | `equipment_hire` | `contact_email` (else `guest.email`) | `hire_date + start_time + duration` hours (start of day + 24 h when `start_time` is null) | not `cancelled` |
 
@@ -78,6 +78,7 @@ CREATE TABLE review_request (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id      UUID NOT NULL REFERENCES property(id),
   email            VARCHAR(255) NOT NULL,          -- lowercased
+  contact_name     VARCHAR(100),                   -- copied at claim time, for the greeting and retries
   module           VARCHAR(30)  NOT NULL,          -- the booking that triggered it
   booking_id       UUID NOT NULL,
   sent_at          TIMESTAMPTZ,                    -- NULL while released for retry
