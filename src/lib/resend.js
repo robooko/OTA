@@ -415,54 +415,37 @@ async function sendReservationReminder(reservation, propertyName, branding, optO
   return data.id;
 }
 
-// Sent once, ~review_request_delay_mins after an appointment ends (see
-// src/lib/reviewRequester.js) -- never gated on rating, tip, or repeat
-// status; every eligible attendee gets the same words, per Google's review
-// policy (docs/superpowers/specs/2026-09-01-spa-review-requests-design.md).
-// `reviewUrl` is the property's "Ask for reviews" short link
-// (https://g.page/r/…/review); `optOutUrl` is this appointment's own
-// unauthenticated opt-out link. `appointment` is the same joined shape
-// getFullAppointmentForEmail returns for the other two appointment emails.
-async function sendReviewRequest(appointment, propertyName, branding, reviewUrl, optOutUrl) {
+// Post-visit review request, one per guest per visit whatever they booked
+// (src/lib/reviewRequester.js decides who and when) -- never gated on
+// rating or repeat status; every eligible guest gets the same words, per
+// Google's review policy. `reviewUrl` is the property's "Ask for reviews"
+// short link (https://g.page/r/…/review); `optOutUrl` is this request's own
+// unauthenticated, property-wide opt-out link.
+async function sendReviewRequest({ to, name, propertyName, branding, reviewUrl, optOutUrl }) {
   if (!client) throw new Error('Resend not configured');
-  const dateLabel = formatAppointmentDate(appointment.appointment_date);
-  const subject = `How was your ${appointment.treatment_name}?`;
-  const note = `Thanks for coming in on ${dateLabel}. If you've got thirty seconds, a Google review makes a real difference to a small shop like ours.`;
+  const subject = `How was your visit to ${propertyName}?`;
+  const greeting = name ? `Hi ${name},` : 'Hi there,';
+  const note = `Thanks for visiting ${propertyName}. If you've got thirty seconds, a Google review makes a real difference to us.`;
 
-  const text = [
-    `Hi ${appointment.contact_name},`,
-    '',
-    note,
-    '',
-    `Leave a Google review: ${reviewUrl}`,
-    '',
-    `Don't want these? Unsubscribe: ${optOutUrl}`,
-    '',
-    appointment.spa_address,
-    appointment.spa_phone,
-  ]
-    .filter((line) => line !== undefined && line !== null)
-    .join('\n');
+  const text = [greeting, '', note, '', `Leave a Google review: ${reviewUrl}`, '', `Don't want these? Unsubscribe: ${optOutUrl}`].join('\n');
 
   const logoHtml = brandingHeaderHtml(branding, propertyName);
   const ctaHtml = `<div style="margin:20px 0;">
       <a href="${escapeHtml(reviewUrl)}" style="display:inline-block;background:${branding?.brand_color || '#1a1a1a'};color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:6px;">Leave a Google review</a>
     </div>`;
   const unsubscribeHtml = `<a href="${escapeHtml(optOutUrl)}" style="color:#888;text-decoration:underline;">Don't want these? Unsubscribe</a>`;
-  const footerHtml = addressFooterHtml({ address: appointment.spa_address, phone: appointment.spa_phone }, unsubscribeHtml);
 
   const { data, error } = await client.emails.send({
     from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
-    to: appointment.contact_email,
-    ...(appointment.spa_contact_email ? { replyTo: appointment.spa_contact_email } : {}),
+    to,
     subject,
     text,
     html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;margin:0 auto;">
       ${logoHtml}
-      <p style="margin:0 0 16px;">Hi ${escapeHtml(appointment.contact_name)},</p>
+      <p style="margin:0 0 16px;">${escapeHtml(greeting)}</p>
       <p style="margin:0 0 20px;">${escapeHtml(note)}</p>
       ${ctaHtml}
-      ${footerHtml}
+      <p style="margin:24px 0 0;font-size:12px;">${unsubscribeHtml}</p>
     </div>`,
   });
   if (error) throw new Error(error.message);
