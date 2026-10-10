@@ -712,7 +712,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'get_property',
-    description: 'The property (venue/org) this API key operates for: id, clerk_org_id (the Clerk organization, null if none is linked), name, currency, timezone, tax settings, enabled modules',
+    description: 'The property (venue/org) this API key operates for: id, clerk_org_id (the Clerk organization, null if none is linked), name, currency, timezone, tax settings, enabled modules, sidon_marina_id (linked Sidon marina, null if none)',
     inputSchema: {},
     run: () => apiRequest('GET', '/api/property/me'),
   },
@@ -726,6 +726,7 @@ function createTools(apiRequest) {
       tax_rate: z.number().min(0).max(100).optional().describe('Tax rate as a percentage, e.g. 20 for 20%'),
       tax_inclusive: z.boolean().optional().describe('true = displayed/charged prices already include tax; false = tax is added at checkout'),
       tax_id: z.string().nullable().optional().describe('VAT/tax registration number printed on invoices, or null to clear'),
+      sidon_marina_id: z.string().nullable().optional().describe("Sidon marina owner id (org_...) this property runs, shown on the dashboard's Marina page; null to clear"),
     },
     run: (args) => apiRequest('PUT', '/api/property/me', { body: args }),
   },

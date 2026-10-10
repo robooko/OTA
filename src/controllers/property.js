@@ -52,7 +52,7 @@ function generateApiKey() {
 async function getCurrentProperty(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT id, clerk_org_id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules FROM property WHERE id = $1',
+      'SELECT id, clerk_org_id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id FROM property WHERE id = $1',
       [req.property_id]
     );
     res.json(rows[0]);
@@ -66,7 +66,7 @@ async function getCurrentProperty(req, res, next) {
 // (website checkout) apply them today.
 async function updateCurrentProperty(req, res, next) {
   try {
-    const { currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules } = req.body;
+    const { currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id } = req.body;
     if (currency !== undefined && !isValidCurrencyCode(currency)) {
       return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP)' });
     }
@@ -85,6 +85,11 @@ async function updateCurrentProperty(req, res, next) {
     if (enabled_modules !== undefined && enabled_modules !== null && !isValidEnabledModules(enabled_modules)) {
       return res.status(400).json({ error: `enabled_modules must be an array drawn from: ${MODULE_KEYS.join(', ')}, or null` });
     }
+    // Sidon's marina owner id, e.g. org_3D7m... -- null clears it.
+    if (sidon_marina_id !== undefined && sidon_marina_id !== null
+        && (typeof sidon_marina_id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(sidon_marina_id))) {
+      return res.status(400).json({ error: 'sidon_marina_id must be a Sidon marina id (letters, digits, _ or -), or null' });
+    }
     const { rows } = await pool.query(
       `UPDATE property SET
          currency            = COALESCE($1, currency),
@@ -94,13 +99,15 @@ async function updateCurrentProperty(req, res, next) {
          tax_inclusive       = COALESCE($5, tax_inclusive),
          tax_id              = COALESCE($6, tax_id),
          return_instructions = CASE WHEN $8::boolean  THEN $7::text  ELSE return_instructions END,
-         enabled_modules     = CASE WHEN $10::boolean THEN $9::jsonb ELSE enabled_modules     END
+         enabled_modules     = CASE WHEN $10::boolean THEN $9::jsonb ELSE enabled_modules     END,
+         sidon_marina_id     = CASE WHEN $13::boolean THEN $12::text ELSE sidon_marina_id     END
        WHERE id = $11
-       RETURNING id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules`,
+       RETURNING id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id`,
       [currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id,
         return_instructions ?? null, return_instructions !== undefined,
         enabled_modules != null ? JSON.stringify(enabled_modules) : null, enabled_modules !== undefined,
-        req.property_id]
+        req.property_id,
+        sidon_marina_id ?? null, sidon_marina_id !== undefined]
     );
     res.json(rows[0]);
   } catch (err) {
