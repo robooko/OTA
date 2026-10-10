@@ -52,7 +52,7 @@ function generateApiKey() {
 async function getCurrentProperty(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT id, clerk_org_id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id FROM property WHERE id = $1',
+      'SELECT id, clerk_org_id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id, sidon_marina_key IS NOT NULL AS sidon_marina_key_set FROM property WHERE id = $1',
       [req.property_id]
     );
     res.json(rows[0]);
@@ -100,9 +100,13 @@ async function updateCurrentProperty(req, res, next) {
          tax_id              = COALESCE($6, tax_id),
          return_instructions = CASE WHEN $8::boolean  THEN $7::text  ELSE return_instructions END,
          enabled_modules     = CASE WHEN $10::boolean THEN $9::jsonb ELSE enabled_modules     END,
-         sidon_marina_id     = CASE WHEN $13::boolean THEN $12::text ELSE sidon_marina_id     END
+         sidon_marina_id     = CASE WHEN $13::boolean THEN $12::text ELSE sidon_marina_id     END,
+         -- A changed or cleared marina id drops the stored key with it (the
+         -- right-hand side sees the old id), on every rail -- the key is
+         -- admin-set and only valid for the marina it was entered for.
+         sidon_marina_key    = CASE WHEN $13::boolean AND $12::text IS DISTINCT FROM sidon_marina_id THEN NULL ELSE sidon_marina_key END
        WHERE id = $11
-       RETURNING id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id`,
+       RETURNING id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id, sidon_marina_key IS NOT NULL AS sidon_marina_key_set`,
       [currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id,
         return_instructions ?? null, return_instructions !== undefined,
         enabled_modules != null ? JSON.stringify(enabled_modules) : null, enabled_modules !== undefined,

@@ -726,7 +726,7 @@ function createTools(apiRequest) {
       tax_rate: z.number().min(0).max(100).optional().describe('Tax rate as a percentage, e.g. 20 for 20%'),
       tax_inclusive: z.boolean().optional().describe('true = displayed/charged prices already include tax; false = tax is added at checkout'),
       tax_id: z.string().nullable().optional().describe('VAT/tax registration number printed on invoices, or null to clear'),
-      sidon_marina_id: z.string().nullable().optional().describe("Sidon marina owner id (org_...) this property runs, shown on the dashboard's Marina page; null to clear"),
+      sidon_marina_id: z.string().nullable().optional().describe("Sidon marina owner id (org_...) this property runs, shown on the dashboard's Marina page; null to clear. Changing or clearing it drops the stored marina API key (an admin re-enters it in Settings)"),
     },
     run: (args) => apiRequest('PUT', '/api/property/me', { body: args }),
   },
@@ -750,6 +750,12 @@ function createTools(apiRequest) {
       review_request_cooldown_days: z.number().int().min(0).max(365).optional().describe('Days before the same guest can be asked again'),
     },
     run: (args) => apiRequest('PUT', '/api/property/email-branding', { body: args }),
+  },
+  {
+    name: 'list_marina_bookings',
+    description: "Berth bookings at the property's linked Sidon marina (read live from Sidon): berth, sailor, boat, arrival/departure dates, nights, status (pending/confirmed/cancelled...), amount. Every booking Sidon holds, newest first -- filter by date yourself. A pending booking past expires_at is a lapsed hold. Fails if no marina is linked or its API key isn't set.",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/marina/bookings'),
   },
   {
     name: 'list_review_requests',

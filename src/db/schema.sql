@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS property (
   -- once set, it's the exhaustive list of enabled module keys (see
   -- controllers/property.js's MODULE_KEYS).
   enabled_modules JSONB,
+  -- Linked Sidon marina (owner id, org_...) and its API key (mk_...), see
+  -- migrate-2026-10-10-property-sidon-marina*.sql. The key is admin-set and
+  -- never returned by any GET, like stripe_secret_key.
+  sidon_marina_id  VARCHAR(100),
+  sidon_marina_key TEXT,
   created_at       TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT property_ai_reply_mode_check CHECK (ai_reply_mode IN ('off', 'draft', 'auto')),
   CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100),
