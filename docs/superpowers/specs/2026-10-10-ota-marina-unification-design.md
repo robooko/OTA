@@ -299,7 +299,7 @@ a bearer (the dashboard) gets staff behaviour on the same reads.
 | `POST /:marina/bookings/:id/documents?requirement_id=` | raw-body upload (token) |
 | `POST /:marina/bookings/:id/contract` | agree (token) |
 | `POST /:marina/bookings/:id/cancel` | guest cancel while `hold`/`pending` (token) |
-| `GET /:marina/bookings/:id/ably-token` | subscribe-only TokenRequest for `marina-booking:{id}` (token) |
+| `GET /:marina/bookings/:id/ably-token` | subscribe-only TokenRequest for `marina-booking:{id}` (token); new `createSubscribeTokenRequest(channel)` in `src/lib/ably.js` (OTA issues no TokenRequests today) |
 | `POST /:marina/enquiries` | `{name, email, phone?, message, arrival?, departure?, boat_length_m?}` → an `event_inquiry` with `marina_id`; shares `createInquiry`'s validation and token-balance gate (core factored out), then the AI reply pipeline |
 | `GET /api/marina/confirm-booking/:id/:confirmToken` | unauthenticated email-confirm link, emailed as an absolute `${OTA_API_BASE_URL}/api/marina/confirm-booking/…` URL (spa pattern), never via a forwarder. Moves `hold` → `pending`, then redirects to `booking_url` (filled), or renders a plain confirmation page when unset. |
 
@@ -349,18 +349,22 @@ Open-ended (staff/import only) bookings have no total.
   in one transaction: `SELECT … FOR UPDATE` on the booking (spa
   `confirmBooking` pattern), re-check the expected status (and
   `hold_expires_at > now()` for guest `hold`/`pending`; a lapsed row is
-  cancelled instead), call Stripe with an idempotency key
+  cancelled instead, except a `hold` whose PI is already
+  `requires_capture`, which is promoted — see Payments), call Stripe with an idempotency key
   (`marina-capture-{id}`, `marina-cancel-{id}`, `marina-refund-{id}`),
   then update and commit. `payment_status = released` only after
   Stripe's cancel succeeds.
 - **Sweep:** `startMarinaHoldExpiryJob` in `server.js` beside the spa
-  hold-expiry job, every 60 s, `WHERE source = 'guest' AND status IN
+  `startHoldExpiryJob`, every 60 s, `WHERE source = 'guest' AND status IN
   ('hold','pending') AND hold_expires_at < now()`, each row under the
   same row lock (skipping rows whose status changed). Before cancelling
   an expired `hold` that has a PI, it retrieves the PI: if
   `requires_capture` with matching amount and currency, it moves the
   booking to `pending` instead (there's no webhook to catch a guest who
-  closed the tab after authorising). Otherwise it cancels the booking,
+  closed the tab after authorising), with the same side effects as
+  confirm-payment: `payment_status = 'held'`, `hold_expires_at = now +
+  response_window_hours`, `new-booking` published, the received email
+  sent, the auto-confirm check run. Otherwise it cancels the booking,
   releases the PI, publishes, and emails the guest for expired
   `pending`. A failed release keeps `payment_error` and is retried on
   the next pass.
@@ -491,9 +495,10 @@ Per-property Stripe, no Connect.
   stored key, naming both modes; changing modes means clearing the other
   key first.
 - `POST bookings`, card path (priced, and the property has both a secret
-  and a publishable key; otherwise the email-confirm path): inside the
-  transaction insert the `hold`; then create a PaymentIntent on the
-  property's account: `capture_method: 'manual'`, card,
+  and a publishable key; otherwise the email-confirm path): insert the
+  `hold` and commit (no transaction is held open across a Stripe call);
+  then create a PaymentIntent on the property's account and store its id
+  on the row: `capture_method: 'manual'`, card,
   `amount = toCents(total_price)`, `currency = booking.currency
   .toLowerCase()`, `metadata {property_id, marina_booking_id}`,
   idempotency key `marina-booking-{id}`. Return `{client_secret,
@@ -506,6 +511,10 @@ Per-property Stripe, no Connect.
   `pi.amount = toCents(total_price)`,
   `pi.currency = booking.currency.toLowerCase()`,
   `status = 'requires_capture'` → `pending`, `payment_status = 'held'`.
+  This holds even if `hold_expires_at` has just passed while the row is
+  still `hold`: an authorised card is promoted, exactly as the sweep
+  would (one rule, `promoteHeldBooking`, used by both). Only a lapsed hold
+  whose PI is *not* `requires_capture` is cancelled.
 - Confirm (staff or auto) → `paymentIntents.capture`. Failure: stays
   `pending`, `payment_error` set, 502 with Stripe's message to staff.
   Decline / guest cancel / expiry → `paymentIntents.cancel`. Staff
@@ -575,7 +584,10 @@ sidon-booking-widget):
   `?booking=&token=` and shows status (live via the booking's Ably
   token), payment resume while `hold`, document uploads, the contract,
   and cancel. Each site hosts this page; its URL is the marina's
-  `booking_url`.
+  `booking_url`. The page carries the token in its query string, so it
+  must be served with `Referrer-Policy: no-referrer` (the widget's
+  install notes say so, and the page loads no third-party scripts beyond
+  Stripe's).
 - `<sidon-berth-map>` reads `GET /:marina[?from&to]`.
 - Export `@forgebuild/sidon-booking-widget/astro-proxy`:
   - `createMarinaProxy({ otaBaseUrl, keys })` returns an Astro `APIRoute`
