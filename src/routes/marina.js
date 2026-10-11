@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/marina');
 const cat = require('../controllers/marinaCatalogue');
+const guest = require('../controllers/marinaGuest');
 const { authenticate, authenticateOrApiKey, requireRole } = require('../middleware/auth');
 
 // Literal segments before '/:id' throughout (see eventInquiries.js).
@@ -22,5 +23,12 @@ for (const kind of Object.keys(cat.TABLES)) {
   router.post(`/marinas/:marina_id/${kind}`, authenticateOrApiKey, h.create);
   router.put(`/marinas/:marina_id/${kind}/:id`, authenticateOrApiKey, h.update);
 }
+
+// Guest rail -- the only prefix a site's forwarder passes through.
+const G = '/guest/:marina';
+router.get(G, authenticateOrApiKey, guest.resolveMarina, guest.getMarinaMap);
+router.get(`${G}/availability`, authenticateOrApiKey, guest.resolveMarina, guest.getAvailability);
+router.get(`${G}/doc-requirements`, authenticateOrApiKey, guest.resolveMarina, guest.getDocRequirements);
+router.post(`${G}/quote`, authenticateOrApiKey, guest.resolveMarina, guest.quote);
 
 module.exports = router;

@@ -175,6 +175,24 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal(renameBerthInSvg('<r data-berth-id="A.1"/><r data-berth-id="AX1"/>', 'A.1', 'B'), '<r data-berth-id="B"/><r data-berth-id="AX1"/>');
     });
 
+    // ---- Task 5: availability ----
+    const q = require('../src/lib/marinaQueries');
+    await check('freeBerths excludes overlapping live bookings, maintenance and inactive', async () => {
+      const c = await berth('C1'); const d = await berth('C2'); const e = await berth('C3');
+      await db.query("UPDATE marina_berth SET status = 'maintenance' WHERE id = $1", [d.id]);
+      await db.query("UPDATE marina_berth SET status = 'inactive' WHERE id = $1", [e.id]);
+      await booking(berthA.id, '2028-03-01', '2028-03-10', 'pending', 'guest');
+      await booking(berthB.id, '2028-03-01', '2028-03-10', 'cancelled');
+      const ids = (await q.freeBerths(db, marina.id, '2028-03-05', '2028-03-06')).map((b) => b.id);
+      assert.ok(!ids.includes(berthA.id)); assert.ok(ids.includes(berthB.id)); assert.ok(ids.includes(c.id));
+      assert.ok(!ids.includes(d.id)); assert.ok(!ids.includes(e.id));
+      const avail = await q.berthAvailability(db, marina.id, '2028-03-05', '2028-03-06');
+      assert.equal(avail.get(d.id), false); assert.equal(avail.has(e.id), false); assert.equal(avail.get(berthA.id), false);
+    });
+    await check('propertyToday uses the property timezone', async () => {
+      assert.match(await q.propertyToday(db, P), /^\d{4}-\d{2}-\d{2}$/);
+    });
+
     // (later tasks append their checks here)
   } finally {
     await db.query('ROLLBACK');
