@@ -843,6 +843,24 @@ function createTools(apiRequest) {
     run: () => apiRequest('GET', '/api/review-requests/opt-outs'),
   },
   {
+    name: 'get_agentic_commerce',
+    description: "The property's Stripe agentic-commerce settings (selling pro shop items through AI agents like ChatGPT): enabled, sanity_project_id, sanity_dataset, site_url, brand -- or null when never set up",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/property/agentic-commerce'),
+  },
+  {
+    name: 'set_agentic_commerce',
+    description: "Set the property's Stripe agentic-commerce settings. Needs a staff admin session (Bearer), not an API key. Per field: omit to leave unchanged. enabled=true needs all four other fields and a Stripe secret key on the property. Product copy, images and pages are read from the venue's public Sanity; OTA stores only these pointers.",
+    inputSchema: {
+      enabled: z.boolean().optional(),
+      sanity_project_id: z.string().optional().describe('Sanity project id of the venue site, e.g. a26xzsqt'),
+      sanity_dataset: z.string().optional().describe('Sanity dataset, e.g. production'),
+      site_url: z.string().optional().describe('Venue site base URL; product links are <site_url>/shop/<slug>/'),
+      brand: z.string().optional().describe('Brand printed on every product, 1-70 characters'),
+    },
+    run: (args) => apiRequest('PUT', '/api/property/agentic-commerce', { body: args }),
+  },
+  {
     name: 'get_ai_reply_settings',
     description: "The property's AI enquiry-reply settings: mode (off/draft/auto), instructions, auto_send_min_score, and whether the feature is configured on this server",
     inputSchema: {},

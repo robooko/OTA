@@ -663,6 +663,68 @@ function emailBrandingResponse(row) {
   };
 }
 
+// Stripe agentic commerce -- see
+// docs/superpowers/specs/2026-10-09-agentic-commerce-proshop-design.md.
+// Pointers only (where the feed reads product copy from, and the brand
+// printed on it); the content itself stays in the venue's Sanity.
+const AGENTIC_REQUIRED = ['sanity_project_id', 'sanity_dataset', 'site_url', 'brand'];
+
+// Pure: a PUT body merged over the stored object. Per field: omit = unchanged.
+// Returns { value } or { error }.
+function mergeAgenticCommerce(current, body) {
+  const next = { enabled: false, ...(current ?? {}) };
+  const { enabled, sanity_project_id, sanity_dataset, site_url, brand } = body ?? {};
+  if (enabled !== undefined) {
+    if (typeof enabled !== 'boolean') return { error: 'enabled must be a boolean' };
+    next.enabled = enabled;
+  }
+  if (sanity_project_id !== undefined) {
+    if (typeof sanity_project_id !== 'string' || !/^[a-z0-9]+$/.test(sanity_project_id)) return { error: 'sanity_project_id must be lowercase letters and digits' };
+    next.sanity_project_id = sanity_project_id;
+  }
+  if (sanity_dataset !== undefined) {
+    if (typeof sanity_dataset !== 'string' || !/^[a-z0-9_-]+$/.test(sanity_dataset)) return { error: 'sanity_dataset must be lowercase letters, digits, _ or -' };
+    next.sanity_dataset = sanity_dataset;
+  }
+  if (site_url !== undefined) {
+    const url = typeof site_url === 'string' ? site_url.replace(/\/+$/, '') : '';
+    if (!isValidUrl(url)) return { error: 'site_url must be an http(s) URL' };
+    next.site_url = url;
+  }
+  if (brand !== undefined) {
+    const b = typeof brand === 'string' ? brand.trim() : '';
+    if (!b || b.length > 70) return { error: 'brand must be 1-70 characters' };
+    next.brand = b;
+  }
+  if (next.enabled) {
+    const missing = AGENTIC_REQUIRED.filter((k) => !next[k]);
+    if (missing.length) return { error: `enabled needs ${missing.join(', ')} set` };
+  }
+  return { value: next };
+}
+
+async function getAgenticCommerce(req, res, next) {
+  try {
+    const { rows } = await pool.query('SELECT agentic_commerce FROM property WHERE id = $1', [req.property_id]);
+    res.json(rows[0].agentic_commerce ?? null);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateAgenticCommerce(req, res, next) {
+  try {
+    const { rows: [p] } = await pool.query('SELECT agentic_commerce, stripe_secret_key FROM property WHERE id = $1', [req.property_id]);
+    const { value, error } = mergeAgenticCommerce(p.agentic_commerce, req.body);
+    if (error) return res.status(400).json({ error });
+    if (value.enabled && !p.stripe_secret_key) return res.status(400).json({ error: 'enabled needs a Stripe secret key on this property' });
+    const { rows } = await pool.query('UPDATE property SET agentic_commerce = $1 WHERE id = $2 RETURNING agentic_commerce', [value, req.property_id]);
+    res.json(rows[0].agentic_commerce);
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function getEmailBranding(req, res, next) {
   try {
     const { rows } = await pool.query(`SELECT ${REVIEW_REQUEST_FIELDS} FROM property WHERE id = $1`, [req.property_id]);
@@ -840,6 +902,7 @@ async function updateAiReplyInstructions(req, res, next) {
 
 module.exports = {
   getEmailBranding, updateEmailBranding,
+  mergeAgenticCommerce, getAgenticCommerce, updateAgenticCommerce,
   getReminderSettings, updateReminderSettings,
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics, getGoogleAnalyticsSetup,

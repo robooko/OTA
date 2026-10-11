@@ -47,6 +47,12 @@ router.put('/ai-replies/instructions', authenticateOrApiKey, ctrl.updateAiReplyI
 router.get('/email-branding', authenticateOrApiKey, ctrl.getEmailBranding);
 router.put('/email-branding', authenticateOrApiKey, requireRoleOrApiKey('admin'), ctrl.updateEmailBranding);
 
+// GET is on the API-key rail (read-only pointers). PUT is staff + admin
+// only: whoever sets these chooses the copy, images and links ChatGPT shows
+// under the venue's Stripe name -- same reasoning as ai-replies' mode.
+router.get('/agentic-commerce', authenticateOrApiKey, ctrl.getAgenticCommerce);
+router.put('/agentic-commerce', authenticate, requireRole('admin'), ctrl.updateAgenticCommerce);
+
 router.get('/reminders', authenticate, ctrl.getReminderSettings);
 router.put('/reminders', authenticate, requireRole('admin'), ctrl.updateReminderSettings);
 

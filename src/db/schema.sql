@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS property (
   stripe_secret_key    TEXT, -- optionally set per-property so reservation deposits/holds can be created under the property's own Stripe account
   stripe_publishable_key TEXT, -- public; returned to marina guest routes for Stripe's Payment Element
   stripe_terminal_location_id VARCHAR(255), -- lazily created on first Tap to Pay connection-token request
+  agentic_commerce JSONB, -- Stripe agentic commerce pointers, NULL = off -- see migrate-2026-10-09-agentic-commerce.sql
   -- AI-drafted event-inquiry replies -- see migrate-2026-08-29-event-inquiry-ai-replies.sql.
   -- 'off' = no automation, 'draft' = every AI reply needs individual approval,
   -- 'auto' = send unreviewed when score >= ai_reply_auto_send_min_score and not requires_human.
@@ -1017,6 +1018,7 @@ CREATE TABLE IF NOT EXISTS proshop_order (
   status                   VARCHAR(20)   NOT NULL DEFAULT 'pending',
   payment_status           VARCHAR(20)   NOT NULL DEFAULT 'unpaid',
   stripe_payment_intent_id VARCHAR(255),
+  stripe_checkout_session_id VARCHAR(255), -- set on orders bought through an AI agent
   -- Resend id of the order confirmation email, which doubles as the
   -- "already sent" guard -- see migrate-2026-09-17-proshop-order-confirmation-email.sql.
   confirmation_resend_email_id VARCHAR(255),
@@ -1056,6 +1058,8 @@ CREATE INDEX IF NOT EXISTS idx_proshop_order_shop           ON proshop_order(sho
 CREATE INDEX IF NOT EXISTS idx_proshop_order_item           ON proshop_order_item(order_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_proshop_order_reference     ON proshop_order(property_id, reference);
 CREATE INDEX IF NOT EXISTS idx_proshop_order_clerk_user     ON proshop_order(clerk_user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proshop_order_checkout_session
+  ON proshop_order (stripe_checkout_session_id) WHERE stripe_checkout_session_id IS NOT NULL;
 
 -- ── Event Inquiries ─────────────────────────────────────────────────────────
 

@@ -91,8 +91,12 @@ order. Order list/detail responses add a derived
 ## Settings API and MCP
 
 - `GET /api/property/agentic-commerce` returns the object, or `null`.
-- `PUT /api/property/agentic-commerce`: `authenticateOrApiKey`, and staff
-  sessions need the admin role, like `PUT /api/property/email-branding`.
+- `PUT /api/property/agentic-commerce`: a staff session with the admin
+  role (`authenticate` + `requireRole('admin')`); an API key is **not**
+  enough. Whoever sets these pointers chooses the copy, images and links
+  ChatGPT shows under the venue's Stripe name, so a leaked API key must
+  not be able to redirect them (the same reasoning keeps ai-replies'
+  `mode` off the API-key rail).
   Every field is validated: `site_url` is http(s) with no trailing slash
   (stripped if given), `sanity_project_id` is `[a-z0-9]+`,
   `sanity_dataset` is `[a-z0-9_-]+`, and `brand` is 1–70 characters.
@@ -141,7 +145,7 @@ XL), and each borrows its colour's L doc.
 | `title` | `name` |
 | `description` | Sanity `description`, followed by `features` joined with `". "`. Falls back to `name` if both are empty. |
 | `link` | `<site_url>/shop/<slug>/` |
-| `image_link` | Sanity CDN URL built from the asset ref, like the site's `src/lib/sanity.ts` (`?w=1200&auto=format`) |
+| `image_link` | Sanity CDN URL built from the asset ref, like the site's `src/lib/sanity.ts` (`?w=1200&fm=jpg`: the feed accepts only JPEG/PNG, and some originals are WebP) |
 | `brand` | config `brand` |
 | `mpn` | same as `id` (own-label merch: the venue is the manufacturer) |
 | `product_category` | `category`, or `Merchandise` if null |
@@ -173,11 +177,11 @@ or LF, with `"` doubled.
 
 ### Upload
 
-The upload helper is `uploadFeed(stripeKey, feedType, mode, csv)`:
+The upload helper is `uploadFeed(stripe, feedType, mode, csv)`:
 
-1. `POST https://api.stripe.com/v2/commerce/product_catalog/imports`
-   with `Authorization: Bearer <key>`, `Stripe-Version: 2026-09-30.preview`
-   and the body `{feed_type, mode, metadata: {file_name}}`.
+1. `stripe.v2.commerce.productCatalog.imports.create({feed_type, mode, metadata: {file_name}})`
+   on the venue's key. `stripe@22.5.0` has this resource on its default
+   API version (`2026-07-29.dahlia`).
 2. `PUT` the CSV (`Content-Type: text/csv`) to
    `status_details.awaiting_upload.upload_url.url` straight away (the
    URL expires after 5 minutes).
@@ -185,9 +189,9 @@ The upload helper is `uploadFeed(stripeKey, feedType, mode, csv)`:
    the Stripe dashboard (Feed history), or by `GET …/imports/{id}`
    during the sandbox test.
 
-The preview `Stripe-Version` is one exported constant. Plain `fetch` is
-used because the installed `stripe` package does not cover v2 commerce
-imports (to confirm during planning; use the SDK if it does).
+The CSV PUT to the presigned URL is plain `fetch`. If the sandbox
+rejects the SDK's default version, `create` takes the request option
+`{ apiVersion: '2026-09-30.preview' }` as its second argument.
 
 ### Schedule
 
@@ -326,7 +330,8 @@ Each step needs the user's OK:
    (`node scripts/run-migration.js …`) **before** pushing. Both jobs
    query the new columns when the server starts.
 2. Push.
-3. `set_agentic_commerce` for WillyT, with `enabled: true`.
+3. `set_agentic_commerce` for WillyT, with `enabled: true`. This needs a
+   staff admin session, because an API key can't change these settings.
 
 ## Risks
 
