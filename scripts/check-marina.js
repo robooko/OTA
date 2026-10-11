@@ -114,6 +114,56 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal(r.total_price, '60.00'); // 5 × 12
     });
 
+    // ---- Task 3: token + guards ----
+    const { bookingToken, bookingTokenMatches } = require('../src/lib/marinaToken');
+    const guard = require('../src/lib/marinaGuard');
+    await check('booking token round-trips and rejects others', async () => {
+      const id = '6f1c0d4e-0000-4000-8000-000000000001';
+      assert.ok(bookingTokenMatches(id, bookingToken(id)));
+      assert.ok(!bookingTokenMatches(id, bookingToken('6f1c0d4e-0000-4000-8000-000000000002')));
+      assert.ok(!bookingTokenMatches(id, undefined));
+      assert.ok(!bookingTokenMatches(id, 'short'));
+    });
+    const good = { berth_label: 'A1', arrival: '2027-06-01', departure: '2027-06-04', contact_name: 'Ann', contact_email: 'ann@example.com', boat_name: 'Wave', boat_length_m: 10 };
+    await check('valid guest body passes and ignores status', async () => {
+      const r = guard.validateGuestBooking({ ...good, status: 'confirmed' }, '2027-05-01');
+      assert.ok(r.ok); assert.equal(r.value.status, undefined); assert.equal(r.value.locale, 'en');
+    });
+    await check('guest body rejects past arrival, missing departure, > 90 nights, bad email, no length', async () => {
+      assert.ok(!guard.validateGuestBooking({ ...good, arrival: '2027-04-30' }, '2027-05-01').ok);
+      assert.ok(!guard.validateGuestBooking({ ...good, departure: undefined }, '2027-05-01').ok);
+      assert.ok(!guard.validateGuestBooking({ ...good, departure: '2027-09-01' }, '2027-05-01').ok);
+      assert.ok(!guard.validateGuestBooking({ ...good, contact_email: 'nope' }, '2027-05-01').ok);
+      assert.ok(!guard.validateGuestBooking({ ...good, boat_length_m: undefined }, '2027-05-01').ok);
+    });
+    await check('berth fit skips NULL limits', async () => {
+      assert.equal(guard.berthFitError({ length_m: null, min_length_m: null, beam_m: null }, 30, 9), null);
+      assert.match(guard.berthFitError({ length_m: '12', min_length_m: null, beam_m: null }, 13, null), /long/);
+      assert.match(guard.berthFitError({ length_m: '12', min_length_m: '10', beam_m: null }, 8, null), /short/);
+      assert.equal(guard.berthFitError({ length_m: '12', min_length_m: null, beam_m: '4' }, 10, null), null);
+      assert.match(guard.berthFitError({ length_m: '12', min_length_m: null, beam_m: '4' }, 10, 4.5), /beam/);
+    });
+    await check('email cap counts dot/+tag variants as one guest', async () => {
+      const add = (email, arrival, departure) => db.query(
+        `INSERT INTO marina_booking (property_id, marina_id, berth_id, contact_name, contact_email, contact_email_key, arrival, departure, status, source)
+         VALUES ($1, $2, $3, 'X', $4, $5, $6, $7, 'pending', 'guest')`,
+        [P, marina.id, berthB.id, email, require('../src/lib/spaBookingGuard').emailKey(email), arrival, departure]);
+      await add('j.o.e@gmail.com', '2027-10-01', '2027-10-02');
+      await add('joe+boat@gmail.com', '2027-10-03', '2027-10-04');
+      assert.ok((await guard.checkEmailCap(db, P, 'joe@googlemail.com', '2027-05-01')).ok);
+      await add('JOE@gmail.com', '2027-10-05', '2027-10-06');
+      assert.ok(!(await guard.checkEmailCap(db, P, 'joe@gmail.com', '2027-05-01')).ok);
+      assert.ok((await guard.checkEmailCap(db, P, 'joe@gmail.com', '2027-10-06')).ok, 'past stays no longer count');
+    });
+    await check('clientIp only on the key rail, IPv6 grouped by /64', async () => {
+      const req = (h, rail = 'api_key') => ({ auth_method: rail, headers: h, property_id: P });
+      assert.equal(guard.clientIp(req({ 'x-client-ip': '203.0.113.9' })), '203.0.113.9');
+      assert.equal(guard.clientIp(req({ 'x-client-ip': '203.0.113.9' }, 'bearer')), null);
+      assert.equal(guard.clientIp(req({ 'x-client-ip': '2001:db8:1:2:aaaa::1' })), guard.clientIp(req({ 'x-client-ip': '2001:db8:1:2:bbbb::9' })));
+      assert.equal(guard.clientIp(req({ 'x-client-ip': 'not-an-ip' })), null);
+      assert.equal(guard.clientIpKey(req({})), `property:${P}`);
+    });
+
     // (later tasks append their checks here)
   } finally {
     await db.query('ROLLBACK');
