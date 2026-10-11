@@ -36,7 +36,7 @@ const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']; // ISODOW 1
 // stays in the cached prefix. A spa's services, prices, contact details and
 // hours are rendered here from the DB -- the model's fact source for them,
 // so ai_reply_instructions doesn't have to duplicate the database.
-function buildVenueFacts(property, restaurant, spa) {
+function buildVenueFacts(property, restaurant, spa, marina = null) {
   let text = '';
   if (restaurant) {
     text += `  <restaurant name="${neutraliseTags(restaurant.name)}">`;
@@ -85,6 +85,21 @@ function buildVenueFacts(property, restaurant, spa) {
     }
     text += '  </spa>\n';
   }
+  if (marina) {
+    text += `  <marina name="${neutraliseTags(marina.name)}">\n`;
+    if (marina.description) text += `    ${neutraliseTags(marina.description)}\n`;
+    if (marina.berth_range?.max != null) text += `    Berths for boats from ${marina.berth_range.min ?? marina.berth_range.max} m to ${marina.berth_range.max} m long.\n`;
+    if (marina.tiers?.length) {
+      text += '    Nightly berth rates (by boat length):\n';
+      for (const t of marina.tiers) text += `      Up to ${t.max_length_m} m, ${t.valid_from} to ${t.valid_to}: ${money(t.price_per_night, property.currency)} a night\n`;
+    }
+    text += `    The marina replies to booking requests within ${marina.response_window_hours} hours.\n`;
+    if (marina.requirements?.length) text += `    Documents needed for a booking: ${marina.requirements.map((r) => neutraliseTags(r.name)).join(', ')}.\n`;
+    if (marina.website) text += `    Book online: ${neutraliseTags(marina.website)}\n`;
+    // Phase 1: replies never book a berth (approve-to-book is spa-only).
+    text += '    Never promise or create a berth booking; point the guest to the online booking page or say the marina will confirm.\n';
+    text += '  </marina>\n';
+  }
   if (property.return_instructions?.trim()) {
     text += `  <return_instructions>${neutraliseTags(property.return_instructions.trim())}</return_instructions>\n`;
   }
@@ -103,10 +118,10 @@ function renderReturn(returnRequest) {
 
 // Returns { proposed_booking, body, quality_score, requires_human,
 // requires_human_reason, summary, model, usage } or throws AiReplyError.
-async function generateInquiryReply({ property, inquiry, restaurant = null, spa = null, thread = [], triggerType = 'manual', today, returnRequest = null }) {
+async function generateInquiryReply({ property, inquiry, restaurant = null, spa = null, marina = null, thread = [], triggerType = 'manual', today, returnRequest = null }) {
   const definition = buildAvailabilityTool(inquiry);
   const result = await generateReply({
-    venue: { name: property.name, facts: buildVenueFacts(property, restaurant, spa), instructions: property.ai_reply_instructions },
+    venue: { name: property.name, facts: buildVenueFacts(property, restaurant, spa, marina), instructions: property.ai_reply_instructions },
     rules: RULES,
     availabilityTool: definition ? { definition, execute: (input) => executeAvailabilityTool(inquiry, input) } : null,
     bookingSchema: BookingProposal,
@@ -135,4 +150,4 @@ async function generateInquiryReply({ property, inquiry, restaurant = null, spa 
   return { ...result, proposed_booking: proposedBooking };
 }
 
-module.exports = { isConfigured, generateInquiryReply, findCorruption, AiReplyError, MODEL, EFFORT };
+module.exports = { isConfigured, generateInquiryReply, buildVenueFacts, findCorruption, AiReplyError, MODEL, EFFORT };

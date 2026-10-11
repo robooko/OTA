@@ -309,11 +309,35 @@ const { bookingToken } = require('../src/lib/marinaToken');
       await pool.query("UPDATE marina_contract_template SET status = 'inactive' WHERE id = $1", [t.body.id]);
     });
 
+    // ---- Task 12 ----
+    await check('marina enquiry lands in the inbox with marina_id; guest sees only id+status', async () => {
+      await pool.query('UPDATE property SET token_balance = 100 WHERE id = $1', [P]); // the enquiry gate needs a reply's worth
+      const r = await api('POST', `${G}/enquiries`, { body: { name: 'Ann', email: 'ann@example.com', message: 'Space for a 12 m yacht?', arrival: future(60), departure: future(63), boat_length_m: 12 }, headers: { 'X-Client-Ip': '192.0.2.130' } });
+      assert.equal(r.status, 201, JSON.stringify(r.body)); assert.deepEqual(Object.keys(r.body).sort(), ['id', 'status']);
+      const row = await one('SELECT marina_id, message FROM event_inquiry WHERE id = $1', [r.body.id]);
+      assert.equal(row.marina_id, m.id); assert.match(row.message, /Boat length: 12 m/);
+    });
+
+    await check('AI: marina inquiries get a berth availability tool, real results and marina facts', async () => {
+      const { buildAvailabilityTool, executeAvailabilityTool } = require('../src/lib/aiReplyTools');
+      const { buildVenueFacts } = require('../src/lib/aiReplies');
+      const { loadMarinaContext } = require('../src/lib/aiReplyPipeline');
+      const tool = buildAvailabilityTool({ marina_id: m.id });
+      assert.equal(tool.name, 'check_availability'); assert.deepEqual(tool.input_schema.required, ['arrival', 'departure']);
+      const r = await executeAvailabilityTool({ marina_id: m.id }, { arrival: future(700), departure: future(702), boat_length_m: 10 });
+      assert.equal(r.options[0].label, 'H1'); assert.equal(r.options[0].total_price, '80.00');
+      assert.match((await executeAvailabilityTool({ marina_id: m.id }, { arrival: 'x', departure: future(2) })).error, /YYYY-MM-DD/);
+      const ctx = await loadMarinaContext(m.id);
+      const facts = buildVenueFacts({ currency: 'EUR' }, null, null, ctx);
+      assert.match(facts, /<marina name="Porto HTTP">/); assert.match(facts, /15\.00 m/); assert.match(facts, /within 24 hours/);
+    });
+
     // (later tasks append here)
   } finally {
     server.close();
     // marina children cascade; booking children cascade from booking.
     await pool.query('DELETE FROM event_inquiry WHERE property_id = $1', [P]);
+    await pool.query('DELETE FROM property_token_ledger WHERE property_id = $1', [P]);
     await pool.query('DELETE FROM marina WHERE property_id = $1', [P]);
     await pool.query('DELETE FROM property WHERE id = $1', [P]);
     await pool.end();

@@ -9,6 +9,7 @@ const { berthFitError } = guard;
 const life = require('../lib/marinaLifecycle');
 const { bookingToken, bookingTokenMatches } = require('../lib/marinaToken');
 const marinaStripe = require('../lib/marinaStripe');
+const { createInquiryCore } = require('./eventInquiries');
 const { toCents } = require('../lib/folio');
 const { createSubscribeTokenRequest } = require('../lib/ably');
 
@@ -313,7 +314,24 @@ async function agreeContract(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Marina enquiries land in OTA's event-inquiry inbox and AI reply
+// pipeline. Stay details go into the message so staff and the model see them.
+async function createEnquiry(req, res, next) {
+  try {
+    const { name, email, phone, message, arrival, departure, boat_length_m } = req.body || {};
+    const details = [
+      arrival && departure ? `Dates: ${arrival} to ${departure}` : null,
+      boat_length_m ? `Boat length: ${boat_length_m} m` : null,
+    ].filter(Boolean).join('\n');
+    const { status, json } = await createInquiryCore(req.property_id, {
+      name, email, phone, marina_id: req.marina.id, event_date: isValidDate(arrival) ? arrival : null,
+      event_type: 'berth', message: [message, details].filter(Boolean).join('\n\n'),
+    });
+    res.status(status).json(status < 300 ? { id: json.id, status: json.status } : json);
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   resolveMarina, getMarinaMap, getAvailability, getDocRequirements, quote,
-  requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink, ablyToken, confirmPayment, contractPreview, agreeContract,
+  requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink, ablyToken, confirmPayment, contractPreview, agreeContract, createEnquiry,
 };

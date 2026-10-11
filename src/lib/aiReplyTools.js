@@ -1,8 +1,8 @@
 // Gives the AI reply pipeline (aiReplies.js) a way to check real,
 // current availability instead of only ever working from the property's
 // static instructions text. Offered as a tool only when the inquiry is
-// tagged to a restaurant or spa -- there's nothing concrete to check for a
-// general enquiry with neither set.
+// tagged to a restaurant, spa or marina -- there's nothing concrete to check
+// for a general enquiry with none set.
 //
 // Calls the same lookup functions the REST availability-search endpoints
 // use (findRestaurantAvailability / findSpaAvailability), in-process rather
@@ -12,12 +12,34 @@ const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
 const { findRestaurantAvailability } = require('../controllers/restaurant');
 const { findSpaAvailability } = require('../controllers/spa');
+const marinaQueries = require('./marinaQueries');
+const { berthFitError } = require('./marinaGuard');
+const { priceStay } = require('./marinaPricing');
 
 const MAX_RESULT_SLOTS = 20;
 const TOOL_NAME = 'check_availability';
+const MAX_BERTH_OPTIONS = 10;
 
 function buildAvailabilityTool(inquiry) {
-  if (!inquiry.restaurant_id && !inquiry.spa_id) return null;
+  if (!inquiry.restaurant_id && !inquiry.spa_id && !inquiry.marina_id) return null;
+
+  if (inquiry.marina_id) {
+    return {
+      name: TOOL_NAME,
+      description:
+        "Check which berths at the marina are free for a stay, and the price of each for that stay. Use this before telling the guest availability is unknown or ruling out dates. Departure is exclusive (the morning they leave). Pass the boat's length (and beam if known) so only berths the boat fits are returned. An empty list really does mean nothing suitable is free.",
+      input_schema: {
+        type: 'object',
+        properties: {
+          arrival: { type: 'string', description: 'Arrival date, YYYY-MM-DD.' },
+          departure: { type: 'string', description: 'Departure date, YYYY-MM-DD (exclusive).' },
+          boat_length_m: { type: 'number', description: "The boat's length overall in metres, if known." },
+          boat_beam_m: { type: 'number', description: "The boat's beam in metres, if known." },
+        },
+        required: ['arrival', 'departure'],
+      },
+    };
+  }
 
   if (inquiry.restaurant_id) {
     return {
@@ -56,6 +78,7 @@ function buildAvailabilityTool(inquiry) {
 }
 
 async function executeAvailabilityTool(inquiry, input) {
+  if (inquiry.marina_id) return executeBerthAvailability(inquiry.marina_id, input);
   const date_from = String(input?.date_from ?? '');
   const date_to = String(input?.date_to ?? '');
   if (!isValidDate(date_from) || !isValidDate(date_to)) {
@@ -100,6 +123,28 @@ async function executeAvailabilityTool(inquiry, input) {
 
   const slots = await findSpaAvailability(inquiry.spa_id, date_from, date_to, matches[0].id, null);
   return { treatment: matches[0].name, slots: slots.slice(0, MAX_RESULT_SLOTS) };
+}
+
+// Same lookups as GET /api/marina/guest/:marina/availability.
+async function executeBerthAvailability(marinaId, input) {
+  const arrival = String(input?.arrival ?? '');
+  const departure = String(input?.departure ?? '');
+  if (!isValidDate(arrival) || !isValidDate(departure)) return { error: 'arrival and departure must be valid YYYY-MM-DD dates' };
+  if (departure <= arrival) return { error: 'departure must be after arrival' };
+  const len = Number(input?.boat_length_m) > 0 ? Number(input.boat_length_m) : null;
+  const beam = Number(input?.boat_beam_m) > 0 ? Number(input.boat_beam_m) : null;
+  const [berths, tiers] = await Promise.all([
+    marinaQueries.freeBerths(pool, marinaId, arrival, departure),
+    marinaQueries.activeTiers(pool, marinaId),
+  ]);
+  const fits = len ? berths.filter((b) => !berthFitError(b, len, beam)) : berths;
+  return {
+    free_berths: fits.length,
+    options: fits.slice(0, MAX_BERTH_OPTIONS).map((b) => {
+      const { nights, total_price } = priceStay({ berth: b, tiers, arrival, departure, boatLengthM: len, boatBeamM: beam });
+      return { label: b.label, length_m: b.length_m, beam_m: b.beam_m, nights, total_price };
+    }),
+  };
 }
 
 module.exports = { buildAvailabilityTool, executeAvailabilityTool };

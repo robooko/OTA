@@ -40,13 +40,14 @@ async function listInquiries(req, res, next) {
     if (spa_id) { params.push(spa_id); spaFilter = ` AND ei.spa_id = $${params.length}`; }
 
     const { rows } = await pool.query(
-      `SELECT ei.*, r.name AS restaurant_name, s.name AS spa_name, lrm.direction AS last_reply_direction,
+      `SELECT ei.*, r.name AS restaurant_name, s.name AS spa_name, mr.name AS marina_name, lrm.direction AS last_reply_direction,
               lrm.sent_by_name AS last_reply_by_name, lrm.sent_by_avatar_url AS last_reply_avatar_url,
               lim.created_at AS last_inbound_at,
               pad.id AS pending_ai_draft_id
        FROM event_inquiry ei
        LEFT JOIN restaurant r ON r.id = ei.restaurant_id
        LEFT JOIN spa s ON s.id = ei.spa_id
+       LEFT JOIN marina mr ON mr.id = ei.marina_id
        LEFT JOIN LATERAL (
          SELECT direction, sent_by_name, sent_by_avatar_url FROM event_inquiry_message m
          WHERE m.event_inquiry_id = ei.id
@@ -106,72 +107,95 @@ async function validateSpaId(spa_id, property_id) {
   return rows.length > 0;
 }
 
+// Mirrors validateRestaurantId, for marina enquiries.
+async function validateMarinaId(marina_id, property_id) {
+  if (marina_id == null) return true;
+  if (!isValidUuid(marina_id)) return false;
+  const { rows } = await pool.query('SELECT 1 FROM marina WHERE id = $1 AND property_id = $2', [marina_id, property_id]);
+  return rows.length > 0;
+}
+
+// The whole create path, shared by POST /api/event-inquiries and the marina
+// guest route (POST /api/marina/guest/:marina/enquiries). Returns the HTTP
+// status and body instead of writing the response.
+async function createInquiryCore(propertyId, body) {
+  const { name, email, phone, event_date, guests, event_type, format, message, restaurant_id, spa_id, marina_id, branding, cancel_url } = body || {};
+  if (!name || !email) {
+    return { status: 400, json: { error: 'name and email are required' } };
+  }
+  // event_date is optional -- a general enquiry ("do you do X?") has no
+  // date. When given it must still be a real date.
+  if (event_date != null && !isValidDate(event_date)) return { status: 400, json: { error: 'Invalid date format' } };
+  // Kept on the row so a booking made later from this thread's AI reply
+  // sends the same branded confirmation as a direct website booking.
+  const brandingError = validateBranding(branding);
+  if (brandingError) return { status: 400, json: { error: brandingError } };
+  const cancelUrlError = validateCancelUrl(cancel_url);
+  if (cancelUrlError) return { status: 400, json: { error: cancelUrlError } };
+  if (!(await validateRestaurantId(restaurant_id, propertyId))) {
+    return { status: 400, json: { error: 'restaurant_id must belong to this property' } };
+  }
+  if (!(await validateSpaId(spa_id, propertyId))) {
+    return { status: 400, json: { error: 'spa_id must belong to this property' } };
+  }
+  if (!(await validateMarinaId(marina_id, propertyId))) {
+    return { status: 400, json: { error: 'marina_id must belong to this property' } };
+  }
+
+  // Nothing here could get a reply through OTA right now -- sending one,
+  // manual or AI, spends a token regardless (sendOutboundReply in
+  // inquiryReplies.js) -- so reject before ever storing it, and let the
+  // caller (the venue's own website) point the guest somewhere that will
+  // actually respond. Safe to reject outright here, unlike an inbound
+  // reply on an existing thread (handleResendInboundWebhook): this is a
+  // brand-new submission that doesn't exist anywhere yet, so nothing is
+  // lost -- an inbound email has already arrived and can only be stored
+  // or silently dropped, which is why that path isn't gated the same way.
+  const balance = await tokens.getBalance(propertyId);
+  if (balance < tokens.TOKEN_COSTS.reply_send) {
+    return { status: 402, json: { error: 'This venue cannot currently respond to enquiries — please contact them directly' } };
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO event_inquiry (property_id, restaurant_id, spa_id, marina_id, name, email, phone, event_date, guests, event_type, format, message, branding, cancel_url)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+    [propertyId, restaurant_id || null, spa_id || null, marina_id || null, name, email, phone || null, event_date ?? null, guests || null, event_type || null, format || null, message || null,
+      branding ? JSON.stringify(branding) : null, cancel_url || null]
+  );
+
+  publishNewInquiry(propertyId, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
+  if (rows[0].spa_id) {
+    publishNewInquiryForSpa(rows[0].spa_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
+  }
+  // Fire-and-forget like the Ably publish: drafting takes tens of seconds
+  // and the inquiry is already safely stored, so the caller (usually the
+  // property's public website) gets its 201 immediately. The pipeline
+  // no-ops unless the property has opted in (ai_reply_mode != 'off').
+  runAiReply({ inquiryId: rows[0].id, triggerType: 'new_inquiry' })
+    .catch((err) => console.error('AI reply pipeline failed:', err.message));
+
+  return { status: 201, json: rows[0] };
+}
+
+
 async function createInquiry(req, res, next) {
   try {
-    const { name, email, phone, event_date, guests, event_type, format, message, restaurant_id, spa_id, branding, cancel_url } = req.body;
-    if (!name || !email) {
-      return res.status(400).json({ error: 'name and email are required' });
-    }
-    // event_date is optional -- a general enquiry ("do you do X?") has no
-    // date. When given it must still be a real date.
-    if (event_date != null && !isValidDate(event_date)) return res.status(400).json({ error: 'Invalid date format' });
-    // Kept on the row so a booking made later from this thread's AI reply
-    // sends the same branded confirmation as a direct website booking.
-    const brandingError = validateBranding(branding);
-    if (brandingError) return res.status(400).json({ error: brandingError });
-    const cancelUrlError = validateCancelUrl(cancel_url);
-    if (cancelUrlError) return res.status(400).json({ error: cancelUrlError });
-    if (!(await validateRestaurantId(restaurant_id, req.property_id))) {
-      return res.status(400).json({ error: 'restaurant_id must belong to this property' });
-    }
-    if (!(await validateSpaId(spa_id, req.property_id))) {
-      return res.status(400).json({ error: 'spa_id must belong to this property' });
-    }
-
-    // Nothing here could get a reply through OTA right now -- sending one,
-    // manual or AI, spends a token regardless (sendOutboundReply in
-    // inquiryReplies.js) -- so reject before ever storing it, and let the
-    // caller (the venue's own website) point the guest somewhere that will
-    // actually respond. Safe to reject outright here, unlike an inbound
-    // reply on an existing thread (handleResendInboundWebhook): this is a
-    // brand-new submission that doesn't exist anywhere yet, so nothing is
-    // lost -- an inbound email has already arrived and can only be stored
-    // or silently dropped, which is why that path isn't gated the same way.
-    const balance = await tokens.getBalance(req.property_id);
-    if (balance < tokens.TOKEN_COSTS.reply_send) {
-      return res.status(402).json({ error: 'This venue cannot currently respond to enquiries — please contact them directly' });
-    }
-
-    const { rows } = await pool.query(
-      `INSERT INTO event_inquiry (property_id, restaurant_id, spa_id, name, email, phone, event_date, guests, event_type, format, message, branding, cancel_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
-      [req.property_id, restaurant_id || null, spa_id || null, name, email, phone || null, event_date ?? null, guests || null, event_type || null, format || null, message || null,
-        branding ? JSON.stringify(branding) : null, cancel_url || null]
-    );
-
-    publishNewInquiry(req.property_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
-    if (rows[0].spa_id) {
-      publishNewInquiryForSpa(rows[0].spa_id, rows[0]).catch((err) => console.error('Ably publish failed:', err.message));
-    }
-    // Fire-and-forget like the Ably publish: drafting takes tens of seconds
-    // and the inquiry is already safely stored, so the caller (usually the
-    // property's public website) gets its 201 immediately. The pipeline
-    // no-ops unless the property has opted in (ai_reply_mode != 'off').
-    runAiReply({ inquiryId: rows[0].id, triggerType: 'new_inquiry' })
-      .catch((err) => console.error('AI reply pipeline failed:', err.message));
-
-    res.status(201).json(rows[0]);
+    const { status, json } = await createInquiryCore(req.property_id, req.body);
+    res.status(status).json(json);
   } catch (err) { next(err); }
 }
 
 async function updateInquiry(req, res, next) {
   try {
-    const { status, restaurant_id, spa_id, event_date, event_time, guests, name, email, phone } = req.body;
+    const { status, restaurant_id, spa_id, marina_id, event_date, event_time, guests, name, email, phone } = req.body;
     if (restaurant_id !== undefined && !(await validateRestaurantId(restaurant_id, req.property_id))) {
       return res.status(400).json({ error: 'restaurant_id must belong to this property' });
     }
     if (spa_id !== undefined && !(await validateSpaId(spa_id, req.property_id))) {
       return res.status(400).json({ error: 'spa_id must belong to this property' });
+    }
+    if (marina_id !== undefined && !(await validateMarinaId(marina_id, req.property_id))) {
+      return res.status(400).json({ error: 'marina_id must belong to this property' });
     }
     if (event_date !== undefined && event_date !== null && !isValidDate(event_date)) {
       return res.status(400).json({ error: 'Invalid event_date format' });
@@ -198,9 +222,10 @@ async function updateInquiry(req, res, next) {
          guests        = COALESCE($6, guests),
          name          = COALESCE($7, name),
          email         = COALESCE($8, email),
-         phone         = COALESCE($9, phone)
+         phone         = COALESCE($9, phone),
+         marina_id     = COALESCE($12, marina_id)
        WHERE id = $10 AND property_id = $11 RETURNING *`,
-      [status, restaurant_id, spa_id, event_date, event_time, guests, name, email, phone, req.params.id, req.property_id]
+      [status, restaurant_id, spa_id, event_date, event_time, guests, name, email, phone, req.params.id, req.property_id, marina_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Inquiry not found' });
 
@@ -491,6 +516,6 @@ async function rejectAiDraft(req, res, next) {
 }
 
 module.exports = {
-  listInquiries, createInquiry, updateInquiry, listReplies, createReply, handleResendInboundWebhook,
+  listInquiries, createInquiry, createInquiryCore, updateInquiry, listReplies, createReply, handleResendInboundWebhook,
   listAiDrafts, listInquiryAiDrafts, generateAiDraft, approveAiDraft, rejectAiDraft,
 };

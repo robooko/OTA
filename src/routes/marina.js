@@ -9,6 +9,7 @@ const { guestLimiter } = require('../lib/marinaGuard');
 
 const bookingLimiter = guestLimiter('marina-booking', 10);
 const uploadLimiter = guestLimiter('marina-upload', 30);
+const enquiryLimiter = guestLimiter('marina-enquiry', 10);
 // Raw uploads, parsed per route (the JSON parsers don't touch these types).
 const rawDoc = express.raw({ type: ['application/pdf', 'image/jpeg', 'image/png'], limit: '4mb' });
 const rawDocSafe = (req, res, next) => rawDoc(req, res, (err) => (err?.status === 413 ? res.status(413).json({ error: 'Files are limited to 4 MB' }) : next(err)));
@@ -65,5 +66,6 @@ router.post(`${G}/bookings/:id/documents`, authenticateOrApiKey, uploadLimiter, 
 
 router.get(`${G}/contract-preview`, authenticateOrApiKey, guest.resolveMarina, guest.contractPreview);
 router.post(`${G}/bookings/:id/contract`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.agreeContract);
+router.post(`${G}/enquiries`, authenticateOrApiKey, enquiryLimiter, guest.resolveMarina, guest.createEnquiry);
 
 module.exports = router;

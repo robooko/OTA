@@ -95,6 +95,18 @@ async function loadSpaContext(spaId) {
   return spa ? { ...spa, treatments, hours } : null;
 }
 
+// Marina facts for a draft: berth size range, live price tiers, response
+// window, required documents. Loaded fresh per draft like the spa context.
+async function loadMarinaContext(marinaId) {
+  const [{ rows: [marina] }, { rows: [range] }, { rows: tiers }, { rows: requirements }] = await Promise.all([
+    pool.query('SELECT name, description, website, response_window_hours FROM marina WHERE id = $1', [marinaId]),
+    pool.query("SELECT min(length_m) AS min, max(length_m) AS max FROM marina_berth WHERE marina_id = $1 AND status = 'active'", [marinaId]),
+    pool.query("SELECT valid_from, valid_to, max_length_m, price_per_night FROM marina_price_tier WHERE marina_id = $1 AND status = 'active' ORDER BY valid_from, max_length_m", [marinaId]),
+    pool.query("SELECT name FROM marina_doc_requirement WHERE marina_id = $1 AND status = 'active' AND mandatory ORDER BY sort_order, name", [marinaId]),
+  ]);
+  return marina ? { ...marina, berth_range: range, tiers, requirements } : null;
+}
+
 // A pending draft is stale the moment anything newer happens on the thread:
 // a fresh draft, or a human reply. Marks them superseded and tells the feed.
 async function supersedePendingDrafts(inquiryId, { exceptDraftId = null, spaId = null } = {}) {
@@ -122,7 +134,7 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
 
   await supersedePendingDrafts(inquiry.id, { spaId: inquiry.spa_id });
 
-  const [{ rows: thread }, { rows: restaurantRows }, spaContext, returnRequest] = await Promise.all([
+  const [{ rows: thread }, { rows: restaurantRows }, spaContext, returnRequest, marinaContext] = await Promise.all([
     pool.query(
       'SELECT direction, body, created_at FROM event_inquiry_message WHERE event_inquiry_id = $1 ORDER BY created_at ASC',
       [inquiry.id]
@@ -132,6 +144,7 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
       : Promise.resolve({ rows: [] }),
     inquiry.spa_id ? loadSpaContext(inquiry.spa_id) : Promise.resolve(null),
     loadReturnForInquiry(inquiry.id),
+    inquiry.marina_id ? loadMarinaContext(inquiry.marina_id) : Promise.resolve(null),
   ]);
 
   let draftRow;
@@ -144,6 +157,7 @@ async function generateDraft({ inquiry, triggerType, triggerMessageId = null }) 
       inquiry,
       restaurant: restaurantRows[0] ?? null,
       spa: spaContext,
+      marina: marinaContext,
       thread,
       triggerType,
       returnRequest,
@@ -358,6 +372,6 @@ async function runAiReply({ inquiryId, triggerType, triggerMessageId = null }) {
 }
 
 module.exports = {
-  runAiReply, generateDraft, sendDraft, supersedePendingDrafts,
+  runAiReply, generateDraft, sendDraft, supersedePendingDrafts, loadMarinaContext,
   DraftNotPendingError, ProposedBookingError, InsufficientTokensError, MAX_AUTO_SENT_PER_INQUIRY,
 };
