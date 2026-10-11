@@ -5,7 +5,7 @@
 const pool = require('../db');
 const { allocateOrderReference } = require('./orderReference');
 const { publishNewProshopOrder } = require('./ably');
-const { enabledProperties, feedId } = require('./agenticFeed');
+const { feedId } = require('./agenticFeed');
 
 // The seller guide expands line items with this preview version to get
 // price.external_reference (the feed id).
@@ -74,6 +74,14 @@ async function recordOrder(db, propertyId, shopId, { order, lines }) {
       `INSERT INTO proshop_order_item (order_id, item_id, item_name, unit_price, quantity, subtotal) VALUES ($1, $2, $3, $4, $5, $6)`,
       [row.id, l.item_id, l.item_name, l.unit_price, l.quantity, l.subtotal]
     );
+    // Same rule as the website's decrementStockForItems, but inside this
+    // transaction: the order and its stock change commit together.
+    if (l.item_id) {
+      await db.query(
+        `UPDATE proshop_item SET stock_quantity = GREATEST(stock_quantity - $1, 0) WHERE id = $2 AND stock_quantity IS NOT NULL`,
+        [l.quantity, l.item_id]
+      );
+    }
   }
   return { ...row, items: lines };
 }
@@ -93,17 +101,37 @@ async function inTransaction(fn) {
   }
 }
 
-async function sweepProperty(p) {
+// Every property with agentic commerce configured, enabled or not:
+// enabled=false only stops feed uploads (spec), and agents can still sell
+// what Stripe already holds until the connection is turned off in Stripe.
+async function orderProperties(db = pool) {
+  const { rows } = await db.query(
+    `SELECT id, name, stripe_secret_key, agentic_commerce FROM property
+     WHERE agentic_commerce IS NOT NULL AND stripe_secret_key IS NOT NULL`
+  );
+  return rows;
+}
+
+function afterRecordDefault(order, p) {
   // Lazy require: controllers/proshop pulls in a lot; keeps this module's
   // pure exports cheap to load in the check script.
-  const { decrementStockForItems, emailOrderConfirmationInBackground, forFeed } = require('../controllers/proshop');
-  const stripe = require('stripe')(p.stripe_secret_key);
+  const { emailOrderConfirmationInBackground, forFeed } = require('../controllers/proshop');
+  publishNewProshopOrder(p.id, forFeed(order)).catch((err) => console.error('Ably publish failed:', err.message));
+  emailOrderConfirmationInBackground(order.id, p.id);
+}
+
+async function sweepProperty(p, {
+  db = pool,
+  stripe = require('stripe')(p.stripe_secret_key),
+  transact = inTransaction,
+  afterRecord = afterRecordDefault,
+} = {}) {
   // The shop the site sells from: first active shop by name (GET /api/proshop/shops).
-  const { rows: [shop] } = await pool.query(`SELECT id FROM shop WHERE status = 'active' AND property_id = $1 ORDER BY name LIMIT 1`, [p.id]);
+  const { rows: [shop] } = await db.query(`SELECT id FROM shop WHERE status = 'active' AND property_id = $1 ORDER BY name LIMIT 1`, [p.id]);
   if (!shop) { console.warn(`Agentic orders ${p.name}: no active shop`); return 0; }
-  const { rows: items } = await pool.query('SELECT id, name FROM proshop_item WHERE property_id = $1', [p.id]);
+  const { rows: items } = await db.query('SELECT id, name FROM proshop_item WHERE property_id = $1', [p.id]);
   const itemsByFeedId = new Map(items.map((i) => [feedId(i.id), i]));
-  const { rows: seenRows } = await pool.query(
+  const { rows: seenRows } = await db.query(
     `SELECT stripe_checkout_session_id FROM proshop_order
      WHERE property_id = $1 AND stripe_checkout_session_id IS NOT NULL AND created_at > now() - interval '3 days'`,
     [p.id]
@@ -116,14 +144,18 @@ async function sweepProperty(p) {
   for await (const s of stripe.checkout.sessions.list({ status: 'complete', created: { gt: Math.floor(Date.now() / 1000) - LOOKBACK_SECONDS }, limit: 100 })) {
     if (seen.has(s.id)) continue;
     try {
-      const full = await stripe.checkout.sessions.retrieve(s.id, { expand: ['line_items.data.price'] }, { apiVersion: SESSION_API_VERSION });
-      const mapped = sessionToOrder(full, itemsByFeedId);
+      const full = await stripe.checkout.sessions.retrieve(s.id, {}, { apiVersion: SESSION_API_VERSION });
+      // 'complete' isn't 'collected': delayed methods (e.g. ACH) settle later.
+      // Not added to `seen`, so a later sweep records it once it's paid.
+      if (full.payment_status !== 'paid') continue;
+      // Every page -- an expanded retrieve stops at the first 10 lines.
+      const data = [];
+      for await (const li of stripe.checkout.sessions.listLineItems(s.id, { expand: ['data.price'], limit: 100 }, { apiVersion: SESSION_API_VERSION })) data.push(li);
+      const mapped = sessionToOrder({ ...full, line_items: { data } }, itemsByFeedId);
       if (!mapped) continue;
-      const order = await inTransaction((db) => recordOrder(db, p.id, shop.id, mapped));
+      const order = await transact((client) => recordOrder(client, p.id, shop.id, mapped));
       if (!order) continue;
-      await decrementStockForItems(order.items);
-      publishNewProshopOrder(p.id, forFeed(order)).catch((err) => console.error('Ably publish failed:', err.message));
-      emailOrderConfirmationInBackground(order.id, p.id);
+      afterRecord(order, p);
       recorded++;
     } catch (err) {
       console.error(`Agentic order ${s.id} for ${p.name} failed:`, err.message);
@@ -133,7 +165,7 @@ async function sweepProperty(p) {
 }
 
 async function sweepOrders() {
-  for (const p of await enabledProperties()) {
+  for (const p of await orderProperties()) {
     try {
       const n = await sweepProperty(p);
       if (n) console.log(`Agentic orders ${p.name}: recorded ${n}`);
@@ -150,4 +182,4 @@ function startAgenticOrderJob() {
   timer.unref();
 }
 
-module.exports = { sessionToOrder, recordOrder, sweepProperty, startAgenticOrderJob };
+module.exports = { sessionToOrder, recordOrder, orderProperties, sweepProperty, startAgenticOrderJob };

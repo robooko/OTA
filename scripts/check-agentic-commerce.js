@@ -205,6 +205,49 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal(orders.n, 1);
     });
 
+    await check('sweep: paid agent session recorded once, stock down once; unpaid + non-agent skipped; >10 lines kept', async () => {
+      const prop = await one(`INSERT INTO property (name, currency, timezone, stripe_secret_key, agentic_commerce)
+        VALUES ('Sweep Check', 'USD', 'America/Tortola', 'sk_test_fake', $1) RETURNING *`, [{ ...CFG, enabled: false }]);
+      const shop = await one(`INSERT INTO shop (property_id, name) VALUES ($1, 'Merch') RETURNING id`, [prop.id]);
+      const items = [];
+      for (let n = 0; n < 11; n++) {
+        items.push(await one(`INSERT INTO proshop_item (property_id, shop_id, name, price, stock_quantity) VALUES ($1, $2, $3, 10, 5) RETURNING id, name`, [prop.id, shop.id, `Item ${n}`]));
+      }
+      const lines = items.map((it) => ({ description: it.name, quantity: 1, price: { unit_amount: 1000, external_reference: feed.feedId(it.id) } }));
+      const sessions = {
+        cs_paid: session({ id: 'cs_paid', payment_status: 'paid', amount_total: 11000, amount_subtotal: 11000, total_details: { amount_shipping: 0, amount_tax: 0 } }),
+        cs_unpaid: session({ id: 'cs_unpaid', payment_status: 'unpaid' }),
+        cs_web: session({ id: 'cs_web', payment_status: 'paid' }),
+      };
+      const linesFor = {
+        cs_paid: lines,
+        cs_unpaid: lines.slice(0, 1),
+        cs_web: [{ description: 'Gift card', quantity: 1, price: { unit_amount: 500, external_reference: null } }],
+      };
+      async function* iter(arr) { for (const x of arr) yield x; }
+      const stripe = { checkout: { sessions: {
+        list: () => iter(Object.values(sessions).map((s) => ({ id: s.id }))),
+        retrieve: async (id) => { const { line_items, ...s } = sessions[id]; return s; },
+        listLineItems: (id) => iter(linesFor[id]),
+      } } };
+      const after = [];
+      const deps = { db, stripe, transact: (fn) => fn(db), afterRecord: (order) => after.push(order.id) };
+      assert.equal(await agentic.sweepProperty(prop, deps), 1);
+      assert.equal(await agentic.sweepProperty(prop, deps), 0);
+      const o = await one(`SELECT id FROM proshop_order WHERE stripe_checkout_session_id = 'cs_paid'`);
+      assert.equal((await one(`SELECT count(*)::int AS n FROM proshop_order_item WHERE order_id = $1`, [o.id])).n, 11);
+      const stock = await one(`SELECT min(stock_quantity)::int AS lo, max(stock_quantity)::int AS hi FROM proshop_item WHERE property_id = $1`, [prop.id]);
+      assert.deepEqual([stock.lo, stock.hi], [4, 4]);
+      assert.equal((await one(`SELECT count(*)::int AS n FROM proshop_order WHERE stripe_checkout_session_id IN ('cs_unpaid', 'cs_web')`)).n, 0);
+      assert.deepEqual(after, [o.id]);
+    });
+    await check('sweep: orders still recorded when the feed is switched off (enabled=false)', async () => {
+      const prop = await one(`INSERT INTO property (name, currency, timezone, stripe_secret_key, agentic_commerce)
+        VALUES ('Off Check', 'USD', 'America/Tortola', 'sk_test_fake', $1) RETURNING id`, [{ ...CFG, enabled: false }]);
+      assert.ok((await agentic.orderProperties(db)).some((p) => p.id === prop.id));
+      assert.ok(!(await feed.enabledProperties(db)).some((p) => p.id === prop.id));
+    });
+
     // ── later tasks append checks above this line ──
   } finally {
     await db.query('ROLLBACK');
