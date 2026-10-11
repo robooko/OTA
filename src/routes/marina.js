@@ -56,6 +56,7 @@ router.get('/bookings', authenticateOrApiKey, bookings.listBookings);
 router.post('/bookings', authenticateOrApiKey, bookings.createBooking);
 router.get('/bookings/:id', authenticateOrApiKey, bookings.getBooking);
 router.put('/bookings/:id', authenticateOrApiKey, bookings.updateBooking);
+router.post('/bookings/:id/send-guest-link', authenticateOrApiKey, bookings.sendGuestLink);
 
 router.post(`${G}/bookings`, authenticateOrApiKey, bookingLimiter, guest.resolveMarina, guest.createGuestBooking);
 router.get(`${G}/bookings/:id`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.getGuestBooking);

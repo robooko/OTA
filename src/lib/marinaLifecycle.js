@@ -93,6 +93,12 @@ async function promoteHeldBooking(client, row) {
 // failure the error is kept on the row for staff and the sweep's retry.
 async function releasePi(client, row) {
   if (!row.stripe_payment_intent_id || !['none', 'held'].includes(row.payment_status)) return true;
+  // Key cleared since the hold was made: let the booking end (the berth
+  // must free up) and leave the release to the retry once a key is back.
+  if (!row.stripe_secret_key) {
+    await setRow(client, row.id, { payment_error: 'Stripe key not configured; card hold not released' });
+    return false;
+  }
   const stripe = stripeOf(row);
   try {
     await stripe.paymentIntents.cancel(row.stripe_payment_intent_id, {}, { idempotencyKey: `marina-cancel-${row.id}` });
@@ -264,10 +270,12 @@ async function retryReleases() {
     `SELECT id FROM marina_booking
      WHERE status IN ('cancelled', 'declined') AND stripe_payment_intent_id IS NOT NULL
        AND payment_status IN ('none', 'held') AND payment_error IS NOT NULL
-     LIMIT 50`);
+     ORDER BY updated_at LIMIT 50`);
   for (const { id } of rows) {
     await withLockedBooking(id, async (client, row) => {
-      if (!(await releasePi(client, row))) return { ok: true, booking: true };
+      // Still failing: keep the error (setRow also bumps updated_at, so
+      // this row goes to the back of the queue) but publish nothing.
+      if (!(await releasePi(client, row))) return { ok: true };
       return { ok: true, booking: await setRow(client, id, { payment_status: 'released', payment_error: null }) };
     }).catch((err) => console.error(`Marina release retry failed for ${id}:`, err.message));
   }

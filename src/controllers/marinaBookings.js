@@ -4,6 +4,7 @@ const q = require('../lib/marinaQueries');
 const life = require('../lib/marinaLifecycle');
 const { priceStay } = require('../lib/marinaPricing');
 const { emailKey } = require('../lib/spaBookingGuard');
+const { sendGuestEmail } = require('../lib/marinaEmails');
 
 // Staff booking routes (authenticateOrApiKey, so MCP tools work over a
 // key). Holds are a guest's in-flight checkout: hidden from staff lists.
@@ -46,7 +47,11 @@ async function getBooking(req, res, next) {
     const b = await bookingOr404(req, res);
     if (!b) return;
     const [docs, sig] = await Promise.all([
-      pool.query('SELECT id, requirement_id, type, file_name, content_type, size_bytes, status, expiry_date, submitted_at, verified_at, file_deleted_at FROM marina_document WHERE booking_id = $1 ORDER BY submitted_at', [b.id]),
+      // expiry_date is read off the document (passport, insurance) -- bearer
+      // only, like the documents routes: guest sites hold the API key.
+      pool.query(`SELECT id, requirement_id, type, file_name, content_type, size_bytes, status,
+                         ${req.auth_method === 'bearer' ? 'expiry_date,' : ''} submitted_at, verified_at, file_deleted_at
+                  FROM marina_document WHERE booking_id = $1 ORDER BY submitted_at`, [b.id]),
       pool.query('SELECT template_id, signer_email, agreed_at FROM marina_contract_signature WHERE booking_id = $1', [b.id]),
     ]);
     const { confirm_token_hash, ...safe } = b;
@@ -122,4 +127,18 @@ async function updateBooking(req, res, next) {
   }
 }
 
-module.exports = { listBookings, getBooking, createBooking, updateBooking };
+// Emails the guest their booking-page link, so a staff-created booking can
+// still collect documents and the contract.
+async function sendGuestLink(req, res, next) {
+  try {
+    const b = await bookingOr404(req, res);
+    if (!b) return;
+    if (!b.contact_email) return res.status(409).json({ error: 'This booking has no contact email' });
+    if (!b.booking_url) return res.status(409).json({ error: "Set the marina's booking page URL in Settings first" });
+    if (!['pending', 'confirmed'].includes(b.status)) return res.status(409).json({ error: `Booking is ${b.status}` });
+    await sendGuestEmail(b, 'link');
+    res.json({ sent: true });
+  } catch (err) { next(err); }
+}
+
+module.exports = { listBookings, getBooking, createBooking, updateBooking, sendGuestLink };

@@ -332,6 +332,58 @@ const { bookingToken } = require('../src/lib/marinaToken');
       assert.match(facts, /<marina name="Porto HTTP">/); assert.match(facts, /15\.00 m/); assert.match(facts, /within 24 hours/);
     });
 
+    // ---- Final review fixes ----
+    const heldCardBooking = async () => {
+      await pool.query("UPDATE property SET stripe_secret_key = 'sk_test_check', stripe_publishable_key = 'pk_test_check' WHERE id = $1", [P]);
+      const b = await cardBooking();
+      const row = await one('SELECT stripe_payment_intent_id FROM marina_booking WHERE id = $1', [b.booking.id]);
+      fake.store.get(row.stripe_payment_intent_id).status = 'requires_capture';
+      await api('POST', `${G}/bookings/${b.booking.id}/confirm-payment`, { headers: tokenHdr(b.booking_token) });
+      return b;
+    };
+    await check('a cleared Stripe key never blocks decline: booking declined, payment_error kept for retry', async () => {
+      const b = await heldCardBooking();
+      await pool.query('UPDATE property SET stripe_secret_key = NULL WHERE id = $1', [P]);
+      const r = await api('PUT', `/api/marina/bookings/${b.booking.id}`, { body: { action: 'decline' } });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      const row = await one('SELECT status, payment_status, payment_error FROM marina_booking WHERE id = $1', [b.booking.id]);
+      assert.equal(row.status, 'declined'); assert.equal(row.payment_status, 'held'); assert.match(row.payment_error, /Stripe key/);
+      await pool.query("UPDATE property SET stripe_secret_key = 'sk_test_check' WHERE id = $1", [P]);
+      await life.sweepOnce(); // the retry releases it once the key is back
+      assert.equal((await one('SELECT payment_status FROM marina_booking WHERE id = $1', [b.booking.id])).payment_status, 'released');
+    });
+    await check('a failing release retry does not republish to the staff feed', async () => {
+      const b = await heldCardBooking();
+      await pool.query('UPDATE property SET stripe_secret_key = NULL WHERE id = $1', [P]);
+      await api('PUT', `/api/marina/bookings/${b.booking.id}`, { body: { action: 'decline' } });
+      const real = life.afterChange; let published = 0;
+      life.afterChange = () => { published++; };
+      try { await life.sweepOnce(); } finally { life.afterChange = real; }
+      assert.equal(published, 0);
+      await pool.query("UPDATE property SET stripe_secret_key = 'sk_test_check' WHERE id = $1", [P]);
+      await life.sweepOnce();
+    });
+    await check('send-guest-link: 200 with email and booking_url, 409 without either', async () => {
+      const mk = (email, day) => api('POST', '/api/marina/bookings', { body: { berth_id: berthRes.body.id, contact_name: 'Staff Guest', contact_email: email, arrival: future(day), departure: future(day + 2), status: 'pending' } });
+      const withEmail = (await mk('sg@example.com', 900)).body;
+      const noEmail = (await mk(undefined, 910)).body;
+      assert.ok(withEmail.id && noEmail.id, 'fixtures created');
+      assert.equal((await api('POST', `/api/marina/bookings/${withEmail.id}/send-guest-link`)).status, 409, 'no booking_url yet');
+      await pool.query("UPDATE marina SET booking_url = 'https://site.example/booking?id={id}&token={token}' WHERE id = $1", [m.id]);
+      assert.equal((await api('POST', `/api/marina/bookings/${withEmail.id}/send-guest-link`)).status, 200);
+      assert.equal((await api('POST', `/api/marina/bookings/${noEmail.id}/send-guest-link`)).status, 409);
+      await pool.query('UPDATE marina SET booking_url = NULL WHERE id = $1', [m.id]);
+    });
+    await check('key rail never sees passport-derived data on a booking', async () => {
+      const b = await pendingBooking();
+      const d = (await upload(b, pdf)).body;
+      await pool.query("UPDATE marina_document SET expiry_date = '2031-01-01', extracted_data = '{\"number\":\"X1\"}' WHERE id = $1", [d.id]);
+      const r = await api('GET', `/api/marina/bookings/${b.booking.id}`);
+      assert.equal(r.status, 200);
+      assert.ok(!JSON.stringify(r.body).includes('2031-01-01'));
+      assert.ok(!JSON.stringify(r.body).includes('X1'));
+    });
+
     // (later tasks append here)
   } finally {
     server.close();
