@@ -85,7 +85,57 @@ async function resolveSiteProperty(db = pool, sel = {}) {
   return props.length ? { status: 400, error: SITE_AMBIGUOUS } : notFound();
 }
 
+// Clerk org -> property. X-Property-Id when the org has several hotels,
+// implied when it has one. An org with no property rows at all gets one
+// auto-created under an advisory lock: since property.clerk_org_id stopped
+// being UNIQUE, nothing else stops two concurrent first requests creating
+// two hotels (and a permanent 400). An org whose rows are all inactive gets
+// a 403, never a fresh hotel. `createdId` rides on the result -- errors
+// included -- only when this call inserted the hotel, so the caller can
+// grant starter tokens exactly once (outside any transaction this may run in).
+async function resolveStaffProperty(db = pool, orgId, requestedId, fetchOrgName) {
+  const select = (q) => q.query('SELECT id, status FROM property WHERE clerk_org_id = $1', [orgId]);
+  let { rows } = await select(db);
+  let made = {};
+
+  if (!rows.length) {
+    const name = String(await fetchOrgName()).slice(0, 100); // network call stays outside the lock
+    // On the pool, take a dedicated client for our own transaction. Handed a
+    // client (the check script's), it's already in one -- just lock in it.
+    const owns = db === pool;
+    const client = owns ? await pool.connect() : db;
+    try {
+      if (owns) await client.query('BEGIN');
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('property-autocreate:' || $1))", [orgId]);
+      ({ rows } = await select(client));
+      if (!rows.length) {
+        ({ rows } = await client.query(
+          'INSERT INTO property (name, clerk_org_id) VALUES ($1, $2) RETURNING id, status',
+          [name, orgId]
+        ));
+        made = { createdId: rows[0].id };
+      }
+      if (owns) await client.query('COMMIT');
+    } catch (err) {
+      if (owns) await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      if (owns) client.release();
+    }
+  }
+
+  const active = rows.filter((r) => r.status === 'active');
+  if (!active.length) return { status: 403, error: NO_ACTIVE, ...made };
+  const wanted = given(requestedId);
+  if (wanted) {
+    const id = wanted.toLowerCase();
+    return active.some((r) => r.id === id) ? { propertyId: id, ...made } : { ...notFound(), ...made };
+  }
+  if (active.length === 1) return { propertyId: active[0].id, ...made };
+  return { status: 400, error: STAFF_AMBIGUOUS, ...made };
+}
+
 module.exports = {
   PROPERTY_NOT_FOUND, STAFF_AMBIGUOUS, SITE_AMBIGUOUS, HOST_AMBIGUOUS, NO_ACTIVE,
-  hostKey, siteSelectors, resolveSiteProperty,
+  hostKey, siteSelectors, resolveSiteProperty, resolveStaffProperty,
 };

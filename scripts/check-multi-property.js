@@ -13,8 +13,8 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
 
 const pool = require('../src/db');
 const {
-  hostKey, resolveSiteProperty,
-  SITE_AMBIGUOUS, HOST_AMBIGUOUS,
+  hostKey, resolveSiteProperty, resolveStaffProperty,
+  SITE_AMBIGUOUS, HOST_AMBIGUOUS, STAFF_AMBIGUOUS, NO_ACTIVE,
 } = require('../src/lib/propertyResolver');
 
 (async () => {
@@ -37,7 +37,29 @@ const {
     assert.equal(hostKey(null), null);
   });
 
-  // ---- Task 2: concurrent auto-create goes here (before BEGIN) ----
+  // Committed on purpose: two real connections racing the first request for
+  // a brand-new org. Without the advisory lock this either makes two
+  // properties (UNIQUE dropped) or throws 23505 (UNIQUE still there).
+  {
+    const orgF = `org_chkF_${crypto.randomBytes(4).toString('hex')}`;
+    try {
+      const slowName = async () => { await new Promise((r) => setTimeout(r, 50)); return 'Racing Org'; };
+      const [r1, r2] = await Promise.all([
+        resolveStaffProperty(pool, orgF, undefined, slowName),
+        resolveStaffProperty(pool, orgF, undefined, slowName),
+      ]);
+      pure('concurrent first requests for a new org create exactly one property', () => {
+        assert.ok(r1.propertyId && r1.propertyId === r2.propertyId, JSON.stringify([r1, r2]));
+        assert.equal([r1, r2].filter((r) => r.createdId).length, 1);
+      });
+      const { rows } = await pool.query('SELECT count(*)::int AS n FROM property WHERE clerk_org_id = $1', [orgF]);
+      pure('...and only one row exists', () => assert.equal(rows[0].n, 1));
+    } catch (e) {
+      pure('concurrent first requests for a new org create exactly one property', () => { throw e; });
+    } finally {
+      await pool.query('DELETE FROM property WHERE clerk_org_id = $1', [orgF]);
+    }
+  }
 
   const db = new Client({ connectionString: process.env.DATABASE_URL });
   await db.connect();
@@ -144,7 +166,52 @@ const {
       await db.query('ROLLBACK TO SAVEPOINT dup');
     });
 
-    // ---- Task 2: staff resolution checks go here ----
+    let nameCalls = 0;
+    const orgName = async () => { nameCalls++; return 'N'.repeat(150); };
+    const staff = (org, requested) => resolveStaffProperty(db, org, requested, orgName);
+
+    await check('staff: several hotels and no header -> 400', async () => {
+      err(await staff(ORG.A), 400, STAFF_AMBIGUOUS);
+    });
+    await check('staff: X-Property-Id (any case) selects within the org', async () => {
+      assert.deepEqual(await staff(ORG.A, A2), { propertyId: A2 });
+      assert.deepEqual(await staff(ORG.A, A2.toUpperCase()), { propertyId: A2 });
+      NF(await staff(ORG.A, B1));
+      NF(await staff(ORG.A, A3));
+      NF(await staff(ORG.A, 'not-a-uuid'));
+    });
+    await check('staff: one hotel and no header -> that hotel', async () => {
+      assert.deepEqual(await staff(ORG.C), { propertyId: C1 });
+      assert.deepEqual(await staff(ORG.C, ''), { propertyId: C1 });
+    });
+    await check('staff: only inactive hotels -> 403, never auto-creates', async () => {
+      nameCalls = 0;
+      err(await staff(ORG.D), 403, NO_ACTIVE);
+      assert.equal(nameCalls, 0);
+      const { n } = await one('SELECT count(*)::int AS n FROM property WHERE clerk_org_id = $1', [ORG.D]);
+      assert.equal(n, 1);
+    });
+    await check('staff: a brand-new org gets exactly one auto-created hotel', async () => {
+      nameCalls = 0;
+      const orgE = `org_chkE_${run}`;
+      const first = await staff(orgE);
+      assert.ok(first.propertyId);
+      assert.equal(first.createdId, first.propertyId);
+      const second = await staff(orgE);
+      assert.deepEqual(second, { propertyId: first.propertyId });
+      assert.equal(nameCalls, 1);
+      const row = await one('SELECT name, status FROM property WHERE id = $1', [first.propertyId]);
+      assert.equal(row.name.length, 100);
+      assert.equal(row.status, 'active');
+    });
+    await check('staff: new org + stale X-Property-Id -> 404, but reports the created hotel', async () => {
+      const orgG = `org_chkG_${run}`;
+      const r = await staff(orgG, B1);
+      assert.equal(r.status, 404);
+      assert.equal(r.error, 'Property not found');
+      assert.ok(r.createdId);
+      assert.deepEqual(await staff(orgG), { propertyId: r.createdId });
+    });
   } finally {
     await db.query('ROLLBACK');
     await db.end();

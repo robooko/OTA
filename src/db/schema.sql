@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS property (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name             VARCHAR(100) NOT NULL,
   status           VARCHAR(20)  DEFAULT 'active',
-  clerk_org_id     VARCHAR(255) UNIQUE,
+  clerk_org_id     VARCHAR(255), -- several properties per org; see migrate-2026-10-11-property-org-not-unique.sql
   slug             VARCHAR(60), -- path segment a group website routes on; unique per org (property_org_slug_key)
   api_key          TEXT UNIQUE,
   api_key_enabled  BOOLEAN NOT NULL DEFAULT true,
