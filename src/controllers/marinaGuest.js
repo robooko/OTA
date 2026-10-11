@@ -2,7 +2,8 @@ const pool = require('../db');
 const crypto = require('crypto');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const q = require('../lib/marinaQueries');
-const { priceStay, addDays } = require('../lib/marinaPricing');
+const { priceStay, addDays, nightsBetween } = require('../lib/marinaPricing');
+const kc = require('../lib/marinaContracts');
 const guard = require('../lib/marinaGuard');
 const { berthFitError } = guard;
 const life = require('../lib/marinaLifecycle');
@@ -204,7 +205,15 @@ async function getGuestBooking(req, res, next) {
         payment = { client_secret: pi.client_secret, publishable_key: p.stripe_publishable_key };
       }
     }
-    res.json({ booking: guestView(b), payment });
+    // The contract to agree (rendered for this booking), or the agreed snapshot.
+    let contract = null;
+    const { rows: [sig] } = await pool.query('SELECT template_id, rendered_body, agreed_at FROM marina_contract_signature WHERE booking_id = $1', [b.id]);
+    if (sig) contract = sig;
+    else if (b.departure) {
+      const t = kc.pickTemplate(await activeTemplates(b.marina_id), nightsBetween(b.arrival, b.departure));
+      if (t) contract = { template_id: t.id, rendered_body: kc.renderContract(t.body_markdown, kc.contractContext(b, await q.propertyToday(pool, b.property_id))), agreed_at: null };
+    }
+    res.json({ booking: guestView(b), payment, contract });
   } catch (err) { next(err); }
 }
 
@@ -264,7 +273,47 @@ async function confirmPayment(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function activeTemplates(marinaId) {
+  const { rows } = await pool.query("SELECT id, name, body_markdown, min_nights FROM marina_contract_template WHERE marina_id = $1 AND status = 'active'", [marinaId]);
+  return rows;
+}
+
+// Preview with marina fields only (no booking yet).
+async function contractPreview(req, res, next) {
+  try {
+    const nights = Number(req.query.nights);
+    if (!Number.isInteger(nights) || nights < 1) return res.status(400).json({ error: 'nights must be a positive integer' });
+    const t = kc.pickTemplate(await activeTemplates(req.marina.id), nights);
+    if (!t) return res.json(null);
+    const m = req.marina;
+    res.json({ template_id: t.id, name: t.name, body: kc.renderContract(t.body_markdown, {
+      marina_name: m.name, marina_email: m.email, marina_phone: m.phone, marina_website: m.website, nights,
+      today: await q.propertyToday(pool, m.property_id) }) });
+  } catch (err) { next(err); }
+}
+
+// The server picks the template (never the client) and stores the
+// rendered snapshot with who/when/where.
+async function agreeContract(req, res, next) {
+  try {
+    const b = req.booking;
+    if (!['pending', 'confirmed'].includes(b.status)) return res.status(409).json({ error: `Booking is ${b.status}` });
+    if (!b.departure) return res.status(409).json({ error: 'No contract for open-ended bookings' });
+    const t = kc.pickTemplate(await activeTemplates(b.marina_id), nightsBetween(b.arrival, b.departure));
+    if (!t) return res.status(404).json({ error: 'This marina has no contract to sign' });
+    const rendered = kc.renderContract(t.body_markdown, kc.contractContext(b, await q.propertyToday(pool, b.property_id)));
+    const { rows: [sig] } = await pool.query(
+      `INSERT INTO marina_contract_signature (property_id, booking_id, template_id, rendered_body, signer_email, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (booking_id) DO NOTHING
+       RETURNING template_id, rendered_body, agreed_at`,
+      [b.property_id, b.id, t.id, rendered, b.contact_email, guard.clientIp(req), req.get('User-Agent')?.slice(0, 500) ?? null]);
+    if (!sig) return res.status(409).json({ error: 'Already agreed' });
+    life.maybeAutoConfirm(b.id).catch((err) => console.error('Marina auto-confirm failed:', err.message));
+    res.status(201).json(sig);
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   resolveMarina, getMarinaMap, getAvailability, getDocRequirements, quote,
-  requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink, ablyToken, confirmPayment,
+  requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink, ablyToken, confirmPayment, contractPreview, agreeContract,
 };

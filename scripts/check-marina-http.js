@@ -274,6 +274,41 @@ const { bookingToken } = require('../src/lib/marinaToken');
       assert.ok(after.file_deleted_at); assert.ok(!blobs.has(d.blob_pathname));
     });
 
+    // ---- Task 11 ----
+    await check('auto-confirm: off by default; on with no requirements confirms at pending', async () => {
+      const b = await pendingBooking();
+      assert.equal(await life.maybeAutoConfirm(b.booking.id), null);
+      await pool.query('UPDATE marina SET auto_confirm = true WHERE id = $1', [m.id]);
+      assert.equal((await life.maybeAutoConfirm(b.booking.id)).status, 'confirmed');
+    });
+    await check('auto-confirm waits for a verified mandatory doc and the contract', async () => {
+      const req = await one(`INSERT INTO marina_doc_requirement (property_id, marina_id, type, name) VALUES ($1, $2, 'passport', 'Passport') RETURNING id`, [P, m.id]);
+      await one(`INSERT INTO marina_contract_template (property_id, marina_id, name, body_markdown) VALUES ($1, $2, 'T', 'Hi {{sailor_name}}') RETURNING id`, [P, m.id]);
+      const b = await pendingBooking();
+      assert.equal(await life.maybeAutoConfirm(b.booking.id), null);
+      const d = await one(`INSERT INTO marina_document (property_id, marina_id, booking_id, requirement_id, blob_pathname, content_type, size_bytes, status)
+        VALUES ($1, $2, $3, $4, 'x', 'application/pdf', 1, 'verified') RETURNING id`, [P, m.id, b.booking.id, req.id]);
+      assert.equal(await life.maybeAutoConfirm(b.booking.id), null, 'contract still missing');
+      const r = await api('POST', `${G}/bookings/${b.booking.id}/contract`, { headers: { 'X-Booking-Token': b.booking_token } });
+      assert.equal(r.status, 201); assert.match(r.body.rendered_body, /Hi Ann/);
+      await new Promise((ok) => setTimeout(ok, 200)); // agreeContract fires auto-confirm in the background
+      assert.equal((await one('SELECT status FROM marina_booking WHERE id = $1', [b.booking.id])).status, 'confirmed');
+      await pool.query("UPDATE marina SET auto_confirm = false WHERE id = $1", [m.id]);
+      await pool.query("UPDATE marina_doc_requirement SET status = 'inactive' WHERE marina_id = $1", [m.id]);
+      await pool.query("UPDATE marina_contract_template SET status = 'inactive' WHERE marina_id = $1", [m.id]);
+    });
+
+    await check('contract: editor warns on unknown placeholders; preview and booking page render it', async () => {
+      const t = await api('POST', `/api/marina/marinas/${m.id}/contract-templates`, { body: { name: 'Std', body_markdown: 'Berth {{berth_id}} for {{sailor_name}} at {{marina_name}} {{acord25.policy}}' } });
+      assert.deepEqual(t.body.warnings, { unknown_placeholders: ['acord25.policy'] });
+      const pv = await api('GET', `${G}/contract-preview?nights=2`);
+      assert.equal(pv.body.body, 'Berth  for  at Porto HTTP ');
+      const b = await pendingBooking();
+      const page = await api('GET', `${G}/bookings/${b.booking.id}`, { headers: { 'X-Booking-Token': b.booking_token } });
+      assert.equal(page.body.contract.rendered_body, 'Berth H1 for Ann at Porto HTTP '); assert.equal(page.body.contract.agreed_at, null);
+      await pool.query("UPDATE marina_contract_template SET status = 'inactive' WHERE id = $1", [t.body.id]);
+    });
+
     // (later tasks append here)
   } finally {
     server.close();

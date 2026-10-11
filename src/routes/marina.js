@@ -63,4 +63,7 @@ router.get(`${G}/bookings/:id/ably-token`, authenticateOrApiKey, guest.resolveMa
 router.post(`${G}/bookings/:id/confirm-payment`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.confirmPayment);
 router.post(`${G}/bookings/:id/documents`, authenticateOrApiKey, uploadLimiter, guest.resolveMarina, guest.requireBookingToken, rawDocSafe, docCtrl.uploadDocument);
 
+router.get(`${G}/contract-preview`, authenticateOrApiKey, guest.resolveMarina, guest.contractPreview);
+router.post(`${G}/bookings/:id/contract`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.agreeContract);
+
 module.exports = router;

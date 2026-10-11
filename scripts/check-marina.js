@@ -203,6 +203,19 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal(sniffType(Buffer.alloc(0)), null);
     });
 
+    // ---- Task 11: contracts ----
+    const kc = require('../src/lib/marinaContracts');
+    await check('pickTemplate takes the highest min_nights <= nights', async () => {
+      const t = [{ id: 'a', min_nights: 0 }, { id: 'b', min_nights: 7 }, { id: 'c', min_nights: 30 }];
+      assert.equal(kc.pickTemplate(t, 3).id, 'a'); assert.equal(kc.pickTemplate(t, 7).id, 'b'); assert.equal(kc.pickTemplate(t, 365).id, 'c');
+      assert.equal(kc.pickTemplate([], 3), null);
+    });
+    await check('renderContract fills Sidon merge fields, blanks document fields and unknowns', async () => {
+      const out = kc.renderContract('{{sailor_name}} / {{ boat_loa }} m / {{acord25.policy}} / {{nope}}', { sailor_name: 'Ann', boat_loa: '10.50' });
+      assert.equal(out, 'Ann / 10.50 m /  / ');
+      assert.deepEqual(kc.unknownPlaceholders('{{sailor_name}} {{acord25.policy}} {{nope}}'), ['acord25.policy', 'nope']);
+    });
+
     // (later tasks append their checks here)
   } finally {
     await db.query('ROLLBACK');

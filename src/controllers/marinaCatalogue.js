@@ -1,6 +1,7 @@
 const pool = require('../db');
 const { isValidUuid, isValidUrl } = require('../middleware/validate');
 const { sniffType, putPublic } = require('../lib/marinaDocuments');
+const { unknownPlaceholders } = require('../lib/marinaContracts');
 
 // Staff CRUD for marinas and their catalogue tables. Every child table is
 // property-scoped and soft-deletes through status, so one table-driven
@@ -142,6 +143,14 @@ async function updateMarina(req, res, next) {
 
 // --- children --------------------------------------------------------------
 
+// Contract templates: flag placeholders that will render blank (document
+// fields like {{acord25.*}} aren't supported in phase 1, typos never are).
+function withWarnings(table, row) {
+  if (table !== 'marina_contract_template') return row;
+  const unknown = unknownPlaceholders(row.body_markdown);
+  return unknown.length ? { ...row, warnings: { unknown_placeholders: unknown } } : row;
+}
+
 function childHandlers(kind) {
   const { table, order, cols, listWhere = "status = 'active'", required } = TABLES[kind];
   return {
@@ -158,7 +167,7 @@ function childHandlers(kind) {
         const values = pick(req.body, cols, { create: true, required });
         if (table === 'marina_berth') await checkPontoon(pool, req.params.marina_id, values);
         const { rows: [row] } = await pool.query(insertSql(table, { ...values, property_id: req.property_id, marina_id: req.params.marina_id }));
-        res.status(201).json(row);
+        res.status(201).json(withWarnings(table, row));
       } catch (err) {
         if (err.code === '23505') return res.status(409).json({ error: 'That label is already used at this marina' });
         next(err);
@@ -184,7 +193,7 @@ function childHandlers(kind) {
           );
         }
         await client.query('COMMIT');
-        res.json(row);
+        res.json(withWarnings(table, row));
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         if (err.code === '23505') return res.status(409).json({ error: 'That label is already used at this marina' });

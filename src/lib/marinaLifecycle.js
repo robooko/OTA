@@ -2,6 +2,8 @@ const pool = require('../db');
 const marinaStripe = require('./marinaStripe');
 const q = require('./marinaQueries');
 const { toCents } = require('./folio');
+const { pickTemplate } = require('./marinaContracts');
+const { nightsBetween } = require('./marinaPricing');
 const { publishMarinaBooking, publishMarinaGuestUpdate } = require('./ably');
 const { sendGuestEmail } = require('./marinaEmails');
 
@@ -271,8 +273,35 @@ async function retryReleases() {
   }
 }
 
-// Filled in by the contracts/auto-confirm step.
-async function maybeAutoConfirm() { return null; }
+// Opt-in per marina. Runs when a booking reaches pending, after a document
+// is verified, and after the contract is agreed. Confirms only when every
+// mandatory requirement has a verified document, the applicable contract
+// (if any) is agreed, and -- only if there's a PaymentIntent -- the card is
+// held. Extracted document data plays no part.
+async function maybeAutoConfirm(id) {
+  const { rows: [b] } = await pool.query(
+    `SELECT mb.id, mb.status, mb.arrival, mb.departure, mb.marina_id, mb.stripe_payment_intent_id, mb.payment_status, m.auto_confirm
+     FROM marina_booking mb JOIN marina m ON m.id = mb.marina_id WHERE mb.id = $1`, [id]);
+  if (!b || !b.auto_confirm || b.status !== 'pending') return null;
+  if (b.stripe_payment_intent_id && b.payment_status !== 'held') return null;
+  const { rows: [{ missing }] } = await pool.query(
+    `SELECT count(*)::int AS missing FROM marina_doc_requirement r
+     WHERE r.marina_id = $1 AND r.status = 'active' AND r.mandatory
+       AND NOT EXISTS (SELECT 1 FROM marina_document d WHERE d.booking_id = $2 AND d.requirement_id = r.id AND d.status = 'verified')`,
+    [b.marina_id, id]);
+  if (missing) return null;
+  if (b.departure) {
+    const { rows: templates } = await pool.query("SELECT id, min_nights FROM marina_contract_template WHERE marina_id = $1 AND status = 'active'", [b.marina_id]);
+    const t = pickTemplate(templates, nightsBetween(b.arrival, b.departure));
+    if (t) {
+      const { rowCount } = await pool.query('SELECT 1 FROM marina_contract_signature WHERE booking_id = $1', [id]);
+      if (!rowCount) return null;
+    }
+  }
+  // confirmBooking re-checks status under the row lock and captures first.
+  const r = await confirmBooking(id);
+  return r.ok && r.booking.status === 'confirmed' ? r.booking : null;
+}
 
 function startMarinaHoldExpiryJob() {
   const run = () => sweepOnce()
