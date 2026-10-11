@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS property (
   name             VARCHAR(100) NOT NULL,
   status           VARCHAR(20)  DEFAULT 'active',
   clerk_org_id     VARCHAR(255) UNIQUE,
+  slug             VARCHAR(60), -- path segment a group website routes on; unique per org (property_org_slug_key)
   api_key          TEXT UNIQUE,
   api_key_enabled  BOOLEAN NOT NULL DEFAULT true,
   currency         VARCHAR(3)   NOT NULL DEFAULT 'GBP',
@@ -78,6 +79,18 @@ CREATE TABLE IF NOT EXISTS property (
   CONSTRAINT property_ai_reply_mode_check CHECK (ai_reply_mode IN ('off', 'draft', 'auto')),
   CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100),
   CONSTRAINT property_tax_rate_check CHECK (tax_rate >= 0 AND tax_rate <= 100)
+);
+
+-- See migrate-2026-10-11-multi-property-per-org.sql.
+CREATE UNIQUE INDEX IF NOT EXISTS property_org_slug_key ON property(clerk_org_id, slug);
+
+-- Org-level website key (one build, every hotel in the org). Name/members/
+-- roles stay in Clerk.
+CREATE TABLE IF NOT EXISTS organization (
+  clerk_org_id     VARCHAR(255) PRIMARY KEY,
+  api_key          TEXT UNIQUE,
+  api_key_enabled  BOOLEAN NOT NULL DEFAULT true,
+  created_at       TIMESTAMPTZ DEFAULT now()
 );
 
 -- Every token_balance change, as a receipt -- see migrate-2026-09-01-property-token-billing.sql.
