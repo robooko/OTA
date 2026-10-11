@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const pool = require('../db');
+const { keyMode } = require('../lib/marinaStripe');
 const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate, isValidUuid, validateBranding, validateCancelUrl } = require('../middleware/validate');
 const { isConfigured: aiConfigured, MODEL: AI_MODEL } = require('../lib/aiReplies');
 const twilio = require('../lib/twilio');
@@ -501,8 +502,8 @@ async function clearVercelPat(req, res, next) {
 // payment intents / holds under this property's own Stripe account.
 async function getStripeStatus(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT stripe_secret_key FROM property WHERE id = $1', [req.property_id]);
-    res.json({ stripeKeyConfigured: !!rows[0]?.stripe_secret_key });
+    const { rows } = await pool.query('SELECT stripe_secret_key, stripe_publishable_key FROM property WHERE id = $1', [req.property_id]);
+    res.json({ stripeKeyConfigured: !!rows[0]?.stripe_secret_key, stripePublishableKey: rows[0]?.stripe_publishable_key ?? null });
   } catch (err) {
     next(err);
   }
@@ -514,8 +515,49 @@ async function setStripeKey(req, res, next) {
     if (!stripe_secret_key || typeof stripe_secret_key !== 'string') {
       return res.status(400).json({ error: 'stripe_secret_key is required' });
     }
+    if (!/^(sk|rk)_(live|test)_/.test(stripe_secret_key)) {
+      return res.status(400).json({ error: 'stripe_secret_key must be an sk_… or rk_… key' });
+    }
+    const conflict = await stripeModeConflict(req.property_id, 'stripe_publishable_key', stripe_secret_key);
+    if (conflict) return res.status(400).json({ error: conflict });
     await pool.query('UPDATE property SET stripe_secret_key = $1 WHERE id = $2', [stripe_secret_key, req.property_id]);
     res.json({ stripeKeyConfigured: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// The secret and publishable keys must be the same mode (marina guest
+// checkout uses both); changing modes means clearing the other key first,
+// so a live secret never pairs with a test publishable key.
+async function stripeModeConflict(propertyId, otherColumn, newKey) {
+  const { rows: [p] } = await pool.query(`SELECT ${otherColumn} AS other FROM property WHERE id = $1`, [propertyId]);
+  const mine = keyMode(newKey);
+  const theirs = keyMode(p?.other);
+  if (!theirs || mine === theirs) return null;
+  const other = otherColumn === 'stripe_secret_key' ? 'secret' : 'publishable';
+  return `This is a ${mine} key but the stored ${other} key is ${theirs}; clear it first`;
+}
+
+async function setStripePublishableKey(req, res, next) {
+  try {
+    const key = typeof req.body?.stripe_publishable_key === 'string' ? req.body.stripe_publishable_key.trim() : '';
+    if (!/^pk_(live|test)_[A-Za-z0-9]+$/.test(key)) {
+      return res.status(400).json({ error: 'stripe_publishable_key must be a pk_live_… or pk_test_… key' });
+    }
+    const conflict = await stripeModeConflict(req.property_id, 'stripe_secret_key', key);
+    if (conflict) return res.status(400).json({ error: conflict });
+    await pool.query('UPDATE property SET stripe_publishable_key = $1 WHERE id = $2', [key, req.property_id]);
+    res.json({ stripePublishableKey: key });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function clearStripePublishableKey(req, res, next) {
+  try {
+    await pool.query('UPDATE property SET stripe_publishable_key = NULL WHERE id = $1', [req.property_id]);
+    res.json({ stripePublishableKey: null });
   } catch (err) {
     next(err);
   }
@@ -796,6 +838,6 @@ module.exports = {
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics, getGoogleAnalyticsSetup,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,
   setVercelPat, clearVercelPat,
-  getStripeStatus, setStripeKey, clearStripeKey,
+  getStripeStatus, setStripeKey, clearStripeKey, setStripePublishableKey, clearStripePublishableKey,
   getAiReplySettings, updateAiReplySettings, updateAiReplyInstructions,
 };

@@ -29,6 +29,8 @@ router.post('/vercel/pat/clear', authenticate, requireRole('admin'), ctrl.clearV
 router.get('/stripe/status', authenticate, ctrl.getStripeStatus);
 router.put('/stripe/key', authenticate, requireRole('admin'), ctrl.setStripeKey);
 router.post('/stripe/key/clear', authenticate, requireRole('admin'), ctrl.clearStripeKey);
+router.put('/stripe/publishable-key', authenticate, requireRole('admin'), ctrl.setStripePublishableKey);
+router.post('/stripe/publishable-key/clear', authenticate, requireRole('admin'), ctrl.clearStripePublishableKey);
 
 // GET and the instructions-only PUT are on the API-key rail too, so the MCP
 // tools (get_ai_reply_settings / set_ai_reply_instructions) can guide a

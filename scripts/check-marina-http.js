@@ -131,6 +131,101 @@ const { bookingToken } = require('../src/lib/marinaToken');
       assert.equal((await api('GET', `${G}/bookings/${r.body.booking.id}/ably-token`, { headers: { 'X-Booking-Token': r.body.booking_token } })).status, 503);
     });
 
+    // ---- Task 9 ----
+    const fake = require('./fake-stripe');
+    await pool.query("UPDATE property SET stripe_secret_key = 'sk_test_check', stripe_publishable_key = 'pk_test_check' WHERE id = $1", [P]);
+    const tokenHdr = (t) => ({ 'X-Booking-Token': t, 'X-Client-Ip': '192.0.2.90' });
+    const cardBooking = async () => {
+      const r = await api('POST', `${G}/bookings`, { body: guestBody(), headers: { 'X-Client-Ip': '192.0.2.91' } });
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      return r.body;
+    };
+    await check('priced booking returns a client_secret; PI amount and currency match', async () => {
+      const b = await cardBooking();
+      assert.ok(b.payment.client_secret); assert.equal(b.payment.publishable_key, 'pk_test_check');
+      const row = await one('SELECT stripe_payment_intent_id, total_price FROM marina_booking WHERE id = $1', [b.booking.id]);
+      const pi = fake.store.get(row.stripe_payment_intent_id);
+      assert.equal(pi.amount, Math.round(row.total_price * 100)); assert.equal(pi.currency, 'eur'); assert.equal(pi.capture_method, 'manual');
+    });
+    await check('confirm-payment before authorisation → 409; after → pending + held', async () => {
+      const b = await cardBooking();
+      const path = `${G}/bookings/${b.booking.id}/confirm-payment`;
+      assert.equal((await api('POST', path, { headers: tokenHdr(b.booking_token) })).status, 409);
+      const row = await one('SELECT stripe_payment_intent_id FROM marina_booking WHERE id = $1', [b.booking.id]);
+      fake.store.get(row.stripe_payment_intent_id).status = 'requires_capture';
+      const ok = await api('POST', path, { headers: tokenHdr(b.booking_token) });
+      assert.equal(ok.status, 200); assert.equal(ok.body.booking.status, 'pending'); assert.equal(ok.body.booking.payment_status, 'held');
+    });
+    await check('confirm-payment on a just-lapsed hold promotes (never cancels an authorised card)', async () => {
+      const b = await cardBooking();
+      const row = await one("UPDATE marina_booking SET hold_expires_at = now() - interval '5 seconds' WHERE id = $1 RETURNING stripe_payment_intent_id", [b.booking.id]);
+      fake.store.get(row.stripe_payment_intent_id).status = 'requires_capture';
+      const r = await api('POST', `${G}/bookings/${b.booking.id}/confirm-payment`, { headers: tokenHdr(b.booking_token) });
+      assert.equal(r.body.booking.status, 'pending');
+    });
+    await check('sweep promotes an expired hold whose PI is requires_capture; cancels+releases one that is not', async () => {
+      const a = await cardBooking(); const c = await cardBooking();
+      const ra = await one("UPDATE marina_booking SET hold_expires_at = now() - interval '1 minute' WHERE id = $1 RETURNING stripe_payment_intent_id", [a.booking.id]);
+      const rc = await one("UPDATE marina_booking SET hold_expires_at = now() - interval '1 minute' WHERE id = $1 RETURNING stripe_payment_intent_id", [c.booking.id]);
+      fake.store.get(ra.stripe_payment_intent_id).status = 'requires_capture';
+      await life.sweepOnce();
+      assert.equal((await one('SELECT status, payment_status FROM marina_booking WHERE id = $1', [a.booking.id])).payment_status, 'held');
+      const cc = await one('SELECT status, payment_status FROM marina_booking WHERE id = $1', [c.booking.id]);
+      assert.equal(cc.status, 'cancelled'); assert.equal(cc.payment_status, 'released');
+      assert.equal(fake.store.get(rc.stripe_payment_intent_id).status, 'canceled');
+    });
+    await check('PI creation failure frees the berth at once (502)', async () => {
+      fake.failNextCreate = true;
+      const body = guestBody();
+      const r = await api('POST', `${G}/bookings`, { body, headers: { 'X-Client-Ip': '192.0.2.92' } });
+      assert.equal(r.status, 502);
+      assert.equal((await api('POST', `${G}/bookings`, { body: { ...body, contact_email: 'retry@example.com' }, headers: { 'X-Client-Ip': '192.0.2.92' } })).status, 201);
+    });
+    await check('staff confirm captures; capture failure keeps pending with payment_error', async () => {
+      const b = await cardBooking();
+      const row = await one('SELECT stripe_payment_intent_id FROM marina_booking WHERE id = $1', [b.booking.id]);
+      fake.store.get(row.stripe_payment_intent_id).status = 'requires_capture';
+      await api('POST', `${G}/bookings/${b.booking.id}/confirm-payment`, { headers: tokenHdr(b.booking_token) });
+      fake.failNextCapture = true;
+      const bad = await api('PUT', `/api/marina/bookings/${b.booking.id}`, { body: { action: 'confirm' } });
+      assert.equal(bad.status, 502);
+      const mid = await one('SELECT status, payment_error FROM marina_booking WHERE id = $1', [b.booking.id]);
+      assert.equal(mid.status, 'pending'); assert.match(mid.payment_error, /capture failed/);
+      const good = await api('PUT', `/api/marina/bookings/${b.booking.id}`, { body: { action: 'confirm' } });
+      assert.equal(good.body.status, 'confirmed'); assert.equal(good.body.payment_status, 'captured'); assert.equal(good.body.payment_error, null);
+    });
+    await check('staff cancel of a captured booking with refund:true refunds', async () => {
+      const id = (await one("SELECT id FROM marina_booking WHERE property_id = $1 AND payment_status = 'captured' LIMIT 1", [P])).id;
+      const r = await api('PUT', `/api/marina/bookings/${id}`, { body: { action: 'cancel', refund: true } });
+      assert.equal(r.body.payment_status, 'refunded');
+    });
+    await check('confirm-payment accepts a mismatched-case currency, rejects a wrong amount', async () => {
+      const b = await cardBooking();
+      const row = await one('SELECT stripe_payment_intent_id FROM marina_booking WHERE id = $1', [b.booking.id]);
+      const pi = fake.store.get(row.stripe_payment_intent_id);
+      pi.status = 'requires_capture'; pi.amount += 1;
+      assert.equal((await api('POST', `${G}/bookings/${b.booking.id}/confirm-payment`, { headers: tokenHdr(b.booking_token) })).status, 409);
+    });
+
+    await check('Stripe key modes must match: a test publishable key is refused beside a live secret', async () => {
+      const prop = require('../src/controllers/property');
+      const call = async (fn, body) => {
+        let out = { status: 200 };
+        const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; return this; } };
+        await prop[fn]({ property_id: P, body }, res, (e) => { throw e; });
+        return out;
+      };
+      await pool.query("UPDATE property SET stripe_secret_key = 'sk_live_abc', stripe_publishable_key = NULL WHERE id = $1", [P]);
+      const bad = await call('setStripePublishableKey', { stripe_publishable_key: 'pk_test_abc' });
+      assert.equal(bad.status, 400); assert.match(bad.body.error, /test.*live/);
+      assert.equal((await call('setStripePublishableKey', { stripe_publishable_key: 'pk_live_abc' })).status, 200);
+      assert.equal((await call('setStripeKey', { stripe_secret_key: 'sk_test_abc' })).status, 400);
+      assert.equal((await call('setStripeKey', { stripe_secret_key: 'pk_live_abc' })).status, 400);
+      assert.equal((await call('clearStripePublishableKey', {})).status, 200);
+      assert.equal((await call('setStripeKey', { stripe_secret_key: 'sk_test_abc' })).status, 200);
+      await pool.query("UPDATE property SET stripe_secret_key = 'sk_test_check', stripe_publishable_key = 'pk_test_check' WHERE id = $1", [P]);
+    });
+
     // (later tasks append here)
   } finally {
     server.close();

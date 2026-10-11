@@ -111,6 +111,9 @@ async function updateBooking(req, res, next) {
       r = await life.withLockedBooking(b.id, async (client) => ({ ok: true, booking: await life.setRow(client, b.id, fields) }));
     } else return res.status(400).json({ error: 'action must be confirm, decline, cancel or end' });
     if (!r.ok) return res.status(r.status).json({ error: r.error, ...(r.booking ? { booking: r.booking } : {}) });
+    // Stripe refused (capture/refund): the booking is unchanged apart from
+    // payment_error, which staff see on the row.
+    if (r.paymentFailed) return res.status(502).json({ error: r.paymentFailed, booking: r.booking });
     if (r.expired) return res.status(409).json({ error: 'This request expired before it was confirmed', booking: r.booking });
     res.json(r.booking);
   } catch (err) {

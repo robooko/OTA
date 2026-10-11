@@ -1,6 +1,7 @@
 const pool = require('../db');
 const marinaStripe = require('./marinaStripe');
 const q = require('./marinaQueries');
+const { toCents } = require('./folio');
 const { publishMarinaBooking, publishMarinaGuestUpdate } = require('./ably');
 const { sendGuestEmail } = require('./marinaEmails');
 
@@ -63,32 +64,101 @@ async function toPending(client, row, extra = {}) {
   return r;
 }
 
+const stripeOf = (row) => marinaStripe.stripeFor(row.stripe_secret_key);
+
+// The PI must be this booking's, for its exact amount and currency, and
+// authorised but not captured. Stripe reports currency in lower case.
+function piMatches(pi, row) {
+  return pi.id === row.stripe_payment_intent_id
+    && pi.metadata?.marina_booking_id === row.id
+    && pi.amount === toCents(row.total_price)
+    && String(pi.currency).toLowerCase() === String(row.currency).toLowerCase()
+    && pi.status === 'requires_capture';
+}
+
+// One rule for confirm-payment and the sweep: a hold whose card is
+// authorised becomes pending, even if the 30 minutes just ran out (the
+// guest did everything right; cancelling would strand the authorisation).
+// Returns the updated row, or null when the card isn't (validly) held.
+async function promoteHeldBooking(client, row) {
+  if (row.status !== 'hold' || !row.stripe_payment_intent_id || !row.stripe_secret_key) return null;
+  const pi = await stripeOf(row).paymentIntents.retrieve(row.stripe_payment_intent_id);
+  if (!piMatches(pi, row)) return null;
+  return toPending(client, row, { payment_status: 'held', payment_error: null });
+}
+
+// Cancels an uncaptured PI. true = released (or nothing to release). On
+// failure the error is kept on the row for staff and the sweep's retry.
+async function releasePi(client, row) {
+  if (!row.stripe_payment_intent_id || !['none', 'held'].includes(row.payment_status)) return true;
+  const stripe = stripeOf(row);
+  try {
+    await stripe.paymentIntents.cancel(row.stripe_payment_intent_id, {}, { idempotencyKey: `marina-cancel-${row.id}` });
+    return true;
+  } catch (err) {
+    const pi = await stripe.paymentIntents.retrieve(row.stripe_payment_intent_id).catch(() => null);
+    if (pi?.status === 'canceled') return true;
+    await setRow(client, row.id, { payment_error: err.message });
+    return false;
+  }
+}
+
 async function confirmBooking(id) {
   return withLockedBooking(id, async (client, row) => {
     if (row.status !== 'pending') return fail(409, `Booking is ${row.status}`);
-    if (row.lapsed) { await setRow(client, id, { status: 'cancelled', cancel_reason: 'expired', hold_expires_at: null }); return { ok: true, booking: true, expired: true }; }
-    // (Task 9: capture the PaymentIntent here when stripe_payment_intent_id is set.)
-    return { ok: true, booking: await setRow(client, id, { status: 'confirmed', hold_expires_at: null }) };
+    if (row.lapsed) {
+      const released = await releasePi(client, row);
+      await setRow(client, id, { status: 'cancelled', cancel_reason: 'expired', hold_expires_at: null,
+        ...(row.stripe_payment_intent_id && released ? { payment_status: 'released', payment_error: null } : {}) });
+      return { ok: true, booking: true, expired: true };
+    }
+    let payment = {};
+    if (row.stripe_payment_intent_id) {
+      if (row.payment_status !== 'held') return fail(409, 'The card hold is not in place');
+      try {
+        await stripeOf(row).paymentIntents.capture(row.stripe_payment_intent_id, {}, { idempotencyKey: `marina-capture-${row.id}` });
+      } catch (err) {
+        // Stays pending with the reason recorded -- committed, not rolled
+        // back, so staff see it.
+        await setRow(client, id, { payment_error: err.message });
+        return { ok: true, booking: true, paymentFailed: err.message };
+      }
+      payment = { payment_status: 'captured', payment_error: null };
+    }
+    return { ok: true, booking: await setRow(client, id, { status: 'confirmed', hold_expires_at: null, ...payment }) };
   });
 }
 
 async function declineBooking(id, { reason } = {}) {
   return withLockedBooking(id, async (client, row) => {
     if (row.status !== 'pending') return fail(409, `Booking is ${row.status}`);
-    // (Task 9: release the PaymentIntent.)
-    return { ok: true, booking: await setRow(client, id, { status: 'declined', cancel_reason: reason ?? null, hold_expires_at: null }) };
+    const released = await releasePi(client, row);
+    return { ok: true, booking: await setRow(client, id, { status: 'declined', cancel_reason: reason ?? null, hold_expires_at: null,
+      ...(row.stripe_payment_intent_id && released ? { payment_status: 'released', payment_error: null } : {}) }) };
   });
 }
 
-// by: 'guest' (hold/pending only), 'staff' (any live status), 'sweep'
-// (expired guest hold/pending; the caller has already decided).
+// by: 'guest' (hold/pending only), 'staff' (any live status). A captured
+// payment is refunded only when staff ask (refund: true), else kept.
 async function cancelBooking(id, { by, refund = false, reason = null } = {}) {
   return withLockedBooking(id, async (client, row) => {
     const allowed = by === 'staff' ? LIVE : ['hold', 'pending'];
     if (!allowed.includes(row.status)) return fail(409, `Booking is ${row.status}`);
-    if (by === 'sweep' && !(row.source === 'guest' && row.lapsed)) return fail(409, 'Not expired');
-    // (Task 9: release a held PI, or refund a captured one when refund=true.)
-    return { ok: true, booking: await setRow(client, id, { status: 'cancelled', cancel_reason: reason, hold_expires_at: null }) };
+    let payment = {};
+    if (row.payment_status === 'captured') {
+      if (refund) {
+        try {
+          await stripeOf(row).refunds.create({ payment_intent: row.stripe_payment_intent_id }, { idempotencyKey: `marina-refund-${row.id}` });
+          payment = { payment_status: 'refunded', payment_error: null };
+        } catch (err) {
+          await setRow(client, id, { payment_error: err.message });
+          return { ok: true, booking: true, paymentFailed: err.message };
+        }
+      }
+    } else if (row.stripe_payment_intent_id && await releasePi(client, row)) {
+      payment = { payment_status: 'released', payment_error: null };
+    }
+    return { ok: true, booking: await setRow(client, id, { status: 'cancelled', cancel_reason: reason, hold_expires_at: null, ...payment }) };
   });
 }
 
@@ -154,11 +224,15 @@ async function sweepOnce() {
     try {
       const r = await sweepRow(id);
       if (r === 'cancelled') cancelled++;
-      if (r === 'promoted') promoted++;
+      if (r === 'promoted') {
+        promoted++;
+        module.exports.maybeAutoConfirm(id).catch((err) => console.error('Marina auto-confirm failed:', err.message));
+      }
     } catch (err) {
       console.error(`Marina sweep failed for ${id}:`, err.message);
     }
   }
+  await retryReleases();
   return { cancelled, promoted };
 }
 
@@ -166,13 +240,39 @@ async function sweepRow(id) {
   let outcome = null;
   await withLockedBooking(id, async (client, row) => {
     if (!(row.source === 'guest' && ['hold', 'pending'].includes(row.status) && row.lapsed)) return fail(409, 'changed');
-    // (Task 9: a hold whose PI is requires_capture is promoted instead.)
-    await setRow(client, id, { status: 'cancelled', cancel_reason: 'expired', hold_expires_at: null });
+    // No webhook: a guest who authorised the card and closed the tab is
+    // caught here instead.
+    if (row.status === 'hold') {
+      const promotedRow = await promoteHeldBooking(client, row);
+      if (promotedRow) { outcome = 'promoted'; return { ok: true, booking: promotedRow }; }
+    }
+    const released = await releasePi(client, row);
+    await setRow(client, id, { status: 'cancelled', cancel_reason: 'expired', hold_expires_at: null,
+      ...(row.stripe_payment_intent_id && released ? { payment_status: 'released', payment_error: null } : {}) });
     outcome = 'cancelled';
     return { ok: true, booking: true };
   });
   return outcome;
 }
+
+// Bookings that ended but whose card release failed (payment_error kept):
+// try again each pass until Stripe accepts it.
+async function retryReleases() {
+  const { rows } = await pool.query(
+    `SELECT id FROM marina_booking
+     WHERE status IN ('cancelled', 'declined') AND stripe_payment_intent_id IS NOT NULL
+       AND payment_status IN ('none', 'held') AND payment_error IS NOT NULL
+     LIMIT 50`);
+  for (const { id } of rows) {
+    await withLockedBooking(id, async (client, row) => {
+      if (!(await releasePi(client, row))) return { ok: true, booking: true };
+      return { ok: true, booking: await setRow(client, id, { payment_status: 'released', payment_error: null }) };
+    }).catch((err) => console.error(`Marina release retry failed for ${id}:`, err.message));
+  }
+}
+
+// Filled in by the contracts/auto-confirm step.
+async function maybeAutoConfirm() { return null; }
 
 function startMarinaHoldExpiryJob() {
   const run = () => sweepOnce()
@@ -183,4 +283,4 @@ function startMarinaHoldExpiryJob() {
 }
 
 module.exports = {
-  sweepOnce, startMarinaHoldExpiryJob, withLockedBooking, setRow, toPending, confirmBooking, declineBooking, cancelBooking, endBooking, afterChange, LIVE, fail };
+  promoteHeldBooking, piMatches, maybeAutoConfirm, sweepOnce, startMarinaHoldExpiryJob, withLockedBooking, setRow, toPending, confirmBooking, declineBooking, cancelBooking, endBooking, afterChange, LIVE, fail };

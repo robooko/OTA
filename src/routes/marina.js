@@ -47,5 +47,6 @@ router.post(`${G}/bookings`, authenticateOrApiKey, bookingLimiter, guest.resolve
 router.get(`${G}/bookings/:id`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.getGuestBooking);
 router.post(`${G}/bookings/:id/cancel`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.cancelGuestBooking);
 router.get(`${G}/bookings/:id/ably-token`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.ablyToken);
+router.post(`${G}/bookings/:id/confirm-payment`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.confirmPayment);
 
 module.exports = router;

@@ -7,6 +7,8 @@ const guard = require('../lib/marinaGuard');
 const { berthFitError } = guard;
 const life = require('../lib/marinaLifecycle');
 const { bookingToken, bookingTokenMatches } = require('../lib/marinaToken');
+const marinaStripe = require('../lib/marinaStripe');
+const { toCents } = require('../lib/folio');
 const { createSubscribeTokenRequest } = require('../lib/ably');
 
 // Guest routes: /api/marina/guest/:marina/... -- the only prefix a site's
@@ -164,9 +166,24 @@ async function createGuestBooking(req, res, next) {
     committed = row.id;
 
     let payment = null;
-    // (Task 9: when cardPath, create the PaymentIntent here; on failure cancel the hold and 502.)
+    if (cardPath) {
+      try {
+        const stripe = marinaStripe.stripeFor(prop.stripe_secret_key);
+        const pi = await stripe.paymentIntents.create({
+          amount: toCents(price.total_price), currency: prop.currency.toLowerCase(), capture_method: 'manual',
+          payment_method_types: ['card'], metadata: { property_id: req.property_id, marina_booking_id: row.id },
+        }, { idempotencyKey: `marina-booking-${row.id}` });
+        await pool.query('UPDATE marina_booking SET stripe_payment_intent_id = $1 WHERE id = $2', [pi.id, row.id]);
+        payment = { client_secret: pi.client_secret, publishable_key: prop.stripe_publishable_key };
+      } catch (err) {
+        await pool.query("UPDATE marina_booking SET status = 'cancelled', cancel_reason = 'payment setup failed', hold_expires_at = NULL WHERE id = $1", [row.id]);
+        return res.status(502).json({ error: 'Card payment could not be set up; please try again', details: err.message });
+      }
+    }
     const booking = await q.joinedBooking(pool, row.id);
-    if (!cardPath) life.afterChange(null, { ...booking, _confirmToken: confirmToken }); // Task 8 emails the confirm link
+    // Card bookings are announced when the card is held (confirm-payment);
+    // email-confirm bookings get the confirm link now.
+    if (!cardPath) life.afterChange(null, { ...booking, _confirmToken: confirmToken });
     res.status(201).json({ booking: guestView(booking), booking_token: bookingToken(row.id), payment });
   } catch (err) {
     if (!committed) await client.query('ROLLBACK').catch(() => {});
@@ -177,8 +194,17 @@ async function createGuestBooking(req, res, next) {
 
 async function getGuestBooking(req, res, next) {
   try {
-    const payment = null; // (Task 9: client_secret while hold with a PI)
-    res.json({ booking: guestView(req.booking), payment });
+    // A reloaded booking page resumes the card step while the hold lasts.
+    let payment = null;
+    const b = req.booking;
+    if (b.status === 'hold' && b.stripe_payment_intent_id) {
+      const { rows: [p] } = await pool.query('SELECT stripe_secret_key, stripe_publishable_key FROM property WHERE id = $1', [b.property_id]);
+      if (p.stripe_secret_key) {
+        const pi = await marinaStripe.stripeFor(p.stripe_secret_key).paymentIntents.retrieve(b.stripe_payment_intent_id);
+        payment = { client_secret: pi.client_secret, publishable_key: p.stripe_publishable_key };
+      }
+    }
+    res.json({ booking: guestView(b), payment });
   } catch (err) { next(err); }
 }
 
@@ -208,6 +234,7 @@ async function confirmBookingLink(req, res, next) {
     });
     if (!r.ok && r.status === 404) return res.status(404).send(page('Link not valid', 'That link is no longer valid.'));
     const b = r.ok ? r.booking : await q.joinedBooking(pool, id);
+    if (r.ok && b.status === 'pending') life.maybeAutoConfirm(b.id).catch((err) => console.error('Marina auto-confirm failed:', err.message));
     if (b.status === 'cancelled') return res.status(410).send(page('Booking released', "This booking wasn't confirmed in time, so the berth was released. Please book again."));
     if (b.booking_url) return res.redirect(303, b.booking_url.replace('{id}', b.id).replace('{token}', bookingToken(b.id)));
     res.send(page('Request received', `Thanks — ${b.marina_name} has your request for berth ${b.berth_label} and will reply soon.`));
@@ -222,7 +249,22 @@ async function ablyToken(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function confirmPayment(req, res, next) {
+  try {
+    const r = await life.withLockedBooking(req.booking.id, async (client, row) => {
+      if (row.status !== 'hold') return row.status === 'pending' ? { ok: true, booking: true } : life.fail(409, `Booking is ${row.status}`);
+      const promoted = await life.promoteHeldBooking(client, row);
+      if (promoted) return { ok: true, booking: promoted };
+      if (row.lapsed) return life.fail(410, 'The hold expired before the card was authorised'); // the sweep releases it
+      return life.fail(409, 'The card has not been authorised yet');
+    });
+    if (!r.ok) return res.status(r.status).json({ error: r.error });
+    life.maybeAutoConfirm(r.booking.id).catch((err) => console.error('Marina auto-confirm failed:', err.message));
+    res.json({ booking: guestView(r.booking) });
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   resolveMarina, getMarinaMap, getAvailability, getDocRequirements, quote,
-  requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink, ablyToken,
+  requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink, ablyToken, confirmPayment,
 };
