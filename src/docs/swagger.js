@@ -13,6 +13,7 @@ const swaggerSpec = {
   tags: [
     { name: 'Auth' },
     { name: 'Property' },
+    { name: 'Organization' },
     { name: 'Guests' },
     { name: 'Room Types' },
     { name: 'Rooms' },
@@ -40,12 +41,13 @@ const swaggerSpec = {
         type: 'http',
         scheme: 'bearer',
         bearerFormat: 'JWT',
-        description: 'A Clerk session token for a user with an active Organization (maps to a property). Not this API\'s own token — Clerk issues and verifies it.',
+        description: 'A Clerk session token for a user with an active Organization (maps to a property). Not this API\'s own token — Clerk issues and verifies it. If the organization has several properties, send X-Property-Id to pick one (required then; optional with a single property).',
       },
       apiKeyAuth: {
         type: 'apiKey',
         in: 'header',
         name: 'X-Api-Key',
+        description: 'A per-property key (prop_...) selects its own property. An organization key (org_...) selects among the org\'s properties with X-Property-Id, X-Property-Slug or X-Site-Host (that precedence); optional when the org has one property.',
       },
     },
     schemas: {
@@ -176,8 +178,8 @@ const swaggerSpec = {
 
     // ── Property ────────────────────────────────────────────────────────────
     '/api/property/me': {
-      get: { tags: ['Property'], summary: 'Get the current property (id, name, currency, timezone, tax settings)', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], responses: { 200: { description: 'Property identity', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, clerk_org_id: { type: 'string', nullable: true, description: 'Clerk organization this property belongs to' }, name: { type: 'string' }, currency: { type: 'string' }, timezone: { type: 'string' }, tax_enabled: { type: 'boolean' }, tax_rate: { type: 'string', description: 'Percentage, e.g. "20.00"' }, tax_inclusive: { type: 'boolean' }, tax_id: { type: 'string', nullable: true }, return_instructions: { type: 'string', nullable: true, description: 'Sent to guests requesting a shop return; also fed to AI replies' }, sidon_marina_id: { type: 'string', nullable: true, description: 'Linked Sidon marina owner id (org_...)' }, sidon_marina_key_set: { type: 'boolean', description: 'Whether the marina API key is stored (the key itself is never returned)' } } } } } } } },
-      put: { tags: ['Property'], summary: 'Update the current property', description: 'tax_* fields are optional and off by default -- only proshop_order and a pickup restaurant_order (website checkout) apply them today.', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { currency: { type: 'string', description: '3-letter ISO 4217 code, e.g. GBP' }, timezone: { type: 'string', description: 'IANA timezone name, e.g. Europe/London' }, tax_enabled: { type: 'boolean' }, tax_rate: { type: 'number', minimum: 0, maximum: 100, description: 'Percentage, e.g. 20 for 20%' }, tax_inclusive: { type: 'boolean', description: 'true = prices already include tax; false = tax is added at checkout' }, tax_id: { type: 'string', nullable: true, description: 'VAT/tax registration number printed on invoices' }, return_instructions: { type: 'string', nullable: true, description: 'null clears it; omit to leave unchanged' }, sidon_marina_id: { type: 'string', nullable: true, description: 'Sidon marina owner id (org_...); null clears it. Changing or clearing it also drops the stored marina API key' } } } } } }, responses: { 200: { description: 'Updated' }, 400: { description: 'Invalid currency, timezone, or tax_rate' } } },
+      get: { tags: ['Property'], summary: 'Get the current property (id, name, currency, timezone, tax settings)', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], responses: { 200: { description: 'Property identity', content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string', format: 'uuid' }, clerk_org_id: { type: 'string', nullable: true, description: 'Clerk organization this property belongs to' }, name: { type: 'string' }, slug: { type: 'string', nullable: true, description: 'Path segment a group website routes on (X-Property-Slug)' }, currency: { type: 'string' }, timezone: { type: 'string' }, tax_enabled: { type: 'boolean' }, tax_rate: { type: 'string', description: 'Percentage, e.g. "20.00"' }, tax_inclusive: { type: 'boolean' }, tax_id: { type: 'string', nullable: true }, return_instructions: { type: 'string', nullable: true, description: 'Sent to guests requesting a shop return; also fed to AI replies' }, sidon_marina_id: { type: 'string', nullable: true, description: 'Linked Sidon marina owner id (org_...)' }, sidon_marina_key_set: { type: 'boolean', description: 'Whether the marina API key is stored (the key itself is never returned)' } } } } } } } },
+      put: { tags: ['Property'], summary: 'Update the current property', description: 'tax_* fields are optional and off by default -- only proshop_order and a pickup restaurant_order (website checkout) apply them today.', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { currency: { type: 'string', description: '3-letter ISO 4217 code, e.g. GBP' }, timezone: { type: 'string', description: 'IANA timezone name, e.g. Europe/London' }, tax_enabled: { type: 'boolean' }, tax_rate: { type: 'number', minimum: 0, maximum: 100, description: 'Percentage, e.g. 20 for 20%' }, tax_inclusive: { type: 'boolean', description: 'true = prices already include tax; false = tax is added at checkout' }, tax_id: { type: 'string', nullable: true, description: 'VAT/tax registration number printed on invoices' }, return_instructions: { type: 'string', nullable: true, description: 'null clears it; omit to leave unchanged' }, sidon_marina_id: { type: 'string', nullable: true, description: 'Sidon marina owner id (org_...); null clears it. Changing or clearing it also drops the stored marina API key' }, slug: { type: 'string', nullable: true, pattern: '^[a-z0-9-]{1,60}$', description: 'Unique within the organization; null clears it' } } } } } }, responses: { 200: { description: 'Updated' }, 400: { description: 'Invalid currency, timezone, or tax_rate' }, 409: { description: 'slug already used by another property in this organization' } } },
     },
     '/api/property/api-key': {
       get: { tags: ['Property'], summary: "Get the current property's API key (admin only)", responses: { 200: { description: 'API key and enabled state', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' }, api_key_enabled: { type: 'boolean' } } } } } }, 403: { description: 'Insufficient permissions' } } },
@@ -190,6 +192,26 @@ const swaggerSpec = {
     },
     '/api/property/api-key/enable': {
       post: { tags: ['Property'], summary: "Re-enable the current property's API key (admin only) — restores access using the same key value", responses: { 200: { description: 'Current key and enabled state (true)', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' }, api_key_enabled: { type: 'boolean' } } } } } }, 403: { description: 'Insufficient permissions' } } },
+    },
+    // ── Organization (several properties per Clerk org) ─────────────────────
+    '/api/organization/properties': {
+      get: { tags: ['Organization'], summary: "List the organization's properties (no X-Property-Id needed)", security: [{ bearerAuth: [] }], responses: { 200: { description: 'Array of { id, name, slug, status }' } } },
+      post: { tags: ['Organization'], summary: 'Create another property in the organization (admin only); grants starter tokens', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string', maxLength: 100 }, slug: { type: 'string', nullable: true, pattern: '^[a-z0-9-]{1,60}$' } } } } } }, responses: { 201: { description: '{ id, name, slug, status, currency, timezone }' }, 400: { description: 'Invalid name or slug' }, 403: { description: 'Insufficient permissions' }, 409: { description: 'slug already used in this organization' } } },
+    },
+    '/api/organization/api-key': {
+      get: { tags: ['Organization'], summary: "Get the organization's website API key (admin only) -- created on first call", security: [{ bearerAuth: [] }], responses: { 200: { description: '{ api_key, api_key_enabled }' }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/organization/api-key/rotate': {
+      post: { tags: ['Organization'], summary: "Rotate the organization's API key (admin only) -- the old key stops working immediately", security: [{ bearerAuth: [] }], responses: { 200: { description: '{ api_key }' }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/organization/api-key/disable': {
+      post: { tags: ['Organization'], summary: "Disable the organization's API key without rotating it (admin only)", security: [{ bearerAuth: [] }], responses: { 200: { description: '{ api_key, api_key_enabled: false }' }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/organization/api-key/enable': {
+      post: { tags: ['Organization'], summary: "Re-enable the organization's API key (admin only)", security: [{ bearerAuth: [] }], responses: { 200: { description: '{ api_key, api_key_enabled: true }' }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/site/properties': {
+      get: { tags: ['Organization'], summary: "The organization's active properties for a group website (organization API key only)", security: [{ apiKeyAuth: [] }], responses: { 200: { description: 'Array of { id, name, slug, currency, timezone, websites: [url] }' }, 401: { description: 'Missing or invalid key' }, 403: { description: 'A per-property key was used' } } },
     },
     '/api/property/vercel/projects': {
       get: { tags: ['Property'], summary: "List the connected Vercel account's projects (id, name) for the website-mapping picker", responses: { 200: { description: 'Array of { id, name }' }, 503: { description: 'Server not configured with VERCEL_TOKEN' } } },
