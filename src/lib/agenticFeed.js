@@ -4,6 +4,8 @@
 // public Sanity `product` docs (copy, image, page). OTA stores none of that
 // content; the site doesn't change.
 
+const pool = require('../db');
+
 const PRODUCT_COLUMNS = [
   'id', 'title', 'description', 'link', 'image_link', 'brand', 'mpn', 'product_category',
   'item_group_id', 'item_group_title', 'custom_variant_option_name_1', 'custom_variant_option_value_1',
@@ -107,7 +109,94 @@ function toCsv(rows, columns) {
   return [columns.join(','), ...rows.map((r) => columns.map((c) => cell(r[c])).join(','))].join('\r\n') + '\r\n';
 }
 
+const SANITY_API_VERSION = '2024-01-01';
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Public dataset, no token: the same published content the site renders.
+async function fetchSanity(config) {
+  const query = `{"docs": *[_type=="product"]{name, "slug": slug.current, description, features, image},
+    "settings": *[_type=="siteSettings"][0]{shopShippingCost, shopShippingCostByState}}`;
+  const url = `https://${config.sanity_project_id}.api.sanity.io/v${SANITY_API_VERSION}/data/query/${config.sanity_dataset}?query=${encodeURIComponent(query)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Sanity query failed: ${res.status}`);
+  const { result } = await res.json();
+  return { docs: result?.docs ?? [], settings: result?.settings ?? null };
+}
+
+async function loadItems(db, propertyId) {
+  const { rows } = await db.query(
+    `SELECT id, name, price, category, product_group, variant_label, stock_quantity
+     FROM proshop_item WHERE property_id = $1 AND status = 'active' ORDER BY name`,
+    [propertyId]
+  );
+  return rows;
+}
+
+async function enabledProperties(db = pool) {
+  const { rows } = await db.query(
+    `SELECT id, name, currency, stripe_secret_key, agentic_commerce FROM property
+     WHERE (agentic_commerce->>'enabled')::boolean IS TRUE AND stripe_secret_key IS NOT NULL`
+  );
+  return rows;
+}
+
+// Create the import, then PUT the CSV to its presigned URL (valid 5 min).
+// Processing is async on Stripe's side; terminal status is in the
+// dashboard's Feed history.
+async function uploadFeed(stripe, feedType, mode, csv) {
+  const imp = await stripe.v2.commerce.productCatalog.imports.create({
+    feed_type: feedType, mode, metadata: { file_name: `ota-${feedType}-${new Date().toISOString()}.csv` },
+  });
+  const url = imp.status_details?.awaiting_upload?.upload_url?.url;
+  if (!url) throw new Error(`Import ${imp.id} has no upload URL (status ${imp.status})`);
+  const res = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'text/csv' }, body: csv });
+  if (!res.ok) throw new Error(`Upload for import ${imp.id} failed: ${res.status}`);
+  return imp.id;
+}
+
+// In memory: a restart just re-uploads the product feed, which is harmless.
+const lastProductUpload = new Map();
+
+async function syncProperty(property, { db = pool, stripe = require('stripe')(property.stripe_secret_key), fetchSanity: fetchContent = fetchSanity, now = Date.now() } = {}) {
+  const config = property.agentic_commerce;
+  const [{ docs, settings }, items] = await Promise.all([fetchContent(config), loadItems(db, property.id)]);
+  const feeds = buildFeeds({ items, docs, settings, config, currency: property.currency });
+  // Replace mode deletes whatever the file leaves out -- an empty file (Sanity
+  // down, every name renamed) would wipe the catalog. Upload nothing instead.
+  if (!feeds.product.length) throw new Error('no products matched Sanity docs; nothing uploaded');
+  if (feeds.skipped.length) console.warn(`Agentic feed ${property.name}: no Sanity doc for ${feeds.skipped.join(', ')}`);
+
+  const uploaded = [];
+  const last = lastProductUpload.get(property.id);
+  if (last == null || now - last >= DAY_MS) {
+    uploaded.push(['product', await uploadFeed(stripe, 'product', 'replace', toCsv(feeds.product, PRODUCT_COLUMNS))]);
+    lastProductUpload.set(property.id, now);
+  }
+  uploaded.push(['pricing', await uploadFeed(stripe, 'pricing', 'upsert', toCsv(feeds.pricing, PRICING_COLUMNS))]);
+  if (feeds.inventory.length) uploaded.push(['inventory', await uploadFeed(stripe, 'inventory', 'upsert', toCsv(feeds.inventory, INVENTORY_COLUMNS))]);
+  return uploaded;
+}
+
+async function sweepFeeds() {
+  for (const p of await enabledProperties()) {
+    try {
+      const uploaded = await syncProperty(p);
+      console.log(`Agentic feed ${p.name}: ${uploaded.map(([t, id]) => `${t} ${id}`).join(', ')}`);
+    } catch (err) {
+      console.error(`Agentic feed ${p.name} failed:`, err.message);
+    }
+  }
+}
+
+function startAgenticFeedJob() {
+  const run = () => sweepFeeds().catch((err) => console.error('Agentic feed sweep failed:', err.message));
+  run();
+  const timer = setInterval(run, 15 * 60 * 1000);
+  timer.unref();
+}
+
 module.exports = {
   PRODUCT_COLUMNS, INVENTORY_COLUMNS, PRICING_COLUMNS,
   feedId, matchDocs, shippingEntries, buildFeeds, toCsv,
+  enabledProperties, uploadFeed, syncProperty, startAgenticFeedJob,
 };

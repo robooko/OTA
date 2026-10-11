@@ -120,6 +120,33 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal(csv, 'id,title,description\r\nx,"Soft ""vintage"" fit, UPF 50+","line1\nline2"\r\n');
     });
 
+    await check('sync: first run uploads product (replace) then pricing + inventory (upsert)', async () => {
+      const prop = await one(`INSERT INTO property (name, currency, timezone, stripe_secret_key, agentic_commerce)
+        VALUES ('Feed Check', 'USD', 'America/Tortola', 'sk_test_fake', $1) RETURNING *`, [{ ...CFG, enabled: true }]);
+      await db.query(`INSERT INTO proshop_item (property_id, name, price, stock_quantity) VALUES ($1, 'Burgee', 20, 3), ($1, 'Unknown', 9, NULL)`, [prop.id]);
+      const calls = [];
+      const stripe = { v2: { commerce: { productCatalog: { imports: { create: async (p) => { calls.push(p); return { id: `imp_${calls.length}`, status: 'awaiting_upload', status_details: { awaiting_upload: { upload_url: { url: 'https://upload.test/x' } } } }; } } } } } };
+      const puts = [];
+      const realFetch = global.fetch;
+      global.fetch = async (url, opts) => { puts.push(opts.body); return { ok: true, status: 200 }; };
+      try {
+        const out = await feed.syncProperty(prop, { db, stripe, fetchSanity: async () => ({ docs: [doc()], settings: { shopShippingCost: 20 } }), now: 1_000 });
+        assert.deepEqual(out.map(([t]) => t), ['product', 'pricing', 'inventory']);
+        assert.deepEqual(calls.map((c) => [c.feed_type, c.mode]), [['product', 'replace'], ['pricing', 'upsert'], ['inventory', 'upsert']]);
+        assert.match(puts[0], /^id,title,/);
+        assert.equal(puts[0].trim().split('\r\n').length, 2); // header + Burgee; 'Unknown' has no doc
+        const again = await feed.syncProperty(prop, { db, stripe, fetchSanity: async () => ({ docs: [doc()], settings: { shopShippingCost: 20 } }), now: 2_000 });
+        assert.deepEqual(again.map(([t]) => t), ['pricing', 'inventory']); // product only every 24 h
+      } finally { global.fetch = realFetch; }
+    });
+    await check('sync: no Sanity docs = refuse (a replace upload would empty the catalog)', async () => {
+      const prop = await one(`INSERT INTO property (name, currency, timezone, stripe_secret_key, agentic_commerce)
+        VALUES ('Feed Check 2', 'USD', 'America/Tortola', 'sk_test_fake', $1) RETURNING *`, [{ ...CFG, enabled: true }]);
+      await db.query(`INSERT INTO proshop_item (property_id, name, price) VALUES ($1, 'Burgee', 20)`, [prop.id]);
+      const stripe = { v2: { commerce: { productCatalog: { imports: { create: async () => { throw new Error('must not upload'); } } } } } };
+      await assert.rejects(feed.syncProperty(prop, { db, stripe, fetchSanity: async () => ({ docs: [], settings: null }), now: 1_000 }), /no products/);
+    });
+
     // ── later tasks append checks above this line ──
   } finally {
     await db.query('ROLLBACK');
