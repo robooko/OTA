@@ -1,5 +1,6 @@
 const pool = require('../db');
 const { isValidUuid, isValidUrl } = require('../middleware/validate');
+const { sniffType, putPublic } = require('../lib/marinaDocuments');
 
 // Staff CRUD for marinas and their catalogue tables. Every child table is
 // property-scoped and soft-deletes through status, so one table-driven
@@ -234,4 +235,18 @@ async function bulkBerths(req, res, next) {
   } finally { client.release(); }
 }
 
-module.exports = { listMarinas, getMarina, createMarina, updateMarina, childHandlers, bulkBerths, renameBerthInSvg, TABLES };
+// Staff image upload into OTA's PUBLIC blob store (not the documents store).
+async function uploadImage(req, res, next) {
+  try {
+    const m = await marinaOr404(req, res);
+    if (!m) return;
+    const type = sniffType(req.body);
+    if (!['image/jpeg', 'image/png'].includes(type)) return res.status(400).json({ error: 'Only JPEG or PNG images' });
+    const url = await putPublic(`marina-images/${req.property_id}/${m.id}.${type === 'image/png' ? 'png' : 'jpg'}`, req.body, type);
+    const { rows: [img] } = await pool.query('INSERT INTO marina_image (property_id, marina_id, url, description) VALUES ($1, $2, $3, $4) RETURNING *', [req.property_id, m.id, url, req.get('X-Description')?.slice(0, 500) ?? null]);
+    res.status(201).json(img);
+  } catch (err) { next(err); }
+}
+
+module.exports = {
+  uploadImage, listMarinas, getMarina, createMarina, updateMarina, childHandlers, bulkBerths, renameBerthInSvg, TABLES };

@@ -193,6 +193,16 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.match(await q.propertyToday(db, P), /^\d{4}-\d{2}-\d{2}$/);
     });
 
+    // ---- Task 10: sniff ----
+    const { sniffType } = require('../src/lib/marinaDocuments');
+    await check('magic bytes, not declared type', async () => {
+      assert.equal(sniffType(Buffer.from('%PDF-1.7\n')), 'application/pdf');
+      assert.equal(sniffType(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0])), 'image/jpeg');
+      assert.equal(sniffType(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), 'image/png');
+      assert.equal(sniffType(Buffer.from('<svg/>')), null);
+      assert.equal(sniffType(Buffer.alloc(0)), null);
+    });
+
     // (later tasks append their checks here)
   } finally {
     await db.query('ROLLBACK');

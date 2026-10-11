@@ -12,6 +12,14 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
 const marinaStripe = require('../src/lib/marinaStripe');
 const fakeStripe = require('./fake-stripe'); // Task 9
 marinaStripe.stripeFor = () => fakeStripe;
+const docs = require('../src/lib/marinaDocuments');
+const blobs = new Map();
+docs.store = {
+  put: async (p, buf) => { blobs.set(p, buf); },
+  get: async (p) => (blobs.has(p) ? { stream: require('stream').Readable.toWeb(require('stream').Readable.from(blobs.get(p))), contentType: 'application/pdf' } : null),
+  del: async (ps) => ps.forEach((p) => blobs.delete(p)),
+};
+docs.extractDocument = async () => {}; // no model calls in checks
 
 const pool = require('../src/db');
 const app = require('../src/app');
@@ -224,6 +232,46 @@ const { bookingToken } = require('../src/lib/marinaToken');
       assert.equal((await call('clearStripePublishableKey', {})).status, 200);
       assert.equal((await call('setStripeKey', { stripe_secret_key: 'sk_test_abc' })).status, 200);
       await pool.query("UPDATE property SET stripe_secret_key = 'sk_test_check', stripe_publishable_key = 'pk_test_check' WHERE id = $1", [P]);
+    });
+
+    // ---- Task 10 ----
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(1000)]);
+    const upload = (b, buf, type = 'application/pdf', t = b.booking_token) => api('POST', `${G}/bookings/${b.booking.id}/documents`, { raw: buf, headers: { 'Content-Type': type, 'X-File-Name': 'passport.pdf', 'X-Booking-Token': t, 'X-Client-Ip': '192.0.2.120' } });
+    const pendingBooking = async () => {
+      await pool.query('UPDATE property SET stripe_publishable_key = NULL WHERE id = $1', [P]); // email-confirm path
+      const b = (await api('POST', `${G}/bookings`, { body: guestBody(), headers: { 'X-Client-Ip': '192.0.2.121' } })).body;
+      await pool.query("UPDATE marina_booking SET status = 'pending' WHERE id = $1", [b.booking.id]);
+      return b;
+    };
+    await check('upload rejected while hold', async () => {
+      await pool.query('UPDATE property SET stripe_publishable_key = NULL WHERE id = $1', [P]);
+      const b = (await api('POST', `${G}/bookings`, { body: guestBody(), headers: { 'X-Client-Ip': '192.0.2.122' } })).body;
+      assert.equal((await upload(b, pdf)).status, 409);
+    });
+    await check('upload: wrong magic bytes 400, > 4 MB 413, 11th file 409', async () => {
+      const b = await pendingBooking();
+      assert.equal((await upload(b, Buffer.from('not a pdf at all'))).status, 400);
+      assert.equal((await upload(b, Buffer.concat([pdf, Buffer.alloc(4 * 1024 * 1024)]))).status, 413);
+      for (let i = 0; i < 10; i++) assert.equal((await upload(b, pdf)).status, 201);
+      assert.equal((await upload(b, pdf)).status, 409);
+    });
+    await check('document metadata and file routes reject the API key', async () => {
+      const b = await pendingBooking();
+      const d = (await upload(b, pdf)).body;
+      assert.equal((await api('GET', `/api/marina/bookings/${b.booking.id}/documents`)).status, 401);
+      assert.equal((await api('GET', `/api/marina/documents/${d.id}/file`)).status, 401);
+      assert.equal((await api('PUT', `/api/marina/documents/${d.id}`, { body: { status: 'verified' } })).status, 401);
+    });
+
+    await check('retention deletes the file 90 days after cancellation, keeps the row', async () => {
+      const b = await pendingBooking();
+      const fresh = (await upload(b, pdf)).body;
+      await pool.query("UPDATE marina_booking SET status = 'cancelled', updated_at = now() - interval '91 days' WHERE id = $1", [b.booking.id]);
+      const d = await one('SELECT blob_pathname FROM marina_document WHERE id = $1', [fresh.id]);
+      assert.ok(blobs.has(d.blob_pathname));
+      await docs.retentionOnce();
+      const after = await one('SELECT file_deleted_at FROM marina_document WHERE id = $1', [fresh.id]);
+      assert.ok(after.file_deleted_at); assert.ok(!blobs.has(d.blob_pathname));
     });
 
     // (later tasks append here)

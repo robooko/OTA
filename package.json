@@ -15,6 +15,7 @@
     "@clerk/backend": "^3.16.1",
     "@forgebuild/ai-replies": "*",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@vercel/blob": "^2.8.1",
     "ably": "^2.27.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
