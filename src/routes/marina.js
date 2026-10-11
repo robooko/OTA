@@ -2,6 +2,7 @@ const router = require('express').Router();
 const ctrl = require('../controllers/marina');
 const cat = require('../controllers/marinaCatalogue');
 const guest = require('../controllers/marinaGuest');
+const bookings = require('../controllers/marinaBookings');
 const { authenticate, authenticateOrApiKey, requireRole } = require('../middleware/auth');
 
 // Literal segments before '/:id' throughout (see eventInquiries.js).
@@ -30,5 +31,17 @@ router.get(G, authenticateOrApiKey, guest.resolveMarina, guest.getMarinaMap);
 router.get(`${G}/availability`, authenticateOrApiKey, guest.resolveMarina, guest.getAvailability);
 router.get(`${G}/doc-requirements`, authenticateOrApiKey, guest.resolveMarina, guest.getDocRequirements);
 router.post(`${G}/quote`, authenticateOrApiKey, guest.resolveMarina, guest.quote);
+
+// Unauthenticated: the emailed confirm link (spa pattern).
+router.get('/confirm-booking/:id/:confirmToken', guest.confirmBookingLink);
+
+router.get('/bookings', authenticateOrApiKey, bookings.listBookings);
+router.post('/bookings', authenticateOrApiKey, bookings.createBooking);
+router.get('/bookings/:id', authenticateOrApiKey, bookings.getBooking);
+router.put('/bookings/:id', authenticateOrApiKey, bookings.updateBooking);
+
+router.post(`${G}/bookings`, authenticateOrApiKey, guest.resolveMarina, guest.createGuestBooking);
+router.get(`${G}/bookings/:id`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.getGuestBooking);
+router.post(`${G}/bookings/:id/cancel`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.cancelGuestBooking);
 
 module.exports = router;
