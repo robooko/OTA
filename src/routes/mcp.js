@@ -10,6 +10,9 @@ router.post('/', authenticateOrApiKey, async (req, res, next) => {
     const forwardHeaders = {};
     if (req.headers['x-api-key']) forwardHeaders['X-Api-Key'] = req.headers['x-api-key'];
     if (req.headers.authorization) forwardHeaders['Authorization'] = req.headers.authorization;
+    // The hotel the outer request resolved to, so a multi-hotel org's tool
+    // calls land on the same one (a per-property key ignores it).
+    forwardHeaders['X-Property-Id'] = req.property_id;
 
     const baseUrl = `http://localhost:${process.env.PORT || 3000}`;
     const { apiRequest } = createApiClient({ baseUrl, headers: forwardHeaders });

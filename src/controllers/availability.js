@@ -1,5 +1,6 @@
 const pool = require('../db');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
+const { resolveSiteProperty, siteSelectors } = require('../lib/propertyResolver');
 
 async function getRoomAvailability(req, res, next) {
   try {
@@ -65,10 +66,13 @@ async function searchAvailability(req, res, next) {
     const { check_in, check_out, guests } = req.query;
     let { property_id } = req.query;
 
-    const apiKey = req.headers['x-api-key'];
-    if (apiKey) {
-      const { rows } = await pool.query('SELECT id FROM property WHERE api_key = $1 AND api_key_enabled = true', [apiKey]);
-      if (rows.length) property_id = rows[0].id;
+    // A key picks the hotel (a per-property key, or an org key +
+    // X-Property-Id / X-Property-Slug / X-Site-Host); a key that matches
+    // nothing falls back to the public ?property_id= as before.
+    if (req.headers['x-api-key']) {
+      const site = await resolveSiteProperty(pool, siteSelectors(req));
+      if (site?.error) return res.status(site.status).json({ error: site.error });
+      if (site) property_id = site.propertyId;
     }
 
     if (!check_in || !check_out || !guests || !property_id) {
