@@ -1323,7 +1323,7 @@ DO $$ BEGIN
   ALTER TABLE marina_booking ADD CONSTRAINT marina_booking_no_overlap
     EXCLUDE USING gist (berth_id WITH =, daterange(arrival, departure) WITH &&)
     WHERE (status IN ('hold', 'pending', 'confirmed'));
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$; -- the constraint's index shares its name
 
 CREATE TABLE IF NOT EXISTS marina_doc_requirement (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
