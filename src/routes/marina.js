@@ -3,6 +3,9 @@ const ctrl = require('../controllers/marina');
 const cat = require('../controllers/marinaCatalogue');
 const guest = require('../controllers/marinaGuest');
 const bookings = require('../controllers/marinaBookings');
+const { guestLimiter } = require('../lib/marinaGuard');
+
+const bookingLimiter = guestLimiter('marina-booking', 10);
 const { authenticate, authenticateOrApiKey, requireRole } = require('../middleware/auth');
 
 // Literal segments before '/:id' throughout (see eventInquiries.js).
@@ -40,8 +43,9 @@ router.post('/bookings', authenticateOrApiKey, bookings.createBooking);
 router.get('/bookings/:id', authenticateOrApiKey, bookings.getBooking);
 router.put('/bookings/:id', authenticateOrApiKey, bookings.updateBooking);
 
-router.post(`${G}/bookings`, authenticateOrApiKey, guest.resolveMarina, guest.createGuestBooking);
+router.post(`${G}/bookings`, authenticateOrApiKey, bookingLimiter, guest.resolveMarina, guest.createGuestBooking);
 router.get(`${G}/bookings/:id`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.getGuestBooking);
 router.post(`${G}/bookings/:id/cancel`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.cancelGuestBooking);
+router.get(`${G}/bookings/:id/ably-token`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.ablyToken);
 
 module.exports = router;

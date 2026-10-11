@@ -7,6 +7,7 @@ const guard = require('../lib/marinaGuard');
 const { berthFitError } = guard;
 const life = require('../lib/marinaLifecycle');
 const { bookingToken, bookingTokenMatches } = require('../lib/marinaToken');
+const { createSubscribeTokenRequest } = require('../lib/ably');
 
 // Guest routes: /api/marina/guest/:marina/... -- the only prefix a site's
 // forwarder passes through. On the key rail the guest rules apply; a
@@ -213,7 +214,15 @@ async function confirmBookingLink(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function ablyToken(req, res, next) {
+  try {
+    const t = await createSubscribeTokenRequest(`marina-booking:${req.booking.id}`);
+    if (!t) return res.status(503).json({ error: 'Live updates are not configured' });
+    res.json(t);
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   resolveMarina, getMarinaMap, getAvailability, getDocRequirements, quote,
-  requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink,
+  requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink, ablyToken,
 };

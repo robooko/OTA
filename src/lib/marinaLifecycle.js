@@ -1,6 +1,8 @@
 const pool = require('../db');
 const marinaStripe = require('./marinaStripe');
 const q = require('./marinaQueries');
+const { publishMarinaBooking, publishMarinaGuestUpdate } = require('./ably');
+const { sendGuestEmail } = require('./marinaEmails');
 
 // Every marina booking status change goes through here: row lock, re-check
 // the expected status (and, for guest holds, that the hold hasn't lapsed),
@@ -99,8 +101,44 @@ async function endBooking(id, departure) {
   });
 }
 
-// Publish + email after commit. Never throws. Filled in by Task 8.
-function afterChange(before, after) {}
+// Which guest email a transition sends, by source (spec "Emails"):
+// guest rows get every one; staff rows with an email get the outcomes;
+// imports get none.
+function emailKind(before, after) {
+  if (after.source === 'import' || !after.contact_email) return null;
+  const from = before?.status ?? null;
+  const to = after.status;
+  if (from === to) return null;
+  if (to === 'pending' && after.source === 'guest') return 'pending';
+  if (to === 'confirmed') return 'confirmed';
+  if (to === 'declined') return 'declined';
+  if (to === 'cancelled' && from !== 'hold') return after.cancel_reason === 'expired' ? 'expired' : 'cancelled';
+  return null;
+}
+
+// Publish + email after commit. Never throws. `before` is null for a new
+// row. Holds are invisible to staff, so a hold reaching pending is the
+// staff feed's "new-booking".
+function afterChange(before, after) {
+  // Staff never see holds -- so neither a hold nor a hold that lapsed or
+  // was abandoned (cancelled straight from hold) reaches their feed.
+  const visible = after.status !== 'hold' && !(before?.status === 'hold' && after.status === 'cancelled');
+  const isNew = !before || before.status === 'hold';
+  if (visible) {
+    publishMarinaBooking(after.property_id, isNew ? 'new-booking' : 'booking-status-changed', after)
+      .catch((err) => console.error('Ably publish failed:', err.message));
+  }
+  if (before && before.status !== after.status) {
+    publishMarinaGuestUpdate(after.id, after.status).catch((err) => console.error('Ably publish failed:', err.message));
+  }
+  if (!before && after.status === 'hold' && after._confirmToken) {
+    const confirmUrl = `${process.env.OTA_API_BASE_URL}/api/marina/confirm-booking/${after.id}/${after._confirmToken}`;
+    sendGuestEmail(after, 'received', { confirmUrl });
+    return;
+  }
+  const kind = emailKind(before, after);
+  if (kind) sendGuestEmail(after, kind);
+}
 
 // Lapsed guest holds and unanswered pending requests. Each row is handled
 // under its own row lock, so the sweep and a staff confirm can't both win:

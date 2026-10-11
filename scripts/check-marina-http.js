@@ -117,6 +117,20 @@ const { bookingToken } = require('../src/lib/marinaToken');
       assert.ok(!conf.ok || conf.expired);
     });
 
+    // ---- Task 8 ----
+    await check('11th guest booking from one IP in an hour → 429', async () => {
+      const ip = { 'X-Client-Ip': '192.0.2.55' };
+      let last;
+      for (let i = 0; i < 11; i++) last = await api('POST', `${G}/bookings`, { body: guestBody({ contact_email: `rl${i}@example.com` }), headers: ip });
+      assert.equal(last.status, 429);
+    });
+    await check('ably-token requires the booking token', async () => {
+      const r = await api('POST', `${G}/bookings`, { body: guestBody(), headers: { 'X-Client-Ip': '192.0.2.56' } });
+      assert.equal((await api('GET', `${G}/bookings/${r.body.booking.id}/ably-token`)).status, 404);
+      // ABLY_API_KEY is unset in this check, so a valid token reaches the route and gets 503.
+      assert.equal((await api('GET', `${G}/bookings/${r.body.booking.id}/ably-token`, { headers: { 'X-Booking-Token': r.body.booking_token } })).status, 503);
+    });
+
     // (later tasks append here)
   } finally {
     server.close();

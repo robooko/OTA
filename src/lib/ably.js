@@ -315,7 +315,31 @@ async function publishProshopReturnStatusChanged(propertyId, payload) {
   await channel.publish('return-status-changed', payload);
 }
 
+// Marina staff feed: the full joined row every time (never a patch, never
+// property columns), so the dashboard can upsert without a refetch.
+async function publishMarinaBooking(propertyId, event, row) {
+  if (!client) return;
+  const { confirm_token_hash, stripe_secret_key, ...safe } = row;
+  await client.channels.get(`property:${propertyId}:marina-bookings`).publish(event, safe);
+}
+
+// The guest's booking page: status only.
+async function publishMarinaGuestUpdate(bookingId, status) {
+  if (!client) return;
+  await client.channels.get(`marina-booking:${bookingId}`).publish('updated', { status });
+}
+
+// Subscribe-only, one channel, short-lived: handed to a guest holding the
+// booking token. OTA issued no TokenRequests before this.
+async function createSubscribeTokenRequest(channel) {
+  if (!client) return null;
+  return client.auth.createTokenRequest({ capability: { [channel]: ['subscribe'] }, ttl: 60 * 60 * 1000 });
+}
+
 module.exports = {
+  publishMarinaBooking,
+  publishMarinaGuestUpdate,
+  createSubscribeTokenRequest,
   publishNewInquiry,
   publishNewOrder,
   publishOrderStatusChanged,
