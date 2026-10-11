@@ -606,7 +606,7 @@ const swaggerSpec = {
     },
 
 
-    '/api/marina/bookings': {
+    '/api/marina/sidon-bookings': {
       get: { tags: ['Marina'], summary: "Berth bookings for the property's linked Sidon marina", description: 'Read from Sidon with the stored marina API key, server-side. Every booking Sidon holds (no date filter), newest first. 409 if no marina or key is set; Sidon failures (including a rejected key) come back as 502.', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], responses: { 200: { description: '[{ id, berth_id, sailor_name, sailor_email, boat_name, boat_loa, boat_beam, arrival_date, departure_date, nights, notes, status, amount_cents, expires_at, created_at }]' }, 409: { description: 'No Sidon marina linked, or no API key set' }, 502: { description: 'Sidon unreachable, rejected the key, or returned an error' } } },
     },
     '/api/marina/key': {

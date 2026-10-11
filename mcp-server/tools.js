@@ -755,7 +755,7 @@ function createTools(apiRequest) {
     name: 'list_marina_bookings',
     description: "Berth bookings at the property's linked Sidon marina (read live from Sidon): berth, sailor, boat, arrival/departure dates, nights, status (pending/confirmed/cancelled...), amount. Every booking Sidon holds, newest first -- filter by date yourself. A pending booking past expires_at is a lapsed hold. Fails if no marina is linked or its API key isn't set.",
     inputSchema: {},
-    run: () => apiRequest('GET', '/api/marina/bookings'),
+    run: () => apiRequest('GET', '/api/marina/sidon-bookings'),
   },
   {
     name: 'list_review_requests',
