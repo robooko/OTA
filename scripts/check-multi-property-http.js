@@ -13,6 +13,17 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
 const pool = require('../src/db');
 const app = require('../src/app');
 const { SITE_AMBIGUOUS } = require('../src/lib/propertyResolver');
+const orgCtrl = require('../src/controllers/organization');
+
+// Drives a controller directly (bearer routes can't be reached over HTTP
+// without a real Clerk token).
+const call = async (fn, req) => {
+  const res = { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  let error;
+  await fn({ params: {}, query: {}, body: {}, ...req }, res, (e) => { error = e; });
+  if (error) throw error;
+  return res;
+};
 
 (async () => {
   const server = app.listen(0);
@@ -110,7 +121,63 @@ const { SITE_AMBIGUOUS } = require('../src/lib/propertyResolver');
       assert.equal((await r.json()).error, SITE_AMBIGUOUS);
     });
 
-    // ---- Task 4 ----
+    await check('site: GET /api/site/properties lists the org\'s hotels, no secrets', async () => {
+      const r = await api('GET', '/api/site/properties');
+      assert.equal(r.status, 200, r.text);
+      assert.deepEqual(r.body.map((p) => p.slug).sort(), ['harbour', 'seaview']);
+      const seaview = r.body.find((p) => p.id === A1);
+      assert.deepEqual(seaview.websites, [`https://www.${HOST}/`]);
+      assert.deepEqual(Object.keys(seaview).sort(), ['currency', 'id', 'name', 'slug', 'timezone', 'websites']);
+      assert.ok(!r.text.includes(PROP_KEY));
+    });
+    await check('site: per-property key -> 403, bad or missing key -> 401', async () => {
+      const prop = await api('GET', '/api/site/properties', { key: PROP_KEY });
+      assert.equal(prop.status, 403);
+      assert.equal(prop.body.error, 'This endpoint requires an organization API key');
+      assert.equal((await api('GET', '/api/site/properties', { key: 'nope' })).status, 401);
+      assert.equal((await api('GET', '/api/site/properties', { key: null })).status, 401);
+    });
+    await check('PUT /me slug: validated, 409 on clash in org, null clears; GET /me returns it', async () => {
+      const as1 = { headers: { 'X-Property-Id': A1 } };
+      assert.equal((await api('PUT', '/api/property/me', { ...as1, body: { slug: 'Bad Slug' } })).status, 400);
+      const clash = await api('PUT', '/api/property/me', { ...as1, body: { slug: 'harbour' } });
+      assert.equal(clash.status, 409);
+      assert.equal(clash.body.error, 'That slug is already used by another property in this organization');
+      assert.equal((await api('PUT', '/api/property/me', { ...as1, body: { slug: 'seaview-2' } })).body.slug, 'seaview-2');
+      assert.equal((await api('GET', '/api/property/me', as1)).body.slug, 'seaview-2');
+      assert.equal((await api('PUT', '/api/property/me', { ...as1, body: { currency: 'EUR' } })).body.slug, 'seaview-2'); // omitted = unchanged
+      assert.equal((await api('PUT', '/api/property/me', { ...as1, body: { slug: null } })).body.slug, null);
+    });
+    await check('organization routes require a bearer', async () => {
+      assert.equal((await api('GET', '/api/organization/properties', { key: ORG_KEY })).status, 401);
+    });
+    await check('org controller: list and create properties', async () => {
+      const list = await call(orgCtrl.listProperties, { clerk_org_id: ORG });
+      assert.equal(list.body.length, 2);
+      assert.deepEqual(Object.keys(list.body[0]).sort(), ['id', 'name', 'slug', 'status']);
+      assert.equal((await call(orgCtrl.createProperty, { clerk_org_id: ORG, body: { name: '  ' } })).statusCode, 400);
+      assert.equal((await call(orgCtrl.createProperty, { clerk_org_id: ORG, body: { name: 'x'.repeat(101) } })).statusCode, 400);
+      assert.equal((await call(orgCtrl.createProperty, { clerk_org_id: ORG, body: { name: 'Bay', slug: 'B A Y' } })).statusCode, 400);
+      const clash = await call(orgCtrl.createProperty, { clerk_org_id: ORG, body: { name: 'Bay', slug: 'harbour' } });
+      assert.equal(clash.statusCode, 409);
+      const made = await call(orgCtrl.createProperty, { clerk_org_id: ORG, body: { name: ' Bay ', slug: 'bay' } });
+      assert.equal(made.statusCode, 201);
+      assert.deepEqual(Object.keys(made.body).sort(), ['currency', 'id', 'name', 'slug', 'status', 'timezone']);
+      assert.equal(made.body.name, 'Bay');
+      assert.equal(made.body.status, 'active');
+    });
+    await check('org controller: api-key routes work in any order and toggle', async () => {
+      const fresh = `org_httpchk_new_${run}`;
+      cleanupOrgs.push(fresh);
+      const rotated = await call(orgCtrl.rotateApiKey, { clerk_org_id: fresh }); // before any GET
+      assert.match(rotated.body.api_key, /^org_[0-9a-f]{64}$/);
+      const got = await call(orgCtrl.getApiKey, { clerk_org_id: fresh });
+      assert.deepEqual(got.body, { api_key: rotated.body.api_key, api_key_enabled: true });
+      assert.equal((await call(orgCtrl.disableApiKey, { clerk_org_id: fresh })).body.api_key_enabled, false);
+      assert.equal((await call(orgCtrl.enableApiKey, { clerk_org_id: fresh })).body.api_key_enabled, true);
+      const again = await call(orgCtrl.rotateApiKey, { clerk_org_id: fresh });
+      assert.notEqual(again.body.api_key, rotated.body.api_key);
+    });
   } finally {
     await pool.query('DELETE FROM property_website WHERE property_id IN (SELECT id FROM property WHERE clerk_org_id = ANY($1))', [cleanupOrgs]);
     await pool.query('DELETE FROM property_token_ledger WHERE property_id IN (SELECT id FROM property WHERE clerk_org_id = ANY($1))', [cleanupOrgs]);

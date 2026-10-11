@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const pool = require('../db');
 const { keyMode } = require('../lib/marinaStripe');
-const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate, isValidUuid, validateBranding, validateCancelUrl } = require('../middleware/validate');
+const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate, isValidUuid, validateBranding, validateCancelUrl, isValidSlug, SLUG_TAKEN, isSlugConflict } = require('../middleware/validate');
 const { isConfigured: aiConfigured, MODEL: AI_MODEL } = require('../lib/aiReplies');
 const twilio = require('../lib/twilio');
 const googleAnalytics = require('../lib/googleAnalytics');
@@ -53,7 +53,7 @@ function generateApiKey() {
 async function getCurrentProperty(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT id, clerk_org_id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id, sidon_marina_key IS NOT NULL AS sidon_marina_key_set FROM property WHERE id = $1',
+      'SELECT id, clerk_org_id, name, slug, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id, sidon_marina_key IS NOT NULL AS sidon_marina_key_set FROM property WHERE id = $1',
       [req.property_id]
     );
     res.json(rows[0]);
@@ -67,7 +67,7 @@ async function getCurrentProperty(req, res, next) {
 // (website checkout) apply them today.
 async function updateCurrentProperty(req, res, next) {
   try {
-    const { currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id } = req.body;
+    const { currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id, slug } = req.body;
     if (currency !== undefined && !isValidCurrencyCode(currency)) {
       return res.status(400).json({ error: 'currency must be a 3-letter ISO 4217 code (e.g. GBP)' });
     }
@@ -91,6 +91,10 @@ async function updateCurrentProperty(req, res, next) {
         && (typeof sidon_marina_id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(sidon_marina_id))) {
       return res.status(400).json({ error: 'sidon_marina_id must be a Sidon marina id (letters, digits, _ or -), or null' });
     }
+    // Path segment a group website routes on; null clears it.
+    if (slug !== undefined && slug !== null && !isValidSlug(slug)) {
+      return res.status(400).json({ error: 'slug must be 1-60 lowercase letters, digits or hyphens, or null' });
+    }
     const { rows } = await pool.query(
       `UPDATE property SET
          currency            = COALESCE($1, currency),
@@ -105,17 +109,20 @@ async function updateCurrentProperty(req, res, next) {
          -- A changed or cleared marina id drops the stored key with it (the
          -- right-hand side sees the old id), on every rail -- the key is
          -- admin-set and only valid for the marina it was entered for.
-         sidon_marina_key    = CASE WHEN $13::boolean AND $12::text IS DISTINCT FROM sidon_marina_id THEN NULL ELSE sidon_marina_key END
+         sidon_marina_key    = CASE WHEN $13::boolean AND $12::text IS DISTINCT FROM sidon_marina_id THEN NULL ELSE sidon_marina_key END,
+         slug                = CASE WHEN $15::boolean THEN $14::text ELSE slug END
        WHERE id = $11
-       RETURNING id, name, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id, sidon_marina_key IS NOT NULL AS sidon_marina_key_set`,
+       RETURNING id, name, slug, currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id, return_instructions, enabled_modules, sidon_marina_id, sidon_marina_key IS NOT NULL AS sidon_marina_key_set`,
       [currency, timezone, tax_enabled, tax_rate, tax_inclusive, tax_id,
         return_instructions ?? null, return_instructions !== undefined,
         enabled_modules != null ? JSON.stringify(enabled_modules) : null, enabled_modules !== undefined,
         req.property_id,
-        sidon_marina_id ?? null, sidon_marina_id !== undefined]
+        sidon_marina_id ?? null, sidon_marina_id !== undefined,
+        slug ?? null, slug !== undefined]
     );
     res.json(rows[0]);
   } catch (err) {
+    if (isSlugConflict(err)) return res.status(409).json({ error: SLUG_TAKEN });
     next(err);
   }
 }

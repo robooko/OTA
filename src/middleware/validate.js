@@ -76,7 +76,17 @@ function validateCancelUrl(cancelUrl) {
   return null;
 }
 
+// property.slug -- the path segment a group website routes on (/seaview).
+// Unique per org (property_org_slug_key).
+function isValidSlug(str) {
+  return typeof str === 'string' && /^[a-z0-9-]{1,60}$/.test(str);
+}
+const SLUG_TAKEN = 'That slug is already used by another property in this organization';
+function isSlugConflict(err) {
+  return err?.code === '23505' && err.constraint === 'property_org_slug_key';
+}
+
 module.exports = {
   requireFields, isValidDate, isValidUuid, isValidTime, isValidCurrencyCode, isValidTimezone, isValidUrl,
-  validateBranding, validateCancelUrl,
+  validateBranding, validateCancelUrl, isValidSlug, SLUG_TAKEN, isSlugConflict,
 };
