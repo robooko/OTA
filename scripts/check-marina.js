@@ -216,6 +216,22 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.deepEqual(kc.unknownPlaceholders('{{sailor_name}} {{acord25.policy}} {{nope}}'), ['acord25.policy', 'nope']);
     });
 
+    // ---- Task 13: MCP tools ----
+    await check('MCP marina tools call the marina routes', async () => {
+      const calls = [];
+      const tools = require('../mcp-server/tools').createTools(async (method, path, opts) => { calls.push([method, path, opts]); return {}; });
+      const t = (name) => { const x = tools.find((y) => y.name === name); assert.ok(x, `missing tool ${name}`); return x; };
+      await t('list_marinas').run({});
+      await t('update_marina_berth').run({ marina_id: 'm1', berth_id: 'b1', status: 'maintenance' });
+      await t('search_berth_availability').run({ marina_slug: 'porto check', arrival: '2027-06-01', departure: '2027-06-03', boat_length_m: 10 });
+      await t('update_marina_booking').run({ booking_id: 'k1', action: 'cancel', refund: true });
+      assert.deepEqual(calls.map(([m, p]) => `${m} ${p}`), ['GET /api/marina/marinas', 'PUT /api/marina/marinas/m1/berths/b1', 'GET /api/marina/guest/porto%20check/availability', 'PUT /api/marina/bookings/k1']);
+      assert.deepEqual(calls[1][2].body, { status: 'maintenance' });
+      assert.deepEqual(calls[3][2].body, { action: 'cancel', refund: true });
+      for (const n of ['get_marina', 'list_marina_berths', 'get_marina_booking', 'create_marina_booking']) t(n);
+      assert.equal(t('list_marina_bookings').run.toString().includes('sidon-bookings'), true, 'stays on the interim proxy until Switch');
+    });
+
     // (later tasks append their checks here)
   } finally {
     await db.query('ROLLBACK');

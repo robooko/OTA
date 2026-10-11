@@ -758,6 +758,73 @@ function createTools(apiRequest) {
     run: () => apiRequest('GET', '/api/marina/sidon-bookings'),
   },
   {
+    name: 'list_marinas',
+    description: 'Marinas run by this property (active only): id, name, slug, contact details, response window, auto-confirm, booking page URL template.',
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/marina/marinas'),
+  },
+  {
+    name: 'get_marina',
+    description: 'One marina by id, any status.',
+    inputSchema: { marina_id: z.string() },
+    run: ({ marina_id }) => apiRequest('GET', `/api/marina/marinas/${marina_id}`),
+  },
+  {
+    name: 'list_marina_berths',
+    description: "A marina's berths (active and maintenance; inactive hidden): label, pontoon, dimensions in metres, nightly price and whether it's per metre or fixed. Occupancy is not stored on berths -- use search_berth_availability or list_marina_bookings.",
+    inputSchema: { marina_id: z.string() },
+    run: ({ marina_id }) => apiRequest('GET', `/api/marina/marinas/${marina_id}/berths`),
+  },
+  {
+    name: 'update_marina_berth',
+    description: "Update one berth. Omit a field to leave it. status: active, maintenance (shown on the map, not bookable) or inactive (hidden). Renaming the label also renames it in the pontoon's map SVG.",
+    inputSchema: {
+      marina_id: z.string(), berth_id: z.string(),
+      label: z.string().max(30).optional(), length_m: z.number().positive().nullable().optional(), min_length_m: z.number().positive().nullable().optional(),
+      beam_m: z.number().positive().nullable().optional(), depth_m: z.number().positive().nullable().optional(),
+      price_per_night: z.number().min(0).nullable().optional(), price_mode: z.enum(['per_metre', 'fixed']).optional(),
+      status: z.enum(['active', 'maintenance', 'inactive']).optional(), notes: z.string().nullable().optional(),
+    },
+    run: ({ marina_id, berth_id, ...body }) => apiRequest('PUT', `/api/marina/marinas/${marina_id}/berths/${berth_id}`, { body }),
+  },
+  {
+    name: 'search_berth_availability',
+    description: 'Free, active berths that fit a boat for a stay (departure exclusive), each with its price for the stay.',
+    inputSchema: {
+      marina_slug: z.string(), arrival: z.string().describe('YYYY-MM-DD'), departure: z.string().describe('YYYY-MM-DD, exclusive'),
+      boat_length_m: z.number().positive(), boat_beam_m: z.number().positive().optional(),
+    },
+    run: ({ marina_slug, ...query }) => apiRequest('GET', `/api/marina/guest/${encodeURIComponent(marina_slug)}/availability`, { query }),
+  },
+  {
+    name: 'get_marina_booking',
+    description: 'One berth booking with berth, payment status/error, document metadata and contract agreement.',
+    inputSchema: { booking_id: z.string() },
+    run: ({ booking_id }) => apiRequest('GET', `/api/marina/bookings/${booking_id}`),
+  },
+  {
+    name: 'create_marina_booking',
+    description: 'Staff booking on a berth: any dates, open-ended when departure is omitted (seasonal/annual holders), status pending or confirmed (default). Price is computed unless total_price is given. No card is taken.',
+    inputSchema: {
+      berth_id: z.string(), contact_name: z.string(), contact_email: z.string().email().optional(), contact_phone: z.string().optional(),
+      boat_name: z.string().optional(), boat_length_m: z.number().positive().optional(), boat_beam_m: z.number().positive().optional(),
+      arrival: z.string().describe('YYYY-MM-DD'), departure: z.string().optional().describe('YYYY-MM-DD, exclusive; omit for open-ended'),
+      status: z.enum(['pending', 'confirmed']).optional(), total_price: z.number().min(0).optional(), notes: z.string().optional(),
+    },
+    run: (body) => apiRequest('POST', '/api/marina/bookings', { body }),
+  },
+  {
+    name: 'update_marina_booking',
+    description: 'Act on a berth booking: confirm (captures a held card), decline (releases it), cancel (refund: true refunds a captured payment), end (sets departure on an open-ended stay). Or omit action to edit contact/boat/notes.',
+    inputSchema: {
+      booking_id: z.string(), action: z.enum(['confirm', 'decline', 'cancel', 'end']).optional(),
+      refund: z.boolean().optional(), departure: z.string().optional(), reason: z.string().optional(),
+      contact_name: z.string().optional(), contact_email: z.string().optional(), contact_phone: z.string().optional(),
+      boat_name: z.string().optional(), boat_length_m: z.number().positive().optional(), boat_beam_m: z.number().positive().optional(), notes: z.string().optional(),
+    },
+    run: ({ booking_id, ...body }) => apiRequest('PUT', `/api/marina/bookings/${booking_id}`, { body }),
+  },
+  {
     name: 'list_review_requests',
     description: "Post-visit Google review emails this property has sent (or tried to), newest first, max 500. Each row: guest email/name, module and booking_id that triggered it, sent_at (null = failed, retried up to 3 attempts), Resend email id, and whether the guest has since opted out. Delivery/opens aren't tracked here.",
     inputSchema: {
