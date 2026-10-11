@@ -6,6 +6,7 @@ const { startTourTimetableHorizonJob } = require('./lib/tourSlotSeeder');
 const { startReviewRequestJob } = require('./lib/reviewRequester');
 const { startReminderJob } = require('./lib/reminders');
 const { startHoldExpiryJob } = require('./lib/spaBookingGuard');
+const { startMarinaHoldExpiryJob } = require('./lib/marinaLifecycle');
 
 const PORT = process.env.PORT || 3000;
 
@@ -17,4 +18,5 @@ app.listen(PORT, '0.0.0.0', () => {
   startReviewRequestJob();
   startReminderJob();
   startHoldExpiryJob();
+  startMarinaHoldExpiryJob();
 });

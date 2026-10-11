@@ -102,4 +102,47 @@ async function endBooking(id, departure) {
 // Publish + email after commit. Never throws. Filled in by Task 8.
 function afterChange(before, after) {}
 
-module.exports = { withLockedBooking, setRow, toPending, confirmBooking, declineBooking, cancelBooking, endBooking, afterChange, LIVE, fail };
+// Lapsed guest holds and unanswered pending requests. Each row is handled
+// under its own row lock, so the sweep and a staff confirm can't both win:
+// whichever locks second re-checks the status the first one left.
+async function sweepOnce() {
+  const { rows } = await pool.query(
+    `SELECT id FROM marina_booking
+     WHERE source = 'guest' AND status IN ('hold', 'pending') AND hold_expires_at < now()
+     ORDER BY hold_expires_at LIMIT 200`);
+  let cancelled = 0;
+  let promoted = 0;
+  for (const { id } of rows) {
+    try {
+      const r = await sweepRow(id);
+      if (r === 'cancelled') cancelled++;
+      if (r === 'promoted') promoted++;
+    } catch (err) {
+      console.error(`Marina sweep failed for ${id}:`, err.message);
+    }
+  }
+  return { cancelled, promoted };
+}
+
+async function sweepRow(id) {
+  let outcome = null;
+  await withLockedBooking(id, async (client, row) => {
+    if (!(row.source === 'guest' && ['hold', 'pending'].includes(row.status) && row.lapsed)) return fail(409, 'changed');
+    // (Task 9: a hold whose PI is requires_capture is promoted instead.)
+    await setRow(client, id, { status: 'cancelled', cancel_reason: 'expired', hold_expires_at: null });
+    outcome = 'cancelled';
+    return { ok: true, booking: true };
+  });
+  return outcome;
+}
+
+function startMarinaHoldExpiryJob() {
+  const run = () => sweepOnce()
+    .then(({ cancelled, promoted }) => { if (cancelled || promoted) console.log(`Marina holds: cancelled ${cancelled}, promoted ${promoted}`); })
+    .catch((err) => console.error('Marina hold sweep failed:', err.message));
+  run();
+  setInterval(run, 60 * 1000).unref();
+}
+
+module.exports = {
+  sweepOnce, startMarinaHoldExpiryJob, withLockedBooking, setRow, toPending, confirmBooking, declineBooking, cancelBooking, endBooking, afterChange, LIVE, fail };

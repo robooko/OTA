@@ -89,6 +89,34 @@ const { bookingToken } = require('../src/lib/marinaToken');
       assert.equal((await api('PUT', `/api/marina/bookings/${r.body.id}`, { body: { action: 'confirm' } })).status, 409);
     });
 
+    // ---- Task 7: sweep ----
+    const life = require('../src/lib/marinaLifecycle');
+    const insert = (o) => one(
+      `INSERT INTO marina_booking (property_id, marina_id, berth_id, contact_name, arrival, departure, status, source, hold_expires_at)
+       VALUES ($1, $2, $3, 'Sweep', $4, $5, $6, $7, $8) RETURNING id`,
+      [P, m.id, berthRes.body.id, o.arrival, o.departure, o.status, o.source, o.expires]);
+    await check('sweep cancels expired guest hold/pending exactly once, never staff/import', async () => {
+      const past = new Date(Date.now() - 60000);
+      const a = await insert({ arrival: future(500), departure: future(501), status: 'hold', source: 'guest', expires: past });
+      const b = await insert({ arrival: future(502), departure: future(503), status: 'pending', source: 'guest', expires: past });
+      const c = await insert({ arrival: future(504), departure: future(505), status: 'pending', source: 'staff', expires: null });
+      const d = await insert({ arrival: future(506), departure: future(507), status: 'pending', source: 'guest', expires: new Date(Date.now() + 3600000) });
+      const r1 = await life.sweepOnce();
+      assert.ok(r1.cancelled >= 2);
+      const st = async (id) => (await one('SELECT status FROM marina_booking WHERE id = $1', [id])).status;
+      assert.equal(await st(a.id), 'cancelled'); assert.equal(await st(b.id), 'cancelled');
+      assert.equal(await st(c.id), 'pending'); assert.equal(await st(d.id), 'pending');
+      const r2 = await life.sweepOnce();
+      assert.equal(r2.cancelled, 0);
+    });
+    await check('staff confirm racing the sweep on an expired pending never confirms it', async () => {
+      const x = await insert({ arrival: future(510), departure: future(511), status: 'pending', source: 'guest', expires: new Date(Date.now() - 1000) });
+      const [conf] = await Promise.all([life.confirmBooking(x.id), life.sweepOnce()]);
+      const s = (await one('SELECT status FROM marina_booking WHERE id = $1', [x.id])).status;
+      assert.equal(s, 'cancelled');
+      assert.ok(!conf.ok || conf.expired);
+    });
+
     // (later tasks append here)
   } finally {
     server.close();
