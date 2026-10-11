@@ -17,4 +17,16 @@ function normaliseReference(value) {
   return String(value ?? '').trim().toUpperCase();
 }
 
-module.exports = { generateOrderReference, normaliseReference };
+// Picks a reference not yet used by this property. Checked first rather than
+// caught on the unique index, because a unique-violation would abort the
+// caller's transaction.
+async function allocateOrderReference(db, propertyId) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = generateOrderReference();
+    const { rows } = await db.query('SELECT 1 FROM proshop_order WHERE property_id = $1 AND reference = $2', [propertyId, candidate]);
+    if (!rows.length) return candidate;
+  }
+  throw new Error('Could not allocate an order reference');
+}
+
+module.exports = { generateOrderReference, allocateOrderReference, normaliseReference };

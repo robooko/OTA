@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const { Client } = require('pg');
 const { mergeAgenticCommerce } = require('../src/controllers/property');
 const feed = require('../src/lib/agenticFeed');
+const agentic = require('../src/lib/agenticOrders');
 
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
@@ -145,6 +146,63 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       await db.query(`INSERT INTO proshop_item (property_id, name, price) VALUES ($1, 'Burgee', 20)`, [prop.id]);
       const stripe = { v2: { commerce: { productCatalog: { imports: { create: async () => { throw new Error('must not upload'); } } } } } };
       await assert.rejects(feed.syncProperty(prop, { db, stripe, fetchSanity: async () => ({ docs: [], settings: null }), now: 1_000 }), /no products/);
+    });
+
+    const session = (o) => ({
+      id: 'cs_test_1', amount_total: 6200, amount_subtotal: 4200,
+      total_details: { amount_shipping: 2000, amount_tax: 0 },
+      customer_details: { name: 'Pat Buyer', email: 'pat@example.com', phone: '+15551234567' },
+      collected_information: { shipping_details: { name: 'Pat Buyer', address: { line1: '1 Main St', line2: null, city: 'Austin', state: 'TX', postal_code: '78701', country: 'US' } } },
+      payment_intent: 'pi_test_1',
+      line_items: { data: [{ description: 'Burgee', quantity: 2, price: { unit_amount: 2100, external_reference: '11111111222233334444555555555555' } }] },
+      ...o,
+    });
+    const BURGEE = { id: '11111111-2222-3333-4444-555555555555', name: 'Burgee' };
+    const byFeed = new Map([['11111111222233334444555555555555', BURGEE]]);
+
+    await check('orders: session maps to order + lines with Stripe amounts', async () => {
+      const { order, lines } = agentic.sessionToOrder(session(), byFeed);
+      assert.deepEqual(order, {
+        contact_name: 'Pat Buyer', contact_email: 'pat@example.com', contact_phone: '+15551234567',
+        shipping_address: 'Pat Buyer, 1 Main St, Austin, TX 78701, US',
+        shipping_cost: 20, tax_amount: 0, items_subtotal: 42, total_price: 62,
+        stripe_payment_intent_id: 'pi_test_1', stripe_checkout_session_id: 'cs_test_1',
+      });
+      assert.deepEqual(lines, [{ item_id: BURGEE.id, item_name: 'Burgee', unit_price: 21, quantity: 2, subtotal: 42 }]);
+    });
+    await check('orders: no line matches this shop = not ours (null)', async () => {
+      assert.equal(agentic.sessionToOrder(session({ line_items: { data: [{ description: 'Gift card', quantity: 1, price: { unit_amount: 500, external_reference: null } }] } }), byFeed), null);
+      assert.equal(agentic.sessionToOrder(session({ line_items: { data: [] } }), byFeed), null);
+    });
+    await check('orders: a deleted item is kept by name; over-long names truncated', async () => {
+      const long = 'N'.repeat(150);
+      const { order, lines } = agentic.sessionToOrder(session({
+        customer_details: { name: long, email: 'pat@example.com' },
+        line_items: { data: [
+          { description: 'Burgee', quantity: 1, price: { unit_amount: 2100, external_reference: '11111111222233334444555555555555' } },
+          { description: long, quantity: 1, price: { unit_amount: 500, external_reference: 'ffffffffffffffffffffffffffffffff' } },
+        ] },
+      }), byFeed);
+      assert.equal(order.contact_name.length, 100);
+      assert.equal(lines[1].item_id, null);
+      assert.equal(lines[1].item_name.length, 100);
+    });
+    await check('orders: recordOrder inserts a paid order once; second call is a no-op', async () => {
+      const prop = await one(`INSERT INTO property (name, currency, timezone) VALUES ('Order Check', 'USD', 'America/Tortola') RETURNING id`);
+      const shop = await one(`INSERT INTO shop (property_id, name) VALUES ($1, 'Merch') RETURNING id`, [prop.id]);
+      const it = await one(`INSERT INTO proshop_item (property_id, shop_id, name, price) VALUES ($1, $2, 'Burgee', 21) RETURNING id, name`, [prop.id, shop.id]);
+      const mapped = agentic.sessionToOrder(session({ id: 'cs_test_rec', line_items: { data: [{ description: 'Burgee', quantity: 2, price: { unit_amount: 2100, external_reference: feed.feedId(it.id) } }] } }), new Map([[feed.feedId(it.id), it]]));
+      const first = await agentic.recordOrder(db, prop.id, shop.id, mapped);
+      assert.equal(first.status, 'paid');
+      assert.equal(first.payment_status, 'paid');
+      assert.equal(first.stripe_checkout_session_id, 'cs_test_rec');
+      assert.equal(first.reference.length > 0, true);
+      assert.equal(first.items.length, 1);
+      const n = await one(`SELECT count(*)::int AS n FROM proshop_order_item WHERE order_id = $1`, [first.id]);
+      assert.equal(n.n, 1);
+      assert.equal(await agentic.recordOrder(db, prop.id, shop.id, mapped), null);
+      const orders = await one(`SELECT count(*)::int AS n FROM proshop_order WHERE stripe_checkout_session_id = 'cs_test_rec'`);
+      assert.equal(orders.n, 1);
     });
 
     // ── later tasks append checks above this line ──

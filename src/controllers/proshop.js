@@ -16,7 +16,7 @@ const { validateBranding, isValidUuid } = require('../middleware/validate');
 const { runAiReply } = require('../lib/aiReplyPipeline');
 const { computeOrderTax } = require('../lib/tax');
 const { sendOrderConfirmation } = require('../lib/resend');
-const { generateOrderReference } = require('../lib/orderReference');
+const { allocateOrderReference } = require('../lib/orderReference');
 
 // ── Shops ─────────────────────────────────────────────────────────────────────
 
@@ -242,8 +242,13 @@ function orderWithItems(order, items) {
 // The order row carries no fulfillment_method column of its own -- derived
 // here for @forgebuild/hotal-ui's <live-shop-orders-feed>, which renders a
 // pickup/shipping icon per order, from whether shipping_address was given.
+// channel: an order bought through an AI agent carries its Checkout Session id.
+function withChannel(order) {
+  return { ...order, channel: order.stripe_checkout_session_id ? 'agent' : 'web' };
+}
+
 function forFeed(order) {
-  return { ...order, fulfillment_method: order.shipping_address ? 'shipping' : 'pickup' };
+  return { ...withChannel(order), fulfillment_method: order.shipping_address ? 'shipping' : 'pickup' };
 }
 
 // Only called once per order, guarded by the caller checking the
@@ -366,7 +371,7 @@ async function listOrders(req, res, next) {
       for (const order of orders) order.items = itemsByOrder.get(order.id) ?? [];
     }
 
-    res.json(orders);
+    res.json(orders.map(withChannel));
   } catch (err) { next(err); }
 }
 
@@ -375,7 +380,7 @@ async function getOrder(req, res, next) {
     const full = await loadOrderWithItems(req.params.id, req.property_id);
     if (!full) return res.status(404).json({ error: 'Order not found' });
     const { stripe_secret_key, ...order } = full;
-    res.json(order);
+    res.json(withChannel(order));
   } catch (err) { next(err); }
 }
 
@@ -438,15 +443,7 @@ async function createOrder(req, res, next) {
       // Unique per property; the existence check runs inside the transaction
       // so a collision (vanishingly rare at 32^6) is retried instead of
       // aborting the transaction on the unique index.
-      let reference;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const candidate = generateOrderReference();
-        const { rows: clash } = await client.query(
-          'SELECT 1 FROM proshop_order WHERE property_id = $1 AND reference = $2', [req.property_id, candidate]
-        );
-        if (!clash.length) { reference = candidate; break; }
-      }
-      if (!reference) throw new Error('Could not allocate an order reference');
+      const reference = await allocateOrderReference(client, req.property_id);
 
       const { rows: orderRows } = await client.query(
         `INSERT INTO proshop_order
@@ -833,4 +830,6 @@ module.exports = {
   createOrderPaymentIntent, confirmOrderPayment,
   lookupOrder, listReturns, getReturn, updateReturnStatus,
   createReturn,
+  // used by lib/agenticOrders.js
+  decrementStockForItems, emailOrderConfirmationInBackground, forFeed,
 };
