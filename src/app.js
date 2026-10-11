@@ -52,6 +52,9 @@ app.post(
   handleStripeWebhook
 );
 
+// Marina layouts, pontoon SVGs and berths/bulk exceed the 100 kB default.
+// express.json() below then skips these requests (body already parsed).
+app.use('/api/marina', express.json({ limit: '2mb' }));
 app.use(express.json());
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));

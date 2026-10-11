@@ -164,6 +164,17 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal(guard.clientIpKey(req({})), `property:${P}`);
     });
 
+    // ---- Task 4: label rename ----
+    const { renameBerthInSvg } = require('../src/controllers/marinaCatalogue');
+    await check('renameBerthInSvg rewrites only the exact data-berth-id', async () => {
+      const svg = '<g><rect data-berth-id="P1"/><rect data-berth-id="P10"/><rect data-berth-id=\'P1\'/></g>';
+      assert.equal(renameBerthInSvg(svg, 'P1', 'Q1'), '<g><rect data-berth-id="Q1"/><rect data-berth-id="P10"/><rect data-berth-id=\'Q1\'/></g>');
+      assert.equal(renameBerthInSvg(null, 'P1', 'Q1'), null);
+    });
+    await check('label with regex characters is escaped', async () => {
+      assert.equal(renameBerthInSvg('<r data-berth-id="A.1"/><r data-berth-id="AX1"/>', 'A.1', 'B'), '<r data-berth-id="B"/><r data-berth-id="AX1"/>');
+    });
+
     // (later tasks append their checks here)
   } finally {
     await db.query('ROLLBACK');
