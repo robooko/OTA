@@ -442,6 +442,33 @@ const { bookingToken } = require('../src/lib/marinaToken');
       assert.equal(row.stripe_payment_intent_id, null); assert.ok(row.confirm_token_hash, 'confirm link issued');
     });
 
+    // ---- Plan B final review ----
+    await check('final: a used confirm link still lands the guest (mail scanners prefetch it)', async () => {
+      await pool.query('UPDATE property SET stripe_secret_key = NULL, stripe_publishable_key = NULL WHERE id = $1', [P]);
+      const r = await api('POST', `${G}/bookings`, { body: guestBody(), headers: ipR20 });
+      assert.equal(r.body.payment, null, 'email path');
+      const id = r.body.booking.id;
+      const token = crypto.randomBytes(32).toString('base64url');
+      await pool.query('UPDATE marina_booking SET confirm_token_hash = $2 WHERE id = $1', [id, crypto.createHash('sha256').update(token).digest('hex')]);
+      const link = `/api/marina/confirm-booking/${id}/${token}`;
+      assert.equal((await api('GET', link, { headers: { 'X-Api-Key': '' } })).status, 200);
+      const again = await api('GET', link, { headers: { 'X-Api-Key': '' } });
+      assert.equal(again.status, 200, 'second click');
+      assert.equal((await one('SELECT status FROM marina_booking WHERE id = $1', [id])).status, 'pending');
+      assert.equal((await api('GET', `/api/marina/confirm-booking/${id}/${crypto.randomBytes(32).toString('base64url')}`, { headers: { 'X-Api-Key': '' } })).status, 404, 'a wrong token still 404s');
+    });
+    await check('final: booking.card_hold tells a card hold from an email-path hold, even with Stripe down', async () => {
+      const email = (await api('POST', `${G}/bookings`, { body: guestBody(), headers: ipR20 })).body;
+      assert.equal(email.booking.card_hold, false);
+      await pool.query("UPDATE property SET stripe_secret_key = 'sk_test_check', stripe_publishable_key = 'pk_test_check' WHERE id = $1", [P]);
+      const card = (await api('POST', `${G}/bookings`, { body: guestBody(), headers: ipR20 })).body;
+      assert.ok(card.payment); assert.equal(card.booking.card_hold, true);
+      const row = await one('SELECT stripe_payment_intent_id FROM marina_booking WHERE id = $1', [card.booking.id]);
+      fake.store.delete(row.stripe_payment_intent_id);
+      const v = (await view(card)).body;
+      assert.equal(v.payment, null); assert.equal(v.booking.card_hold, true);
+    });
+
     // (later tasks append here)
   } finally {
     server.close();

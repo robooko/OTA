@@ -55,10 +55,11 @@ async function setRow(client, id, fields) {
 }
 
 // hold -> pending. Guest rows start the staff response window; staff rows
-// never expire.
+// never expire. confirm_token_hash is kept: mail scanners prefetch the
+// emailed link, so a later click must still reach the booking page.
 async function toPending(client, row, extra = {}) {
   const { rows: [r] } = await client.query(
-    `UPDATE marina_booking SET status = 'pending', confirm_token_hash = NULL, updated_at = now(),
+    `UPDATE marina_booking SET status = 'pending', updated_at = now(),
             hold_expires_at = CASE WHEN source = 'guest' THEN now() + make_interval(hours => $2) END
             ${Object.keys(extra).map((c, i) => `, ${c} = $${i + 3}`).join('')}
      WHERE id = $1 RETURNING *`,

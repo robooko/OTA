@@ -130,6 +130,9 @@ function guestView(b) {
     hold_expires_at: b.hold_expires_at, locale: b.locale, doc_count: b.doc_count,
     // cancel_reason itself is staff free text; only this derived flag leaves.
     expired: b.status === 'cancelled' && b.cancel_reason === 'expired',
+    // Card path vs email-confirm path; payment alone can't say, as it is
+    // null when Stripe is unreachable.
+    card_hold: !!b.stripe_payment_intent_id,
   };
 }
 
