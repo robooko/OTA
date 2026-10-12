@@ -624,7 +624,7 @@ booking page and set the marina's `booking_url`.
 | sea-company | Fox + Pevero on one property (one key); forwarder; build-time price grid via `createMarinaClient` |
 | portals | forwarder; hand-rolled calls rewritten to the guest API; SSR berths page via `createMarinaClient` |
 | marina-di-positano | forwarder; widget 1.0; SSR/build reads via `createMarinaClient`; its hand-rolled Google map rewritten to the new payload (`available`, not Sidon `status` strings) or replaced by `<sidon-berth-map>` |
-| sidon-marina public pages (`/[lang]/m/[slug]/*`) | a client site: multi-key forwarder (`keys` map in server config, which also replaces Sidon's `/public/list`), pages read via `createMarinaClient` instead of Sidon's DB; `MarinaEnquiryDrawer` posts to `POST /:marina/enquiries`; `MarinaMessageSticky` (chat) removed; the old `/[lang]/m/[slug]/booking/[id]` page replaced by the booking page |
+| sidon-marina public pages (`/[lang]/m/[slug]/*`) | redirected (301) to each marina's own consumer site, every one of which gets its own PR above; sidon-marina keeps its marketing home and chatbot, plus a static "this booking link is no longer valid" page at the old `/[lang]/m/[slug]/booking/[id]` route (old Sidon emails and QR codes link there). Decided with the user 2026-10-12, replacing the multi-key client-site rewrite, so sidon-marina holds no OTA keys |
 | sidon-ai | marina list, map detail, availability, booking, wallet, chat and contract calls removed |
 | sidon-marina-app (Tap to Pay) | archived |
 
@@ -766,6 +766,7 @@ Runbook, in order. Sidon's DB is only ever read by the import.
    - Delete the interim `GET /api/marina/sidon-bookings` (Sidon is about
      to return 410).
    - sidon-marina: dashboard routes redirect to the OTA dashboard;
+     `/[lang]/m/[slug]/*` redirect (301) to each marina's own site;
      `/api/marina/*` returns 410 with a pointer. Archive the Tap to Pay
      app.
 7. **Clean up:**
