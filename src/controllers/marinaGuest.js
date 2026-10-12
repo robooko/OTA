@@ -128,6 +128,8 @@ function guestView(b) {
     boat_name: b.boat_name, boat_length_m: b.boat_length_m, boat_beam_m: b.boat_beam_m,
     total_price: b.total_price, currency: b.currency, payment_status: b.payment_status,
     hold_expires_at: b.hold_expires_at, locale: b.locale, doc_count: b.doc_count,
+    // cancel_reason itself is staff free text; only this derived flag leaves.
+    expired: b.status === 'cancelled' && b.cancel_reason === 'expired',
   };
 }
 
@@ -138,6 +140,9 @@ async function createGuestBooking(req, res, next) {
     const today = await q.propertyToday(client, req.property_id);
     // Staff (bearer) use POST /api/marina/bookings; this route is the guest rail only.
     if (req.auth_method !== 'api_key') return res.status(403).json({ error: 'Use POST /api/marina/bookings for staff bookings' });
+    // No secret, no booking_token: the guest could never reach the booking
+    // again, so refuse before a hold takes the berth.
+    if (!process.env.MARINA_BOOKING_TOKEN_SECRET) return res.status(503).json({ error: 'Online booking is not configured' });
     const parsed = guard.validateGuestBooking(req.body, today);
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
     const v = parsed.value;
@@ -152,7 +157,8 @@ async function createGuestBooking(req, res, next) {
 
     const price = priceStay({ berth, tiers: await q.activeTiers(client, req.marina.id), arrival: v.arrival, departure: v.departure, boatLengthM: v.boat_length_m, boatBeamM: v.boat_beam_m });
     const { rows: [prop] } = await client.query('SELECT upper(currency) AS currency, stripe_secret_key, stripe_publishable_key FROM property WHERE id = $1', [req.property_id]);
-    const cardPath = price.total_price != null && prop.stripe_secret_key && prop.stripe_publishable_key;
+    // Stripe refuses a zero amount, so a free stay confirms by email like an unpriced one.
+    const cardPath = price.total_price != null && toCents(price.total_price) > 0 && prop.stripe_secret_key && prop.stripe_publishable_key;
     const confirmToken = cardPath ? null : crypto.randomBytes(32).toString('base64url');
 
     const { rows: [row] } = await client.query(
@@ -202,8 +208,14 @@ async function getGuestBooking(req, res, next) {
     if (b.status === 'hold' && b.stripe_payment_intent_id) {
       const { rows: [p] } = await pool.query('SELECT stripe_secret_key, stripe_publishable_key FROM property WHERE id = $1', [b.property_id]);
       if (p.stripe_secret_key) {
-        const pi = await marinaStripe.stripeFor(p.stripe_secret_key).paymentIntents.retrieve(b.stripe_payment_intent_id);
-        payment = { client_secret: pi.client_secret, publishable_key: p.stripe_publishable_key };
+        // A Stripe outage must not take the booking page down: the guest
+        // still sees the booking and can cancel it.
+        try {
+          const pi = await marinaStripe.stripeFor(p.stripe_secret_key).paymentIntents.retrieve(b.stripe_payment_intent_id);
+          payment = { client_secret: pi.client_secret, publishable_key: p.stripe_publishable_key };
+        } catch (err) {
+          console.error(`Marina PI retrieve failed for ${b.id}:`, err.message);
+        }
       }
     }
     // The contract to agree (rendered for this booking), or the agreed snapshot.
@@ -214,7 +226,10 @@ async function getGuestBooking(req, res, next) {
       const t = kc.pickTemplate(await activeTemplates(b.marina_id), nightsBetween(b.arrival, b.departure));
       if (t) contract = { template_id: t.id, rendered_body: kc.renderContract(t.body_markdown, kc.contractContext(b, await q.propertyToday(pool, b.property_id))), agreed_at: null };
     }
-    res.json({ booking: guestView(b), payment, contract });
+    // Metadata only: extracted data and the private blob path never reach the key rail.
+    const { rows: documents } = await pool.query(
+      'SELECT id, requirement_id, file_name, status, submitted_at FROM marina_document WHERE booking_id = $1 ORDER BY submitted_at', [b.id]);
+    res.json({ booking: guestView(b), payment, contract, documents });
   } catch (err) { next(err); }
 }
 

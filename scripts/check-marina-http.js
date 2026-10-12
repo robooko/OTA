@@ -384,6 +384,64 @@ const { bookingToken } = require('../src/lib/marinaToken');
       assert.ok(!JSON.stringify(r.body).includes('X1'));
     });
 
+    // ---- Plan B Task 1 (R20) ----
+    // guestBody's rolling dates would reach the staff booking fixed at
+    // +400 days within three more calls; jump past every fixed fixture.
+    n = 100;
+    const ipR20 = { 'X-Client-Ip': '192.0.2.140' };
+    const view = (b) => api('GET', `${G}/bookings/${b.booking.id}`, { headers: { 'X-Booking-Token': b.booking_token } });
+    await check('R20: booking page lists document metadata only', async () => {
+      const b = await pendingBooking();
+      const d = (await upload(b, pdf)).body;
+      await pool.query("UPDATE marina_document SET extracted_data = '{\"number\":\"X9\"}' WHERE id = $1", [d.id]);
+      const { blob_pathname } = await one('SELECT blob_pathname FROM marina_document WHERE id = $1', [d.id]);
+      const r = await view(b);
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.body.documents, [{ id: d.id, requirement_id: null, file_name: 'passport.pdf', status: 'pending', submitted_at: d.submitted_at }]);
+      const json = JSON.stringify(r.body);
+      assert.ok(!json.includes('X9')); assert.ok(!json.includes(blob_pathname));
+    });
+    await check('R20: booking.expired marks a lapsed hold, not a guest cancel', async () => {
+      const a = (await api('POST', `${G}/bookings`, { body: guestBody(), headers: ipR20 })).body;
+      assert.equal(a.booking.expired, false);
+      await pool.query("UPDATE marina_booking SET hold_expires_at = now() - interval '1 minute' WHERE id = $1", [a.booking.id]);
+      await life.sweepOnce();
+      const lapsed = (await view(a)).body.booking;
+      assert.equal(lapsed.status, 'cancelled'); assert.equal(lapsed.expired, true);
+      const c = (await api('POST', `${G}/bookings`, { body: guestBody(), headers: ipR20 })).body;
+      const cancelled = (await api('POST', `${G}/bookings/${c.booking.id}/cancel`, { headers: { 'X-Booking-Token': c.booking_token } })).body.booking;
+      assert.equal(cancelled.status, 'cancelled'); assert.equal(cancelled.expired, false);
+    });
+    await check('R20: a failing PaymentIntent retrieve gives payment null, not a 500', async () => {
+      await pool.query("UPDATE property SET stripe_secret_key = 'sk_test_check', stripe_publishable_key = 'pk_test_check' WHERE id = $1", [P]);
+      const b = (await api('POST', `${G}/bookings`, { body: guestBody(), headers: ipR20 })).body;
+      assert.ok(b.payment, 'card path');
+      assert.ok((await view(b)).body.payment, 'resumes while Stripe answers');
+      const row = await one('SELECT stripe_payment_intent_id FROM marina_booking WHERE id = $1', [b.booking.id]);
+      fake.store.delete(row.stripe_payment_intent_id); // the fake's retrieve now throws, as in a Stripe outage
+      const r = await view(b);
+      assert.equal(r.status, 200); assert.equal(r.body.payment, null); assert.equal(r.body.booking.status, 'hold');
+    });
+    await check('R20: no MARINA_BOOKING_TOKEN_SECRET → 503 before any hold is taken', async () => {
+      const secret = process.env.MARINA_BOOKING_TOKEN_SECRET;
+      delete process.env.MARINA_BOOKING_TOKEN_SECRET;
+      try {
+        const body = guestBody();
+        const r = await api('POST', `${G}/bookings`, { body, headers: ipR20 });
+        assert.equal(r.status, 503); assert.equal(r.body.error, 'Online booking is not configured');
+        assert.equal((await one('SELECT count(*)::int AS n FROM marina_booking WHERE property_id = $1 AND contact_email = $2', [P, body.contact_email])).n, 0);
+      } finally { process.env.MARINA_BOOKING_TOKEN_SECRET = secret; }
+    });
+    await check('R20: a zero total takes the email-confirm path, never a card hold', async () => {
+      await pool.query("UPDATE property SET stripe_secret_key = 'sk_test_check', stripe_publishable_key = 'pk_test_check' WHERE id = $1", [P]);
+      assert.equal((await api('POST', `/api/marina/marinas/${m.id}/berths`, { body: { label: 'Z1', length_m: 15, price_per_night: 0 } })).status, 201);
+      const r = await api('POST', `${G}/bookings`, { body: guestBody({ berth_label: 'Z1' }), headers: ipR20 });
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      assert.equal(r.body.booking.total_price, '0.00'); assert.equal(r.body.payment, null);
+      const row = await one('SELECT stripe_payment_intent_id, confirm_token_hash FROM marina_booking WHERE id = $1', [r.body.booking.id]);
+      assert.equal(row.stripe_payment_intent_id, null); assert.ok(row.confirm_token_hash, 'confirm link issued');
+    });
+
     // (later tasks append here)
   } finally {
     server.close();
