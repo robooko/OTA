@@ -10,6 +10,7 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
 
 const pool = require('../src/db');
 const tokens = require('../src/lib/tokens');
+const { parsePurchase, buxsFromMetadata } = require('../src/lib/platformStripe');
 
 (async () => {
   let failed = 0;
@@ -135,6 +136,29 @@ const tokens = require('../src/lib/tokens');
       }
       tokens.checkAmount(1);
       tokens.checkAmount(50_000_000);
+    });
+
+    await check('parsePurchase takes £10–£1000 in £10 steps at 25,000 BUXS per pound', async () => {
+      assert.deepEqual(parsePurchase({ amount_gbp: 40 }), { gbp: 40, buxs: 1_000_000, amount: 4000 });
+      assert.deepEqual(parsePurchase({ amount_gbp: 1000 }), { gbp: 1000, buxs: 25_000_000, amount: 100_000 });
+      for (const bad of [0, 5, 15, 1010, 40.5, '40', null, undefined]) {
+        assert.ok(parsePurchase({ amount_gbp: bad }).error, String(bad));
+      }
+    });
+
+    await check('parsePurchase maps a legacy pack from a tab open across the deploy', async () => {
+      assert.equal(parsePurchase({ pack: 'small' }).gbp, 10);
+      assert.equal(parsePurchase({ pack: 'medium' }).gbp, 40);
+      assert.equal(parsePurchase({ pack: 'large' }).gbp, 120);
+      assert.ok(parsePurchase({ pack: 'huge' }).error);
+    });
+
+    await check('buxsFromMetadata: new buxs as is, a pre-deploy tokens purchase x2500', async () => {
+      assert.equal(buxsFromMetadata({ buxs: '1000000' }), 1_000_000);
+      assert.equal(buxsFromMetadata({ tokens: '100' }), 250_000);
+      assert.equal(buxsFromMetadata({ buxs: '1000000', tokens: '100' }), 1_000_000);
+      assert.ok(Number.isNaN(buxsFromMetadata({})));
+      assert.ok(Number.isNaN(buxsFromMetadata({ buxs: 'x' })));
     });
   } finally {
     await pool.query('DELETE FROM buxs_ledger WHERE owner = ANY($1)', [owners]);

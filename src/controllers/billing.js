@@ -1,22 +1,28 @@
-// Platform token billing: balance, ledger, fallback settings, and buying
-// packs through Stripe Checkout on the platform's account. Spending lives
-// with the features that spend (lib/tokens.js spend()); this file only ever
-// credits.
+// Platform billing: the property's BUXS balance (its org's wallet, see
+// lib/tokens.js), ledger, fallback settings, and buying BUXS by the pound
+// through Stripe on the platform's account. Spending lives with the
+// features that spend; this file only ever credits.
 const pool = require('../db');
 const tokens = require('../lib/tokens');
-const { stripe, CURRENCY, TOKEN_PACKS, isBillingConfigured, getPack, constructWebhookEvent } = require('../lib/platformStripe');
+const {
+  stripe, CURRENCY, TOKENS_PER_POUND, MIN_GBP, MAX_GBP, STEP_GBP,
+  isBillingConfigured, parsePurchase, buxsFromMetadata, constructWebhookEvent,
+} = require('../lib/platformStripe');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function billingResponse(row) {
+function billingResponse(balance, fallbackEmail) {
   return {
     configured: isBillingConfigured(),
-    balance: row.token_balance,
-    fallback_email: row.fallback_email,
+    balance,
+    fallback_email: fallbackEmail,
     starter_balance: tokens.STARTER_BALANCE,
     costs: tokens.TOKEN_COSTS,
     currency: CURRENCY.toUpperCase(),
-    packs: TOKEN_PACKS.map((p) => ({ id: p.id, tokens: p.tokens, amount: p.amount })),
+    min_gbp: MIN_GBP,
+    max_gbp: MAX_GBP,
+    step_gbp: STEP_GBP,
+    tokens_per_pound: TOKENS_PER_POUND,
     // Set (with PLATFORM_STRIPE_PUBLISHABLE_KEY) to let the dashboard take
     // payment in-page with Stripe Elements; when null it falls back to
     // redirecting to Stripe Checkout. Must be the same account as the
@@ -27,8 +33,11 @@ function billingResponse(row) {
 
 async function getBilling(req, res, next) {
   try {
-    const { rows } = await pool.query('SELECT token_balance, fallback_email FROM property WHERE id = $1', [req.property_id]);
-    res.json(billingResponse(rows[0]));
+    const [{ rows }, balance] = await Promise.all([
+      pool.query('SELECT fallback_email FROM property WHERE id = $1', [req.property_id]),
+      tokens.getBalance(req.property_id),
+    ]);
+    res.json(billingResponse(balance, rows[0].fallback_email));
   } catch (err) {
     next(err);
   }
@@ -49,10 +58,10 @@ async function updateBilling(req, res, next) {
       `UPDATE property SET
          fallback_email = CASE WHEN $1::boolean THEN $2::text ELSE fallback_email END
        WHERE id = $3
-       RETURNING token_balance, fallback_email`,
+       RETURNING fallback_email`,
       [fallback_email !== undefined, fallback_email?.trim() || null, req.property_id]
     );
-    res.json(billingResponse(rows[0]));
+    res.json(billingResponse(await tokens.getBalance(req.property_id), rows[0].fallback_email));
   } catch (err) {
     next(err);
   }
@@ -96,18 +105,25 @@ async function ensureStripeCustomer(propertyId) {
   return customer.id;
 }
 
-// Starts a Checkout Session for a pack. return_url is the dashboard page to
-// come back to; we append billing=success&session_id=... (Stripe fills the
-// placeholder) or billing=cancelled so the page can confirm/toast. The
-// property id and token count ride in metadata -- that's what the webhook
-// and confirmCheckout credit from, so nothing about the amount is trusted
-// from the client after this point.
+// What every purchase carries in Stripe metadata: the property (for the
+// confirm routes' ownership check), the wallet owner it credits, and the
+// BUXS it buys. Nothing about the amount is trusted from the client after
+// creation.
+async function purchaseMetadata(propertyId, purchase) {
+  return { property_id: propertyId, owner: await tokens.ownerOfProperty(propertyId), buxs: String(purchase.buxs) };
+}
+
+const describe = (purchase) => `${purchase.buxs.toLocaleString('en-GB')} BUXS`;
+
+// Starts a Checkout Session. return_url is the dashboard page to come back
+// to; we append billing=success&session_id=... (Stripe fills the
+// placeholder) or billing=cancelled so the page can confirm/toast.
 async function createCheckout(req, res, next) {
   try {
     if (!isBillingConfigured()) return res.status(503).json({ error: 'Billing is not configured on this server' });
-    const { pack: packId, return_url } = req.body ?? {};
-    const pack = getPack(packId);
-    if (!pack) return res.status(400).json({ error: `pack must be one of ${TOKEN_PACKS.map((p) => p.id).join(', ')}` });
+    const purchase = parsePurchase(req.body);
+    if (purchase.error) return res.status(400).json({ error: purchase.error });
+    const { return_url } = req.body ?? {};
     if (typeof return_url !== 'string' || !isHttpUrl(return_url)) return res.status(400).json({ error: 'return_url must be an http(s) URL' });
 
     const customer = await ensureStripeCustomer(req.property_id);
@@ -120,12 +136,12 @@ async function createCheckout(req, res, next) {
           quantity: 1,
           price_data: {
             currency: CURRENCY,
-            unit_amount: pack.amount,
-            product_data: { name: `${pack.tokens} tokens`, description: 'Prepaid usage tokens for AI replies and other metered features' },
+            unit_amount: purchase.amount,
+            product_data: { name: describe(purchase), description: 'Prepaid BUXS for AI replies, FORGE builds and other metered features' },
           },
         },
       ],
-      metadata: { property_id: req.property_id, tokens: String(pack.tokens), pack: pack.id },
+      metadata: await purchaseMetadata(req.property_id, purchase),
       client_reference_id: req.property_id,
       success_url: `${return_url}${sep}billing=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${return_url}${sep}billing=cancelled`,
@@ -137,46 +153,55 @@ async function createCheckout(req, res, next) {
 }
 
 // The Elements path: the dashboard collects the card in-page against this
-// intent's client_secret instead of redirecting to Checkout. metadata
-// carries property_id/tokens just like a Checkout Session's does -- after
-// creation the two flows credit identically and nothing about the amount is
-// trusted from the client.
+// intent's client_secret instead of redirecting to Checkout. After creation
+// the two flows credit identically.
 async function createPaymentIntent(req, res, next) {
   try {
     if (!isBillingConfigured()) return res.status(503).json({ error: 'Billing is not configured on this server' });
-    const pack = getPack(req.body?.pack);
-    if (!pack) return res.status(400).json({ error: `pack must be one of ${TOKEN_PACKS.map((p) => p.id).join(', ')}` });
+    const purchase = parsePurchase(req.body);
+    if (purchase.error) return res.status(400).json({ error: purchase.error });
 
     const customer = await ensureStripeCustomer(req.property_id);
     const intent = await stripe.paymentIntents.create({
-      amount: pack.amount,
+      amount: purchase.amount,
       currency: CURRENCY,
       customer,
-      metadata: { property_id: req.property_id, tokens: String(pack.tokens), pack: pack.id },
+      metadata: await purchaseMetadata(req.property_id, purchase),
       automatic_payment_methods: { enabled: true },
-      description: `${pack.tokens} tokens`,
+      description: describe(purchase),
     });
-    res.status(201).json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount: pack.amount, tokens: pack.tokens });
+    res.status(201).json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount: purchase.amount, buxs: purchase.buxs });
   } catch (err) {
     next(err);
   }
 }
 
-// Idempotent on the intent id -- stored in the ledger's unique
-// stripe_checkout_session_id column, which both purchase flows use as
-// "the Stripe object that paid" (cs_... or pi_...).
-async function creditFromIntent(intent) {
-  const propertyId = intent.metadata?.property_id;
-  const amount = Number.parseInt(intent.metadata?.tokens, 10);
+// Credits the Stripe object that paid (cs_… or pi_…), idempotent on its id.
+// A purchase made before the BUXS deploy has no `owner`: its property's
+// owner gets it, and buxsFromMetadata converts its old-unit `tokens`.
+async function creditPaid(stripeId, metadata, refId) {
+  const propertyId = metadata?.property_id;
+  const amount = buxsFromMetadata(metadata);
   if (!propertyId || !Number.isInteger(amount) || amount <= 0) {
-    throw new Error(`Payment intent ${intent.id} has no usable property_id/tokens metadata`);
+    throw new Error(`${stripeId} has no usable property_id/buxs metadata`);
   }
-  return tokens.credit(propertyId, amount, 'purchase', { refId: intent.id, checkoutSessionId: intent.id });
+  const owner = metadata.owner || (await tokens.ownerOfProperty(propertyId));
+  const result = await tokens.creditTo(owner, amount, 'purchase', { propertyId, refId, idemKey: stripeId });
+  return { ...result, buxs: amount };
 }
 
+const creditFromIntent = (intent) => creditPaid(intent.id, intent.metadata, intent.id);
+const creditFromSession = (session) => {
+  const paymentIntent = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id ?? null;
+  return creditPaid(session.id, session.metadata, paymentIntent);
+};
+
+// Old dashboards toast `tokens`; Plan B's reads `buxs`. Same number.
+const confirmed = (result) => ({ credited: result.credited, balance: result.balance, paid: true, buxs: result.buxs, tokens: result.buxs });
+
 // Called by the dashboard right after confirmPayment succeeds (or on the
-// return from a redirect-based payment method). Same belt-and-braces role
-// as confirmCheckout: idempotent against the webhook.
+// return from a redirect-based payment method). Idempotent against the
+// webhook.
 async function confirmPaymentIntent(req, res, next) {
   try {
     if (!isBillingConfigured()) return res.status(503).json({ error: 'Billing is not configured on this server' });
@@ -189,28 +214,15 @@ async function confirmPaymentIntent(req, res, next) {
     if (intent.status !== 'succeeded') {
       return res.json({ credited: false, paid: false, balance: await tokens.getBalance(req.property_id) });
     }
-    const result = await creditFromIntent(intent);
-    res.json({ ...result, paid: true, tokens: Number.parseInt(intent.metadata.tokens, 10) });
+    res.json(confirmed(await creditFromIntent(intent)));
   } catch (err) {
     next(err);
   }
 }
 
-// Shared by the webhook and confirmCheckout. Idempotent on session.id.
-async function creditFromSession(session) {
-  const propertyId = session.metadata?.property_id;
-  const amount = Number.parseInt(session.metadata?.tokens, 10);
-  if (!propertyId || !Number.isInteger(amount) || amount <= 0) {
-    throw new Error(`Checkout session ${session.id} has no usable property_id/tokens metadata`);
-  }
-  const paymentIntent = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id ?? null;
-  return tokens.credit(propertyId, amount, 'purchase', { refId: paymentIntent, checkoutSessionId: session.id });
-}
-
 // Called by the dashboard when Stripe sends the user back with
 // ?session_id=. Credits if paid and not already credited by the webhook --
-// so a local dev setup without webhook forwarding still works, and a live
-// one doesn't show a stale balance while the webhook is in flight.
+// so a local dev setup without webhook forwarding still works.
 async function confirmCheckout(req, res, next) {
   try {
     if (!isBillingConfigured()) return res.status(503).json({ error: 'Billing is not configured on this server' });
@@ -222,8 +234,7 @@ async function confirmCheckout(req, res, next) {
     if (session.payment_status !== 'paid') {
       return res.json({ credited: false, paid: false, balance: await tokens.getBalance(req.property_id) });
     }
-    const result = await creditFromSession(session);
-    res.json({ ...result, paid: true, tokens: Number.parseInt(session.metadata.tokens, 10) });
+    res.json(confirmed(await creditFromSession(session)));
   } catch (err) {
     next(err);
   }
@@ -231,7 +242,7 @@ async function confirmCheckout(req, res, next) {
 
 // Mounted with express.raw (see app.js). Acknowledges everything it can
 // verify; only a bad signature is a 4xx, so Stripe doesn't retry events we
-// simply don't act on.
+// simply don't act on. A failed credit is a 500 so Stripe retries it.
 async function handleStripeWebhook(req, res) {
   let event;
   try {
@@ -245,25 +256,25 @@ async function handleStripeWebhook(req, res) {
     if (session.payment_status === 'paid') {
       try {
         const result = await creditFromSession(session);
-        if (result.credited) console.log(`Credited ${session.metadata.tokens} tokens to property ${session.metadata.property_id} (${session.id})`);
+        if (result.credited) console.log(`Credited ${result.buxs} BUXS for property ${session.metadata.property_id} (${session.id})`);
       } catch (err) {
         console.error(`Failed to credit checkout session ${session.id}:`, err.message);
-        return res.status(500).json({ error: 'Credit failed' }); // let Stripe retry
+        return res.status(500).json({ error: 'Credit failed' });
       }
     }
   }
-  // The Elements flow. Only intents we created carry tokens metadata --
-  // a Checkout purchase's underlying intent doesn't (its metadata lives on
-  // the session), so a Checkout payment can't credit twice via both events.
+  // The Elements flow. Only intents we created carry buxs (or, before the
+  // BUXS deploy, tokens) metadata -- a Checkout purchase's underlying
+  // intent doesn't, so a Checkout payment can't credit twice via both events.
   if (event.type === 'payment_intent.succeeded') {
     const intent = event.data.object;
-    if (intent.metadata?.tokens) {
+    if (intent.metadata?.buxs || intent.metadata?.tokens) {
       try {
         const result = await creditFromIntent(intent);
-        if (result.credited) console.log(`Credited ${intent.metadata.tokens} tokens to property ${intent.metadata.property_id} (${intent.id})`);
+        if (result.credited) console.log(`Credited ${result.buxs} BUXS for property ${intent.metadata.property_id} (${intent.id})`);
       } catch (err) {
         console.error(`Failed to credit payment intent ${intent.id}:`, err.message);
-        return res.status(500).json({ error: 'Credit failed' }); // let Stripe retry
+        return res.status(500).json({ error: 'Credit failed' });
       }
     }
   }

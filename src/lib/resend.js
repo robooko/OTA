@@ -163,7 +163,7 @@ async function sendInquiryForward(inquiry, propertyName, toEmail, latestMessage 
   ].filter(([, v]) => v != null && v !== '');
   const body = latestMessage ?? inquiry.message ?? '';
   const heading = latestMessage ? `${inquiry.name} replied to their enquiry` : `New enquiry from ${inquiry.name}`;
-  const note = 'This was sent to you because your Forge account is out of AI reply tokens. Reply to this email to answer the guest directly, or top up under Settings > Billing to have replies drafted for you.';
+  const note = 'This was sent to you because your Forge account is out of BUXS. Reply to this email to answer the guest directly, or top up under Settings > Billing to have replies drafted for you.';
 
   const { data, error } = await client.emails.send({
     from: `Forge <inquiries@hotal.forge-build.co.uk>`,
