@@ -3413,7 +3413,7 @@ import { BBYC_SLUG } from "../lib/marina";
 const locale = (Astro.currentLocale ?? "en") as "en" | "fr";
 const t = ui[locale];
 
-const MAPS_API_KEY = "AIzaSyAXiQ_kVoJ0Iljn2N57NhR2gp-JvsmVKEk";
+const MAPS_API_KEY = "<GOOGLE_MAPS_BROWSER_KEY>";
 const BRAND_STYLE = "--brand-navy: #000000; --brand-gold: #2dd4bf; --brand-ink: #000000;";
 ---
 
