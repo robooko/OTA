@@ -428,19 +428,31 @@ async function importCore(dst, source, plan, opts) {
   const byOwner = (rows, ownerId) => rows.filter((r) => r.owner_id === ownerId);
 
   // 1. Re-run guard (R11, G5). The delete below cascades through every
-  // booking on these marinas, so once a guest has booked or enquired in OTA
-  // (Switch has happened) a commit must stop rather than erase them. A dry
-  // run reports the same thing and carries on, since nothing it writes is
-  // kept.
+  // booking on these marinas, so once OTA holds real work on them (Switch has
+  // happened) a commit must stop rather than erase it. That is a guest or
+  // staff booking, an enquiry, or OTA activity on an IMPORTED booking: staff
+  // can send its guest link, the guest then uploads and signs, and staff
+  // confirm or cancel. Imported rows keep Sidon's timestamps and the import's
+  // own rows share its transaction time (marina.created_at), so anything later
+  // is OTA's; so are documents and signatures with ids this import never made
+  // (a cascade would also orphan an uploaded file for good). A dry run reports
+  // the same thing and carries on, since nothing it writes is kept.
   const { rows: hits } = await dst.query(
     `SELECT m.id, m.sidon_owner_id,
             (SELECT count(*) FROM marina_booking b WHERE b.marina_id = m.id AND b.source <> 'import')::int AS bookings,
-            (SELECT count(*) FROM event_inquiry e WHERE e.marina_id = m.id)::int AS enquiries
-     FROM marina m WHERE m.sidon_owner_id = ANY($1)`, [ownerIds]);
-  const switched = hits.filter((h) => h.bookings || h.enquiries);
+            (SELECT count(*) FROM event_inquiry e WHERE e.marina_id = m.id)::int AS enquiries,
+            (SELECT count(*) FROM marina_booking b WHERE b.marina_id = m.id AND b.source = 'import'
+               AND (b.updated_at > m.created_at OR b.payment_status <> 'none'))::int
+          + (SELECT count(*) FROM marina_document d WHERE d.marina_id = m.id
+               AND (d.id <> ALL($2::uuid[]) OR d.submitted_at > m.created_at OR d.verified_at > m.created_at))::int
+          + (SELECT count(*) FROM marina_contract_signature s JOIN marina_booking b ON b.id = s.booking_id
+               WHERE b.marina_id = m.id AND s.id <> ALL($3::uuid[]))::int AS touched
+     FROM marina m WHERE m.sidon_owner_id = ANY($1)`,
+    [ownerIds, source.documents.map((d) => uid('document', d.id)), source.signatures.map((x) => uid('signature', x.id))]);
+  const switched = hits.filter((h) => h.bookings || h.enquiries || h.touched);
   if (switched.length) {
     const lines = switched.map((h) =>
-      `${alias(h.sidon_owner_id)} has ${h.bookings} non-import booking(s) and ${h.enquiries} enquiry(ies) in OTA: Switch has happened and a re-import would delete them`);
+      `${alias(h.sidon_owner_id)} has ${h.bookings} non-import booking(s), ${h.enquiries} enquiry(ies) and ${h.touched} imported row(s) changed in OTA: Switch has happened and a re-import would delete them`);
     if (opts.mode === 'commit') throw new ImportRefused(lines.join('; '));
     report.warnings.push(...lines.map((l) => `${l} (dry run continues; nothing is kept)`));
     // event_inquiry.marina_id has no ON DELETE, so the delete would fail on
@@ -786,9 +798,10 @@ async function importFiles(dst, source, plan, opts, report) {
 
   // R17: messages are personal data with no OTA table. One private JSON per
   // owner, any action (skipped owners included), named by alias so the
-  // path never shows an owner id.
+  // path never shows an owner id. Under marina-docs-archive/ so
+  // retentionOnce purges it after 90 days with the document archive.
   for (const [owner, rows] of Map.groupBy(source.messages, (m) => m.owner_id)) {
-    await docs.store.put(`marina-archive/messages-${alias(owner)}.json`, Buffer.from(JSON.stringify(rows)), 'application/json');
+    await docs.store.put(`marina-docs-archive/sidon-messages/${alias(owner)}.json`, Buffer.from(JSON.stringify(rows)), 'application/json');
     report.messages_exported += rows.length;
   }
 }

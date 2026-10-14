@@ -820,10 +820,10 @@ INSERT INTO sidon_fixture.marina_message (owner_id, sailor_email, sailor_name, d
         assert.equal(s.blobs.has(`marina-docs-archive/sidon/${alias(SK)}/5.png`), true);
         assert.equal(s.blobs.has(`marina-docs-archive/sidon/${alias(A)}/9.pdf`), false); // fetch failed: listed and warned, not stored
         assert.ok(report.warnings.some((w) => w.includes(`marina-docs-archive/sidon/${alias(A)}/9.pdf`)));
-        const msgs = s.blobs.get(`marina-archive/messages-${alias(A)}.json`);
+        const msgs = s.blobs.get(`marina-docs-archive/sidon-messages/${alias(A)}.json`);
         assert.equal(msgs.type, 'application/json');
         assert.deepEqual(JSON.parse(msgs.buf.toString()).map((m) => m.id).sort(), [1, 2]);
-        assert.equal(s.blobs.has(`marina-archive/messages-${alias(SK)}.json`), true); // skipped owners' messages too
+        assert.equal(s.blobs.has(`marina-docs-archive/sidon-messages/${alias(SK)}.json`), true); // skipped owners' messages too
         assert.equal(report.messages_exported, 3);
         assert.ok(![...s.blobs.keys()].some((p) => p.includes(A) || p.includes(SK)), 'owner id in a blob path');
         const imgPath = `marina-images/${P}/${uid('marina', A)}.webp`;
@@ -868,6 +868,70 @@ INSERT INTO sidon_fixture.marina_message (owner_id, sailor_email, sailor_name, d
         assert.equal(report.messages_exported, 0);
         assert.deepEqual(countsOf(report), [0, 4, 1, 0]);
         assert.equal(await imageUrl(), `${STORE}marina/${A}/1700000000000.webp`);
+      });
+    }
+
+    // ---- Final review: the re-run guard sees post-Switch work on IMPORTED rows ----
+    // After Switch, staff can send an imported booking's guest link; the guest
+    // then uploads and signs, and staff confirm or cancel. A re-run would
+    // cascade-delete all of it (and orphan the uploaded files), so a commit
+    // run must refuse. The import's marina.created_at is the reference: an
+    // imported row keeps Sidon's timestamps, anything later is OTA activity.
+    {
+      const I = require('./import-sidon-marina');
+      const O = 'org_fr_guard';
+      const at = new Date('2026-03-01T00:00:00Z');
+      const src = {
+        profiles: [{ owner_id: O, slug: 'fr-guard', name: 'FR Guard', lat: null, lng: null, description: null, phone: null, email: null,
+          website: null, response_window_hours: null, currency: 'eur', updated_at: at }],
+        layouts: [], overlays: [],
+        berths: [{ id: 9901, owner_id: O, berth_id: 'G1', overlay_id: null, lat: null, lng: null, length_m: 12, min_length_m: null, beam_m: 4,
+          depth_m: null, status: 'available', guest_name: null, notes: null, price_per_night: 5, price_mode: 'per_metre', rotation: null }],
+        tiers: [],
+        bookings: [{ id: 9902, owner_id: O, berth_id: 'G1', sailor_name: 'Guard Sailor', sailor_email: 'guard.sailor@example.com', boat_name: 'Guard',
+          boat_loa: 10, boat_beam: 3, arrival_date: '2031-05-01', departure_date: '2031-05-04', notes: null, status: 'confirmed',
+          payment_intent_id: null, amount_cents: 10000, expires_at: null, created_at: at, updated_at: at }],
+        requirements: [], documents: [], templates: [], signatures: [], pois: [], images: [], messages: [],
+      };
+      const map = { owners: { [O]: { action: 'create', name: 'FR Guard Co', timezone: 'UTC', clerk_org_id: 'org_check_fr_guard' } } };
+      const run = async (mode = 'commit') => I.importSidon(db, src, I.planMapping(src, map, await I.readTargets(db, src, map)), { mode, target: 'local', files: false });
+      const B = I.uid('booking', 9902);
+      const MID = I.uid('marina', O);
+      // The whole check runs in one transaction (now() never moves), so age
+      // the import instead of waiting for a later write.
+      const importedAnHourAgo = async () => { await run(); await db.query("UPDATE marina SET created_at = created_at - interval '1 hour' WHERE id = $1", [MID]); };
+      const refused = async (label) => {
+        await assert.rejects(run(), (e) => e instanceof I.ImportRefused && e.message.includes(I.alias(O)), `${label}: commit refused`);
+        const dry = await run('dry-run');
+        assert.ok(dry.warnings.some((w) => w.includes(I.alias(O))), `${label}: dry run warns`);
+      };
+
+      await check('guard: an unchanged re-run still passes', async () => {
+        await importedAnHourAgo();
+        await run();
+      });
+      await check('guard: a staff change to an imported booking refuses a commit re-run', async () => {
+        await importedAnHourAgo();
+        await db.query("UPDATE marina_booking SET status = 'cancelled', updated_at = now() WHERE id = $1", [B]);
+        await refused('staff change');
+      });
+      await check('guard: a payment on an imported booking refuses a commit re-run', async () => {
+        await importedAnHourAgo();
+        await db.query("UPDATE marina_booking SET payment_status = 'held' WHERE id = $1", [B]);
+        await refused('payment');
+      });
+      await check('guard: a guest upload or signature on an imported booking refuses a commit re-run', async () => {
+        await importedAnHourAgo();
+        await db.query(
+          `INSERT INTO marina_document (property_id, marina_id, booking_id, type, blob_pathname, file_name, content_type, size_bytes)
+           SELECT property_id, marina_id, id, 'passport', 'marina-docs/x/y/z.pdf', 'p.pdf', 'application/pdf', 1 FROM marina_booking WHERE id = $1`, [B]);
+        await refused('upload');
+      });
+      await check('guard: a contract agreed on an imported booking refuses a commit re-run', async () => {
+        await importedAnHourAgo();
+        await db.query(
+          `INSERT INTO marina_contract_signature (property_id, booking_id, rendered_body) SELECT property_id, id, 'Agreed' FROM marina_booking WHERE id = $1`, [B]);
+        await refused('signature');
       });
     }
 
