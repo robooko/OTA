@@ -75,8 +75,10 @@ function loadMap(path) {
     if (e.currency_decision != null && !DECISIONS.has(e.currency_decision)) throw new ImportRefused(`${at}: unknown currency_decision`);
     if (e.action === 'property' && typeof e.property_id !== 'string') throw new ImportRefused(`${at}: property_id is required`);
     if (e.action === 'create') {
-      // Without an org the owner's first sign-in auto-creates a second, empty property.
-      if (!e.clerk_org_id) throw new ImportRefused(`${at}: clerk_org_id is required for create`);
+      // Without an org the owner's first sign-in auto-creates a second, empty
+      // property, so "no org" must be said explicitly: clerk_org_id: null
+      // means an API-key-only property nobody signs in to.
+      if (e.clerk_org_id !== null && !e.clerk_org_id) throw new ImportRefused(`${at}: clerk_org_id is required for create (null for an API-key-only property)`);
       if (!e.name || !e.timezone) throw new ImportRefused(`${at}: name and timezone are required for create`);
     }
     if (e.action === 'skip' && !e.reason) throw new ImportRefused(`${at}: skip needs a reason`);

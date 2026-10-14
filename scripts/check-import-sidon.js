@@ -172,6 +172,8 @@ INSERT INTO sidon_fixture.marina_message (owner_id, sailor_email, sailor_name, d
       assert.throws(() => I.loadMap(bad), I.ImportRefused);
       assert.throws(() => I.loadMap(mapFile({ [FOX]: { action: 'property', property_id: BBP, currency_decision: 'reprice' } })), /reprice/);
       assert.throws(() => I.loadMap(mapFile({ [FOX]: { action: 'create', name: 'X', timezone: 'Europe/Rome' } })), /clerk_org_id/);
+      assert.throws(() => I.loadMap(mapFile({ [FOX]: { action: 'create', name: 'X', timezone: 'Europe/Rome', clerk_org_id: '' } })), /clerk_org_id/);
+      assert.equal(I.loadMap(mapFile({ [FOX]: { action: 'create', name: 'X', timezone: 'Europe/Rome', clerk_org_id: null } })).owners[FOX].clerk_org_id, null);
       assert.throws(() => I.loadMap(mapFile({ [FOX]: { action: 'merge' } })), /unknown action/);
       assert.equal(I.loadMap(mapFile(baseMap())).owners[BB].property_id, BBP);
     });
