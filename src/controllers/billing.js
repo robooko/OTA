@@ -5,7 +5,7 @@
 const pool = require('../db');
 const tokens = require('../lib/tokens');
 const {
-  stripe, CURRENCY, TOKENS_PER_POUND, MIN_GBP, MAX_GBP, STEP_GBP,
+  stripe, CURRENCY, TOKENS_PER_POUND, MIN_GBP, MAX_GBP, STEP_GBP, LEGACY_PACK_GBP,
   isBillingConfigured, parsePurchase, buxsFromMetadata, constructWebhookEvent,
 } = require('../lib/platformStripe');
 
@@ -23,6 +23,9 @@ function billingResponse(balance, fallbackEmail) {
     max_gbp: MAX_GBP,
     step_gbp: STEP_GBP,
     tokens_per_pound: TOKENS_PER_POUND,
+    // The pre-slider dashboard lists these and breaks without them; it posts
+    // { pack }, which parsePurchase maps. Drop once Plan B's dashboard is live.
+    packs: Object.entries(LEGACY_PACK_GBP).map(([id, gbp]) => ({ id, tokens: gbp * TOKENS_PER_POUND, amount: gbp * 100 })),
     // Set (with PLATFORM_STRIPE_PUBLISHABLE_KEY) to let the dashboard take
     // payment in-page with Stripe Elements; when null it falls back to
     // redirecting to Stripe Checkout. Must be the same account as the

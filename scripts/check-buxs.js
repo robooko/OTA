@@ -13,6 +13,8 @@ const pool = require('../src/db');
 const tokens = require('../src/lib/tokens');
 const { parsePurchase, buxsFromMetadata } = require('../src/lib/platformStripe');
 const { planOrgMoves, planUserMoves } = require('../src/lib/clerkBuxsMove');
+const billing = require('../src/controllers/billing');
+const { reconcileAfterMigration } = require('../src/lib/buxsReconcile');
 const app = require('../src/app');
 
 (async () => {
@@ -197,6 +199,36 @@ const app = require('../src/app');
       ]);
     });
 
+    await check('GET /api/billing still lists packs for a dashboard that predates the slider', async () => {
+      const p = await newProperty(newOrg());
+      const res = { status() { return this; }, json(b) { this.body = b; } };
+      await billing.getBilling({ property_id: p }, res, (e) => { throw e; });
+      assert.deepEqual(res.body.packs, [
+        { id: 'small', tokens: 250_000, amount: 1000 },
+        { id: 'medium', tokens: 1_000_000, amount: 4000 },
+        { id: 'large', tokens: 3_000_000, amount: 12000 },
+      ]);
+      assert.equal(res.body.tokens_per_pound, 25_000);
+    });
+
+    await check('reconcile moves old-code credits made after the migration, once', async () => {
+      const o = newOrg();
+      const p = await newProperty(o);
+      const late = (delta, reason, stripeId) => pool.query(
+        `INSERT INTO property_token_ledger (property_id, delta, balance_after, reason, stripe_checkout_session_id, created_at)
+         VALUES ($1, $2, $2, $3, $4, now() + interval '1 second')`, [p, delta, reason, stripeId]);
+      await late(100, 'purchase', `cs_check_${hex()}`);
+      await late(20, 'starter', null);
+      await late(-1, 'ai_reply', null); // spends after the migration stay lost, in the customer's favour
+      const first = await reconcileAfterMigration();
+      assert.ok(first.moved >= 2);
+      assert.equal(await tokens.getBalance(p), 120 * 2500);
+      await reconcileAfterMigration();
+      assert.equal(await tokens.getBalance(p), 120 * 2500);
+      const rows = await ledgerRows(o);
+      assert.equal(rows.filter((r) => r.reason === 'purchase' && /^cs_check_/.test(r.idem_key)).length, 1);
+    });
+
     const server = app.listen(0);
     const base = `http://127.0.0.1:${server.address().port}`;
     const api = async (method, path, { body, secret = 'check-service-secret' } = {}) => {
@@ -258,6 +290,7 @@ const app = require('../src/app');
   } finally {
     await pool.query('DELETE FROM buxs_ledger WHERE owner = ANY($1)', [owners]);
     await pool.query('DELETE FROM buxs_wallet WHERE owner = ANY($1)', [owners]);
+    await pool.query('DELETE FROM property_token_ledger WHERE property_id = ANY($1)', [properties]);
     await pool.query('DELETE FROM property WHERE id = ANY($1)', [properties]);
     await pool.end();
   }

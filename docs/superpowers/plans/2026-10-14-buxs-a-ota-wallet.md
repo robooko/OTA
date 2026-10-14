@@ -1444,6 +1444,12 @@ Expected: `DATABASE_URL: ok` (already applied, a no-op) and `DATABASE_URL_LIVE: 
 
 Then immediately: `git push origin main` (Render deploys `main`).
 
+- [ ] **Step 2b: Reconcile the migration-to-deploy window** (added after the final review)
+
+Once Render reports the new deploy live:
+Run: `node -r dotenv/config scripts/reconcile-buxs-migration.js --live`
+Expected: `checked <n> old-ledger credit(s) since the migration, moved <m>`; a second run moves 0. Also the recovery path if the deploy fails after the migration.
+
 - [ ] **Step 3: Verify live**
 
 Run Task 1 Step 3's query with `DATABASE_URL=$DATABASE_URL_LIVE` in front.
