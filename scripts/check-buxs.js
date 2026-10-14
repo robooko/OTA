@@ -12,6 +12,7 @@ process.env.BUXS_SERVICE_SECRET = 'check-service-secret';
 const pool = require('../src/db');
 const tokens = require('../src/lib/tokens');
 const { parsePurchase, buxsFromMetadata } = require('../src/lib/platformStripe');
+const { planOrgMoves, planUserMoves } = require('../src/lib/clerkBuxsMove');
 const app = require('../src/app');
 
 (async () => {
@@ -161,6 +162,39 @@ const app = require('../src/app');
       assert.equal(buxsFromMetadata({ buxs: '1000000', tokens: '100' }), 1_000_000);
       assert.ok(Number.isNaN(buxsFromMetadata({})));
       assert.ok(Number.isNaN(buxsFromMetadata({ buxs: 'x' })));
+    });
+
+    await check('planOrgMoves: every org with a positive budget, nothing else', async () => {
+      const plan = planOrgMoves([
+        { id: 'org_a', name: 'Robs', privateMetadata: { tokenBudget: 2250000 } },
+        { id: 'org_b', name: 'Empty', privateMetadata: { tokenBudget: 0 } },
+        { id: 'org_c', name: 'None', privateMetadata: {} },
+        { id: 'org_d', name: 'Junk', privateMetadata: { tokenBudget: 'lots' } },
+        { id: 'org_e', name: 'Fraction', privateMetadata: { tokenBudget: 10.7 } },
+      ]);
+      assert.deepEqual(plan, [
+        { owner: 'org_a', amount: 2250000, idemKey: 'clerk-org:org_a', label: 'Robs' },
+        { owner: 'org_e', amount: 10, idemKey: 'clerk-org:org_e', label: 'Fraction' },
+      ]);
+    });
+
+    await check('planUserMoves: larger of private/unsafe, oldest org, no-org users skipped', async () => {
+      const users = [
+        { id: 'user_1', privateMetadata: { tokenBudget: 30000 }, unsafeMetadata: { tokenBudget: 50000 } },
+        { id: 'user_2', privateMetadata: {}, unsafeMetadata: { tokenBudget: 1200 } },
+        { id: 'user_3', privateMetadata: {}, unsafeMetadata: {} },
+      ];
+      const memberships = new Map([
+        ['user_1', [
+          { createdAt: 200, organization: { id: 'org_new' } },
+          { createdAt: 100, organization: { id: 'org_old' } },
+        ]],
+        ['user_2', []],
+      ]);
+      assert.deepEqual(planUserMoves(users, memberships), [
+        { userId: 'user_1', owner: 'org_old', amount: 50000, idemKey: 'clerk-user:user_1' },
+        { userId: 'user_2', amount: 1200, skipped: 'no organisation yet' },
+      ]);
     });
 
     const server = app.listen(0);
