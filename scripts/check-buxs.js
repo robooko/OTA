@@ -129,6 +129,7 @@ const app = require('../src/app');
       assert.equal(rows[0].reason, 'starter');
       assert.equal(typeof rows[0].delta, 'number');
       assert.equal(rows[0].property_id, p);
+      assert.equal(rows[0].property_name, 'BUXS Check');
     });
 
     await check('HOTAL costs are in BUXS', async () => {

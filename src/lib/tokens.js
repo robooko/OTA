@@ -159,9 +159,11 @@ async function grantStarter(propertyId) {
 async function listLedger(propertyId, limit = 50) {
   const owner = await ownerOfProperty(propertyId);
   const { rows } = await pool.query(
-    `SELECT id, delta, balance_after, reason, ref_id, source, property_id, created_at
-     FROM buxs_ledger WHERE owner = $1
-     ORDER BY created_at DESC, id DESC LIMIT $2`,
+    `SELECT l.id, l.delta, l.balance_after, l.reason, l.ref_id, l.source, l.property_id,
+            p.name AS property_name, l.created_at
+     FROM buxs_ledger l LEFT JOIN property p ON p.id = l.property_id
+     WHERE l.owner = $1
+     ORDER BY l.created_at DESC, l.id DESC LIMIT $2`,
     [owner, limit]
   );
   return rows.map((r) => ({ ...r, delta: Number(r.delta), balance_after: Number(r.balance_after) }));
