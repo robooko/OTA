@@ -61,7 +61,12 @@ Nothing user-visible changes.
 
 1. ⚠ Push O `main` (plan D's importer, seed option and this runbook; plan C's OTA changes are already live): `git -C O push origin main`. Render deploys. Check that `GET /api/marina/marinas` (bearer) answers 200.
 2. D `main` (plan C dashboard) is already live. `/marina` shows the interim page for every property until a property has an active OTA marina.
-3. ⚠ Set `OTA_BASE_URL` (the OTA origin) and `OTA_API_KEY` (that property's key from the dashboard org modal) in Vercel **Preview only** for PB, TT, SEA and MP. Production stays without them until Step 6, so the kill switch keeps Production unchanged even if a branch were merged early. For MP and PO, first run ⚠ `gh repo create robooko/marina-di-positano --private --source . --push` (and `robooko/portals` the same way), from that repo.
+3. ⚠ Set `OTA_BASE_URL` (the OTA origin) in Vercel **Preview only** for PB, TT, SEA and MP, and `OTA_API_KEY` (that property's key from the dashboard org modal) where the site doesn't have it yet. **PB and TT already use `OTA_API_KEY` for their PMS pages (rooms, dining, reservations): confirm it is that marina's property key and never remove it.** `OTA_BASE_URL` is the kill switch on every site. Production stays without `OTA_BASE_URL` until Step 6, so the kill switch keeps Production unchanged even if a branch were merged early.
+   For MP and PO, which have no remote yet, ⚠ create the private repo from `master`, then push the branch, so `master` stays the default branch and nothing switch-related is on it:
+   ```bash
+   cd /c/Users/robert/source/repos/marina-di-positano && git switch master && gh repo create robooko/marina-di-positano --private --source . --push && git push origin cutover/switch
+   cd /c/Users/robert/source/repos/portals && git switch master && gh repo create robooko/portals --private --source . --push && git push origin cutover/switch
+   ```
 4. ⚠ Push each consumer `cutover/switch` (PB, TT, SEA, MP, PO) and open a PR. Use `gh pr create --base master --head cutover/switch --title "Marina booking on OTA" --body-file <notes>`, with the body from the task's commit message. Each Preview deploy must build. Booking appears only once the map and import exist, so the Preview shows the fallback until Step 5.
 5. ⚠ Push SA `cutover/switch` and open its PR (not merged).
 
@@ -134,9 +139,11 @@ All commands run from O.
 
 1. Counts match Step 4 (the report, plus the dashboard `/marina-bookings` totals per marina).
 2. Each consumer's Preview deploy (Step 1) now renders berths through its forwarder: `curl -s https://<preview>/api/marina/guest/<slug> | head -c 200` shows `"marina"`.
-3. End-to-end on Pirates Bight's Preview with Stripe test keys:
-   - hold → card → pending → booking page (from the email link) → upload → verify in `/marina-bookings` → contract → confirm → capture;
+3. ⚠ End-to-end on Pirates Bight's Preview. This writes to live OTA (a guest booking, Stripe calls on the property's keys, Resend email), so run it only after the final live import (Step 4.4):
+   - ⚠ First set Pirates Bight's `booking_url` (Settings → Marina) to `<PB preview origin>/booking?booking={id}&token={token}`. OTA only emails a booking link when `booking_url` is set.
+   - hold → card → pending → booking page (from the email link) → upload → verify in `/marina-bookings` → contract → confirm → capture. If the property's Stripe keys are live, use a real card and refund it afterwards in `/marina-bookings` (cancel & refund).
    - then a guest cancel, a hold left to expire (sweep), and the closed-tab case (close the tab after the card step, reopen the booking link, and payment resumes).
+   - Afterwards: cancel every test booking. They are guest bookings on an imported marina, so the importer now refuses any re-import (R11); a re-import would need them deleted by hand first (⚠). Step 6.5 replaces the Preview `booking_url` with the production one.
 4. The dashboard `/marina` for each created property's org shows tiles and the staff map, and the nav shows Marina.
 
 ## Step 6 — Switch
@@ -145,7 +152,7 @@ In this order, each ⚠:
 
 1. Check that each consumer `cutover/switch` carries its 1.1.0 lockfile (see Branches).
 2. Fill in SM `cutover/switch`'s `MARINA_SITES` values with the production origins (one commit on that branch, `node scripts/check-cutover.ts && npm run build`).
-3. Set `OTA_BASE_URL` and `OTA_API_KEY` in Vercel **Production** for PB, TT, SEA and MP.
+3. Set `OTA_BASE_URL` in Vercel **Production** for PB, TT, SEA and MP, and `OTA_API_KEY` where the site doesn't have it yet (PB and TT already do, for their PMS pages: confirm, never remove).
 4. Merge the consumer PRs: PB, TT, SEA and MP (`gh pr merge --merge`). Vercel deploys each. Merge PO's too, but don't deploy it (it has no Vercel project).
 5. Set each marina's `booking_url` in the dashboard (Settings → Marina):
 
@@ -175,15 +182,19 @@ In this order, each ⚠:
 2. Two weeks after Switch: ⚠ push and merge D `cutover/cleanup` (Vercel deploys), then ⚠ O `cutover/cleanup` (`git -C O push origin cutover/cleanup`, then `git -C O switch main && git -C O merge --no-edit cutover/cleanup && git -C O push origin main`; Render deploys).
 3. After the O cleanup deploy is live: ⚠ the user runs the column-drop migration on both DBs: `node scripts/run-migration.js src/db/migrate-2026-10-12-drop-sidon-columns.sql` (it hits `DATABASE_URL` and `DATABASE_URL_LIVE`).
 4. Keep Sidon's DB read-only for 90 days after Switch, then ⚠ delete it (Neon), and remove `SIDON_DATABASE_URL` from O `.env`.
-5. The archive copies under `marina-docs-archive/` are purged 90 days after import (⚠ delete with the same `list`/`del` pattern, prefix `marina-docs-archive/`, on OTA's private store).
+5. The archive under `marina-docs-archive/` (the 32 document copies and the `sidon-messages/` export, which holds sailor names, emails and message bodies) is purged automatically 90 days after import by OTA's daily retention job. Nothing to do; check it is gone after 90 days.
 
 ## Rollback (until step 7)
 
-1. ⚠ Revert the consumer merges (`git revert -m 1 <merge sha>` on each site's `master`, then push) and remove `OTA_API_KEY` from their Production env (kill switch). Redeploy.
-2. ⚠ Revert O's `cutover/switch` merge on `main` and push. That restores `GET /api/marina/sidon-bookings` and the old `list_marina_bookings`.
-3. ⚠ In the dashboard Settings, set the imported marinas to inactive, so `/marina` falls back to the interim page.
-4. ⚠ Lift the freeze: revert SM's `cutover/switch` and `cutover/freeze` merges on `master` and push.
-5. Bookings made in OTA in between are re-entered in Sidon by hand (none are expected). A re-import after rollback is refused once OTA holds a guest booking or enquiry on an imported marina (R11). Delete those by hand first, with the user's go-ahead.
+In this order, so nothing reverted calls a Sidon that still refuses it:
+
+1. ⚠ Lift the freeze first: revert SM's `cutover/switch` and `cutover/freeze` merges on `master` and push. Vercel deploys; check `/api/marina/*` writes work again and `/m/<slug>` renders.
+2. ⚠ Restore the old site env vars removed at Step 6.9 (PB `SIDON_URL`, `SIDON_API_KEY`; TT `SIDON_URL`, `SIDON_APIKEY`, `PUBLIC_SIDON_MARINA_ID`, `PUBLIC_SIDON_ORIGIN`; SEA `SIDON_URL`, `PUBLIC_SIDON_ORIGIN`, `NODE_AUTH_TOKEN`; MP `SIDON_URL`, `PUBLIC_SIDON_ORIGIN`, `NODE_AUTH_TOKEN`) and sidon-ai's five removed at Step 6.8.
+3. ⚠ Revert the consumer merges (`git revert -m 1 <merge sha>` on each site's `master`, then push) and remove `OTA_BASE_URL` from their Production env (the kill switch; never remove PB's or TT's `OTA_API_KEY`, which their PMS pages need). Redeploy each.
+4. ⚠ Revert sidon-ai's merge on its `master` and push (Vercel deploys).
+5. ⚠ Revert O's `cutover/switch` merge on `main` and push. That restores `GET /api/marina/sidon-bookings` and the old `list_marina_bookings`.
+6. ⚠ In the dashboard Settings, set the imported marinas to inactive, so `/marina` falls back to the interim page.
+7. Bookings made in OTA in between are re-entered in Sidon by hand (none are expected). A re-import after rollback is refused once OTA holds a guest booking, an enquiry, or any change to an imported booking, document or contract on an imported marina (R11). Delete those by hand first, with the user's go-ahead.
 
 ## Notes (spec amendments)
 
