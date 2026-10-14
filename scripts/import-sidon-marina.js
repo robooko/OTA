@@ -11,6 +11,11 @@ require('../src/db'); // DATE as 'YYYY-MM-DD' strings, for every pg client in th
 const crypto = require('crypto');
 const fs = require('fs');
 const { Client } = require('pg');
+const { emailKey } = require('../src/lib/spaBookingGuard');
+const { propertyToday } = require('../src/lib/marinaQueries');
+const { STARTER_BALANCE } = require('../src/lib/tokens'); // the pool behind it is lazy; nothing connects
+const { unknownPlaceholders } = require('../src/lib/marinaContracts');
+const docs = require('../src/lib/marinaDocuments');
 
 class ImportRefused extends Error {}
 
@@ -276,36 +281,291 @@ function formatPlan(plan) {
   return out.join('\n');
 }
 
+// ── Writing: one target transaction, owned by the caller ──
+
+const nz = (v) => (v === '' ? null : v); // two Sidon profiles store '' for "not set"
+const round2 = (n) => (n == null ? null : Math.round(Number(n) * 100) / 100); // Sidon's float4 noise -> NUMERIC(…,2)
+const BERTH_STATUS = { available: 'active', occupied: 'active', reserved: 'active', maintenance: 'maintenance' };
+const zeroCounts = () => ({
+  pontoons: 0, berths: 0, berths_duplicate: 0, pontoon_nulled: 0,
+  tiers: 0, requirements: 0, templates: 0, pois: 0, images: 0,
+  bookings: 0, bookings_no_berth: 0, bookings_overlap: 0, pending_expired: 0, emails_nulled: 0,
+  occupancy: 0, occupancy_overlap: 0, signatures: 0,
+  documents_copied: 0, documents_not_copied: 0, documents_sailor_docs: 0, documents_fetch_failed: 0,
+});
+
+async function importSidon(dst, source, plan, opts) {
+  if (plan.refusals.length) throw new ImportRefused(plan.refusals.join('; '));
+  const report = {
+    mode: opts.mode, target: opts.target, files: opts.files,
+    properties: [], marinas: [], rekeys: [], skips: [], currencyFlags: plan.currencyFlags,
+    unknownPlaceholders: [], archived: [], sailor_docs_unlinked: 0, messages_exported: 0, warnings: [],
+  };
+  const importing = plan.owners.filter((o) => o.action === 'import');
+  const ownerIds = importing.map((o) => o.owner_id);
+  const byOwner = (rows, ownerId) => rows.filter((r) => r.owner_id === ownerId);
+
+  // 1. Re-run guard (R11, G5). The delete below cascades through every
+  // booking on these marinas, so once a guest has booked or enquired in OTA
+  // (Switch has happened) a commit must stop rather than erase them. A dry
+  // run reports the same thing and carries on, since nothing it writes is
+  // kept.
+  const { rows: hits } = await dst.query(
+    `SELECT m.id, m.sidon_owner_id,
+            (SELECT count(*) FROM marina_booking b WHERE b.marina_id = m.id AND b.source <> 'import')::int AS bookings,
+            (SELECT count(*) FROM event_inquiry e WHERE e.marina_id = m.id)::int AS enquiries
+     FROM marina m WHERE m.sidon_owner_id = ANY($1)`, [ownerIds]);
+  const switched = hits.filter((h) => h.bookings || h.enquiries);
+  if (switched.length) {
+    const lines = switched.map((h) =>
+      `${alias(h.sidon_owner_id)} has ${h.bookings} non-import booking(s) and ${h.enquiries} enquiry(ies) in OTA: Switch has happened and a re-import would delete them`);
+    if (opts.mode === 'commit') throw new ImportRefused(lines.join('; '));
+    report.warnings.push(...lines.map((l) => `${l} (dry run continues; nothing is kept)`));
+    // event_inquiry.marina_id has no ON DELETE, so the delete would fail on
+    // it; unlinking inside this rolled-back transaction lets the rehearsal finish.
+    await dst.query('UPDATE event_inquiry SET marina_id = NULL WHERE marina_id = ANY($1)', [switched.map((h) => h.id)]);
+  }
+
+  // 2. Properties. A reused one is never written (G3): its currency,
+  // timezone and interim sidon_marina_id stay exactly as staff set them.
+  const propertyIdOf = new Map();
+  const todayOf = new Map();
+  for (const p of plan.properties) {
+    let id = p.property_id;
+    if (p.create) {
+      id = (await dst.query(
+        `INSERT INTO property (name, clerk_org_id, currency, timezone, api_key, api_key_enabled, sidon_marina_id)
+         VALUES ($1, $2, $3, $4, $5, true, $6) RETURNING id`,
+        [p.create.name, p.create.clerk_org_id, p.create.currency.toUpperCase(), p.create.timezone,
+          'prop_' + crypto.randomBytes(32).toString('hex'), p.owners[0]])).rows[0].id;
+      // grantStarter() opens its own pool connection, which is bound to
+      // DATABASE_URL even under --live and sits outside this transaction, so
+      // the same two writes are made here instead.
+      if (STARTER_BALANCE > 0) {
+        const { rows: [{ token_balance }] } = await dst.query(
+          'UPDATE property SET token_balance = token_balance + $2 WHERE id = $1 RETURNING token_balance', [id, STARTER_BALANCE]);
+        await dst.query(
+          `INSERT INTO property_token_ledger (property_id, delta, balance_after, reason) VALUES ($1, $2, $3, 'starter')`,
+          [id, STARTER_BALANCE, token_balance]);
+      }
+    }
+    propertyIdOf.set(p.key, id);
+    todayOf.set(id, await propertyToday(dst, id));
+    report.properties.push({ key: p.key, property_id: id, created: !!p.create, today: todayOf.get(id) });
+  }
+
+  // 3. Everything under the mapped marinas goes; every child FK cascades.
+  await dst.query('DELETE FROM marina WHERE sidon_owner_id = ANY($1)', [ownerIds]);
+
+  // 4. Each importing owner's marina and catalogue, under ids derived from
+  // Sidon's (R10), so a re-run lands on the same rows.
+  const marinas = new Map();
+  const rekeyTo = new Map(plan.owners.filter((o) => o.action === 'rekey').map((o) => [o.owner_id, o.rekey_to]));
+  const marinaOf = (ownerId) => marinas.get(rekeyTo.get(ownerId) ?? ownerId);
+  const overlayIds = new Set(source.overlays.map((ov) => ov.id));
+  const berthIds = new Map();
+  const requirementIds = new Map();
+  const templateIds = new Map();
+
+  const insertBerth = async (m, b) => {
+    // One label per marina: a re-keyed owner's copy of a target berth is a duplicate, not a second berth (R13).
+    if (m.labels.has(b.berth_id)) { m.counts.berths_duplicate++; return; }
+    let pontoonId = null;
+    if (b.overlay_id != null) {
+      pontoonId = m.pontoons.get(b.overlay_id) ?? null;
+      // An id with no overlay at all is plain NULL. One that exists but belongs to another owner is counted,
+      // because it means that owner's map drew this berth.
+      if (!pontoonId && overlayIds.has(b.overlay_id)) m.counts.pontoon_nulled++;
+    }
+    const status = BERTH_STATUS[b.status];
+    if (!status) report.warnings.push(`${m.alias}: berth ${b.id} has unknown status '${b.status}', imported as inactive`);
+    const id = uid('berth', b.id);
+    await dst.query(
+      `INSERT INTO marina_berth (id, property_id, marina_id, pontoon_id, label, lat, lng, rotation, length_m, min_length_m, beam_m, depth_m,
+         price_per_night, price_mode, notes, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+      [id, m.property_id, m.id, pontoonId, b.berth_id, b.lat, b.lng, b.rotation,
+        round2(b.length_m), round2(b.min_length_m), round2(b.beam_m), round2(b.depth_m),
+        m.prices === 'drop' ? null : round2(b.price_per_night), nz(b.price_mode) ?? 'per_metre', nz(b.notes), status ?? 'inactive']);
+    m.labels.set(b.berth_id, id);
+    berthIds.set(b.id, { id, marina: m });
+    m.counts.berths++;
+  };
+
+  const insertRequirement = async (m, r) => {
+    let fields;
+    try { fields = JSON.parse(r.schema); } catch { throw new ImportRefused(`${m.alias}: requirement ${r.id} has a schema that is not JSON`); }
+    const id = uid('requirement', r.id);
+    await dst.query(
+      `INSERT INTO marina_doc_requirement (id, property_id, marina_id, type, name, description, fields, mandatory, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      // pg would send a JS array as a Postgres array, so JSONB gets text.
+      [id, m.property_id, m.id, r.type, r.name, nz(r.description), JSON.stringify(fields ?? []), r.mandatory === 1, r.sort_order ?? 0]);
+    requirementIds.set(r.id, id);
+    m.reqTypes.add(r.type);
+    m.counts.requirements++;
+  };
+
+  const insertTemplate = async (m, t) => {
+    const id = uid('template', t.id);
+    await dst.query(
+      `INSERT INTO marina_contract_template (id, property_id, marina_id, name, body_markdown, min_nights, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [id, m.property_id, m.id, t.name, t.body_markdown, t.min_nights ?? 0, t.active === 1 ? 'active' : 'inactive', t.created_at]);
+    templateIds.set(t.id, id);
+    m.counts.templates++;
+    const fields = unknownPlaceholders(t.body_markdown);
+    if (fields.length) report.unknownPlaceholders.push({ alias: alias(t.owner_id), template_id: id, fields });
+  };
+
+  for (const o of importing) {
+    const prof = source.profiles.find((p) => p.owner_id === o.owner_id);
+    if (!prof) throw new ImportRefused(`${o.alias} has no marina_profile to import (map it to rekey or skip)`);
+    const lay = source.layouts.find((l) => l.owner_id === o.owner_id);
+    const pid = propertyIdOf.get(o.property_key);
+    const m = {
+      id: uid('marina', o.owner_id), property_id: pid, owner_id: o.owner_id, alias: o.alias, prices: o.prices,
+      counts: zeroCounts(), pontoons: new Map(), labels: new Map(), reqTypes: new Set(),
+    };
+    await dst.query(
+      `INSERT INTO marina (id, property_id, name, slug, description, phone, email, website, lat, lng,
+         layout_svg, layout_sw_lat, layout_sw_lng, layout_ne_lat, layout_ne_lng, layout_rotation,
+         response_window_hours, sidon_owner_id, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'active')`,
+      [m.id, pid, prof.name, o.slug, nz(prof.description), nz(prof.phone), nz(prof.email), nz(prof.website), prof.lat, prof.lng,
+        nz(lay?.svg_data) ?? null, lay?.sw_lat ?? null, lay?.sw_lng ?? null, lay?.ne_lat ?? null, lay?.ne_lng ?? null, lay?.rotation ?? null,
+        prof.response_window_hours ?? 24, o.owner_id]);
+    marinas.set(o.owner_id, m);
+    report.marinas.push({ alias: o.alias, slug: o.slug, property_id: pid, counts: m.counts });
+
+    for (const ov of byOwner(source.overlays, o.owner_id)) {
+      const id = uid('pontoon', ov.id);
+      await dst.query(
+        `INSERT INTO marina_pontoon (id, property_id, marina_id, name, svg_data, sw_lat, sw_lng, ne_lat, ne_lng, rotation, sort_order)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [id, pid, m.id, nz(ov.name) ?? 'Dock', ov.svg_data, ov.sw_lat, ov.sw_lng, ov.ne_lat, ov.ne_lng, ov.rotation, ov.sort_order ?? 0]);
+      m.pontoons.set(ov.id, id); // by overlay id, never by name: names repeat across owners
+      m.counts.pontoons++;
+    }
+    for (const b of byOwner(source.berths, o.owner_id)) await insertBerth(m, b);
+    // drop_prices: the numbers are in the marina's currency, not the property's, so none are kept (Review Focus 1).
+    if (m.prices === 'keep') {
+      for (const t of byOwner(source.tiers, o.owner_id)) {
+        await dst.query(
+          `INSERT INTO marina_price_tier (id, property_id, marina_id, valid_from, valid_to, max_length_m, max_beam_m,
+             price_per_night, price_per_month, price_per_year, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          // Tier prices are whole units already (Sidon multiplies by 100 at checkout).
+          [uid('tier', t.id), pid, m.id, tierDate(t.valid_from), tierDate(t.valid_to), round2(t.max_len_m), round2(t.max_beam_m),
+            t.price_per_night, t.price_per_month, t.price_per_year, t.created_at]);
+        m.counts.tiers++;
+      }
+    }
+    for (const r of byOwner(source.requirements, o.owner_id)) await insertRequirement(m, r);
+    for (const t of byOwner(source.templates, o.owner_id)) await insertTemplate(m, t);
+    for (const p of byOwner(source.pois, o.owner_id)) {
+      await dst.query(
+        `INSERT INTO marina_poi (id, property_id, marina_id, label, type, lat, lng) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [uid('poi', p.id), pid, m.id, p.label, nz(p.type), p.lat, p.lng]);
+      m.counts.pois++;
+    }
+    for (const img of byOwner(source.images, o.owner_id)) {
+      await dst.query(
+        `INSERT INTO marina_image (id, property_id, marina_id, url, description, sort_order, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [uid('image', img.id), pid, m.id, img.url /* Sidon's own public URL, what --no-files keeps */, nz(img.description), img.sort_order ?? 0, img.created_at]);
+      m.counts.images++;
+    }
+  }
+
+  // 5. Re-keyed owners land in their target's marina (R13). Catalogue rows
+  // only fill gaps, so the target's own requirements and templates win.
+  for (const o of plan.owners.filter((x) => x.action === 'rekey')) {
+    const m = marinas.get(o.rekey_to);
+    report.rekeys.push({ alias: o.alias, to_alias: m.alias });
+    for (const b of byOwner(source.berths, o.owner_id)) await insertBerth(m, b);
+    const targetTypes = new Set(m.reqTypes);
+    for (const r of byOwner(source.requirements, o.owner_id)) if (!targetTypes.has(r.type)) await insertRequirement(m, r);
+    if (m.counts.templates === 0) for (const t of byOwner(source.templates, o.owner_id)) await insertTemplate(m, t);
+    const dropped = ['overlays', 'tiers', 'pois', 'images'].reduce((n, k) => n + byOwner(source[k], o.owner_id).length, 0);
+    if (dropped) report.warnings.push(`${o.alias} (re-keyed to ${m.alias}): ${dropped} overlay/tier/POI/image row(s) not imported`);
+  }
+  report.skips = plan.owners.filter((o) => o.action === 'skip').map((o) => ({ alias: o.alias, reason: o.reason }));
+
+  return report;
+}
+
+// For terminals and sign-off notes: aliases, slugs, property ids and counts
+// only. It never carries a name, email or Sidon owner id.
+function formatReport(report) {
+  const r = report;
+  const out = [`import ${r.mode === 'commit' ? 'committed' : 'dry run (rolled back)'}; target ${r.target}; files ${r.files ? 'on' : 'off'}`];
+  out.push('properties:', ...r.properties.map((p) => `  ${p.property_id} ${p.created ? 'created' : 'reused'} (today ${p.today})`));
+  out.push('marinas:');
+  for (const m of r.marinas) {
+    out.push(`  ${m.alias} ${m.slug} -> ${m.property_id}`);
+    out.push('    ' + Object.entries(m.counts).map(([k, v]) => `${k}=${v}`).join(' '));
+  }
+  if (r.rekeys.length) out.push('re-keyed:', ...r.rekeys.map((k) => `  ${k.alias} -> ${k.to_alias}`));
+  if (r.skips.length) out.push('skipped:', ...r.skips.map((s) => `  ${s.alias}: ${s.reason}`));
+  if (r.currencyFlags.length) {
+    out.push('currency flags:', ...r.currencyFlags.map((f) =>
+      `  ${f.alias}: marina ${f.marina_currency}, property ${f.property_currency}, decision ${f.decision ?? 'none'}`));
+  }
+  if (r.unknownPlaceholders.length) {
+    out.push('template placeholders that render blank:', ...r.unknownPlaceholders.map((u) => `  ${u.alias} template ${u.template_id}: ${u.fields.join(', ')}`));
+  }
+  if (r.warnings.length) out.push('warnings:', ...r.warnings.map((w) => `  ${w}`));
+  return out.join('\n');
+}
+
 module.exports = { ImportRefused, alias, uid, slugify, tierDate, cleanEmail, mapBookingStatus, insideRetention,
-  loadMap, readSource, readTargets, planMapping, formatPlan };
+  loadMap, readSource, readTargets, planMapping, importSidon, formatPlan, formatReport };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
   const live = argv.includes('--live');
+  const mapOnly = argv.includes('--map');
+  const mode = argv.includes('--dry-run') ? 'dry-run' : 'commit';
+  const files = !argv.includes('--no-files');
   const mapFile = argv.find((a) => !a.startsWith('--')) ?? `.superpowers/import-map.${live ? 'live' : 'local'}.json`;
   const ssl = (url) => (/localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: false });
 
   const main = async () => {
-    if (!argv.includes('--map')) throw new ImportRefused('only --map is available until the import steps land');
     const dstKey = live ? 'DATABASE_URL_LIVE' : 'DATABASE_URL';
     const srcUrl = process.env.SIDON_DATABASE_URL;
     const dstUrl = process.env[dstKey];
     if (!srcUrl) throw new ImportRefused('SIDON_DATABASE_URL is not set');
     if (!dstUrl) throw new ImportRefused(`${dstKey} is not set`);
+    // 8 Sidon table names are OTA's too: one database for both would read OTA as Sidon.
     if (srcUrl === dstUrl) throw new ImportRefused(`SIDON_DATABASE_URL and ${dstKey} are the same database`);
+    if (!mapOnly && files && !(process.env.BLOB_READ_WRITE_TOKEN && process.env.BLOB_PUBLIC_READ_WRITE_TOKEN)) {
+      throw new ImportRefused('BLOB_READ_WRITE_TOKEN and BLOB_PUBLIC_READ_WRITE_TOKEN must both be set (or pass --no-files)');
+    }
     const map = loadMap(mapFile);
     const src = new Client({ connectionString: srcUrl, ssl: ssl(srcUrl) });
     const dst = new Client({ connectionString: dstUrl, ssl: ssl(dstUrl) });
     await src.connect();
     await dst.connect();
     try {
-      // READ ONLY makes Postgres itself refuse any write to Sidon.
-      await src.query('BEGIN READ ONLY');
-      const source = await readSource(src);
-      await src.query('COMMIT');
-      const plan = planMapping(source, map, await readTargets(dst, source, map));
-      console.log(formatPlan(plan));
-      if (plan.refusals.length) process.exitCode = 1;
+      if (!mapOnly) await dst.query('BEGIN');
+      try {
+        // READ ONLY makes Postgres itself refuse any write to Sidon.
+        await src.query('BEGIN READ ONLY');
+        const source = await readSource(src);
+        await src.query('COMMIT');
+        const plan = planMapping(source, map, await readTargets(dst, source, map));
+        if (mapOnly) {
+          console.log(formatPlan(plan));
+          if (plan.refusals.length) process.exitCode = 1;
+          return;
+        }
+        const report = await importSidon(dst, source, plan, { mode, target: live ? 'live' : 'local', files });
+        await dst.query(mode === 'commit' ? 'COMMIT' : 'ROLLBACK');
+        console.log(formatReport(report));
+      } catch (err) {
+        if (!mapOnly) await dst.query('ROLLBACK').catch(() => {});
+        throw err;
+      }
     } finally {
       await src.end();
       await dst.end();
@@ -313,7 +573,7 @@ if (require.main === module) {
   };
 
   main().catch((err) => {
-    if (!(err instanceof ImportRefused)) throw err; // a real bug: let Node print the stack
+    if (!(err instanceof ImportRefused)) throw err; // a real bug: let Node print the stack and exit 1
     console.error(`refused: ${err.message}`);
     process.exitCode = 1;
   });
