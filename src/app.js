@@ -31,6 +31,7 @@ const billingRoutes = require('./routes/billing');
 const reviewRoutes = require('./routes/reviews');
 const reviewRequestRoutes = require('./routes/reviewRequests');
 const marinaRoutes = require('./routes/marina');
+const buxsRoutes = require('./routes/buxs');
 
 const app = express();
 
@@ -85,6 +86,8 @@ app.use('/api/site', siteRoutes);
 app.use('/api/event-inquiries', eventInquiryRoutes);
 app.use('/api/mcp', mcpRoutes);
 app.use('/api/billing', billingRoutes);
+// forge and forge-app, server to server (X-Buxs-Secret); see controllers/buxs.js.
+app.use('/api/buxs', buxsRoutes);
 app.use('/api/review-opt-out', reviewRoutes);
 app.use('/api/review-requests', reviewRequestRoutes);
 app.use('/api/marina', marinaRoutes);

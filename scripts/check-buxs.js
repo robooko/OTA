@@ -8,9 +8,11 @@ const assert = require('node:assert/strict');
 const crypto = require('crypto');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
+process.env.BUXS_SERVICE_SECRET = 'check-service-secret';
 const pool = require('../src/db');
 const tokens = require('../src/lib/tokens');
 const { parsePurchase, buxsFromMetadata } = require('../src/lib/platformStripe');
+const app = require('../src/app');
 
 (async () => {
   let failed = 0;
@@ -160,6 +162,65 @@ const { parsePurchase, buxsFromMetadata } = require('../src/lib/platformStripe')
       assert.ok(Number.isNaN(buxsFromMetadata({})));
       assert.ok(Number.isNaN(buxsFromMetadata({ buxs: 'x' })));
     });
+
+    const server = app.listen(0);
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const api = async (method, path, { body, secret = 'check-service-secret' } = {}) => {
+      const headers = { 'Content-Type': 'application/json' };
+      if (secret !== null) headers['X-Buxs-Secret'] = secret;
+      const r = await fetch(base + path, { method, headers, body: body && JSON.stringify(body) });
+      return { status: r.status, body: await r.json().catch(() => null) };
+    };
+    try {
+      await check('service API: missing or wrong secret is 401', async () => {
+        assert.equal((await api('GET', '/api/buxs/balance?org=org_checkabcdef1234', { secret: null })).status, 401);
+        assert.equal((await api('GET', '/api/buxs/balance?org=org_checkabcdef1234', { secret: 'nope' })).status, 401);
+      });
+
+      await check('service API: unset secret is 503', async () => {
+        const saved = process.env.BUXS_SERVICE_SECRET;
+        delete process.env.BUXS_SERVICE_SECRET;
+        try {
+          assert.equal((await api('GET', '/api/buxs/balance?org=org_checkabcdef1234')).status, 503);
+        } finally {
+          process.env.BUXS_SERVICE_SECRET = saved;
+        }
+      });
+
+      await check('service API: org must be a Clerk org id', async () => {
+        const p = await newProperty(null);
+        for (const org of [`property:${p}`, 'org_x', '', 'org_abc def123456']) {
+          assert.equal((await api('GET', `/api/buxs/balance?org=${encodeURIComponent(org)}`)).status, 400, org);
+        }
+      });
+
+      await check('service API: credit, balance, spend, 402, partial', async () => {
+        const o = newOrg();
+        const key = `check-${hex()}`;
+        const c1 = await api('POST', '/api/buxs/credit', { body: { org: o, amount: 1000, reason: 'purchase', idem_key: key, ref: 'pi_check', source: 'forge' } });
+        assert.deepEqual(c1, { status: 200, body: { credited: true, balance: 1000 } });
+        const c2 = await api('POST', '/api/buxs/credit', { body: { org: o, amount: 1000, reason: 'purchase', idem_key: key, source: 'forge' } });
+        assert.deepEqual(c2.body, { credited: false, balance: 1000 });
+        assert.deepEqual((await api('GET', `/api/buxs/balance?org=${o}`)).body, { balance: 1000 });
+        const s1 = await api('POST', '/api/buxs/spend', { body: { org: o, amount: 600, reason: 'forge_build', ref: 'b1', source: 'forge-app' } });
+        assert.deepEqual(s1, { status: 200, body: { spent: 600, balance: 400 } });
+        const s2 = await api('POST', '/api/buxs/spend', { body: { org: o, amount: 600, reason: 'forge_build', source: 'forge-app' } });
+        assert.deepEqual(s2, { status: 402, body: { balance: 400 } });
+        const s3 = await api('POST', '/api/buxs/spend', { body: { org: o, amount: 600, reason: 'forge_build', source: 'forge-app', partial: true } });
+        assert.deepEqual(s3, { status: 200, body: { spent: 400, balance: 0 } });
+      });
+
+      await check('service API: bad amount, reason, source or idem_key is 400', async () => {
+        const o = newOrg();
+        const ok = { org: o, amount: 10, reason: 'purchase', idem_key: `check-${hex()}`, source: 'forge' };
+        for (const bad of [{ amount: 0 }, { amount: 1.5 }, { amount: '10' }, { reason: 'Bad Reason' }, { source: 'hotal' }, { idem_key: '' }, { idem_key: undefined }]) {
+          assert.equal((await api('POST', '/api/buxs/credit', { body: { ...ok, ...bad } })).status, 400, JSON.stringify(bad));
+        }
+        assert.equal((await api('POST', '/api/buxs/spend', { body: { org: o, amount: 10, reason: 'forge_build', source: 'nope' } })).status, 400);
+      });
+    } finally {
+      server.close();
+    }
   } finally {
     await pool.query('DELETE FROM buxs_ledger WHERE owner = ANY($1)', [owners]);
     await pool.query('DELETE FROM buxs_wallet WHERE owner = ANY($1)', [owners]);
