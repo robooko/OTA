@@ -21,7 +21,11 @@ number from FORGE's header for the same org, and forge-app's balance on
 ## Decisions
 
 1. **Owner: the Clerk org.** One balance per org, shared by every property
-   and member. OTA's `organization` table (2026-10-11) holds it.
+   and member. A property with no Clerk org (API-key-only venues such as
+   Bedford: 4 live, 8 local on 14 Oct) owns its own balance, keyed
+   `property:<uuid>`. Both live in one `buxs_wallet` table keyed by that
+   owner string (amended 14 Oct, while planning: `organization.buxs_balance`
+   had nowhere to put org-less properties).
 2. **Unit: BUXS** (weighted Claude tokens, forge-app's existing unit),
    priced at **£40 per 1M** (£10–£1,000 in £10 steps, FORGE's slider).
    HOTAL's flat-fee actions keep their £ price: 1 old token (£0.10) =
@@ -39,45 +43,51 @@ number from FORGE's header for the same org, and forge-app's balance on
 
 ### Schema (one migration, idempotent)
 
-- `organization.buxs_balance BIGINT NOT NULL DEFAULT 0`.
-- New `buxs_ledger`: `id`, `clerk_org_id NOT NULL`, `property_id NULL`
+- New `buxs_wallet (owner TEXT PRIMARY KEY, balance BIGINT NOT NULL
+  DEFAULT 0 CHECK (balance >= 0), created_at)`. A property's owner is
+  `COALESCE(clerk_org_id, 'property:' || id)`.
+- New `buxs_ledger`: `id`, `owner TEXT NOT NULL`, `property_id NULL`
   (set for HOTAL actions), `delta BIGINT`, `balance_after BIGINT`,
   `reason VARCHAR(40)`, `ref_id TEXT`, `source VARCHAR(20)` (`hotal` |
   `forge` | `forge-app` | `migration`), `idem_key TEXT UNIQUE` (credits and
   migration moves; NULL for spends), `created_at`. Index on
-  `(clerk_org_id, created_at DESC)`.
-- Ensure an `organization` row for every `property.clerk_org_id`
-  (`INSERT … ON CONFLICT DO NOTHING`, `api_key` NULL).
-- Seed: per org, `buxs_balance = SUM(property.token_balance) × 2500`, one
-  `migration` ledger row per org with `idem_key = 'hotal-migration:<org>'`.
-  `property_token_ledger` rows are copied across (delta × 2500) so the
-  activity history survives.
+  `(owner, created_at DESC)`.
+- Seed: per owner, `balance = SUM(property.token_balance) × 2500`.
+  `property_token_ledger` rows are copied across (delta and balance_after
+  × 2500) so the activity history survives, each purchase row keeping its
+  Stripe id as `idem_key` (a late webhook retry for an old purchase must
+  not credit again); each owner's earliest
+  `starter` row gets `idem_key = 'starter:<owner>'`, so existing owners
+  never get a second starter grant.
 - `property.token_balance` and `property_token_ledger` stay read-only until
   the cleanup migration drops them, after forge and forge-app are on OTA.
 
-Every org row needs to exist before a spend or credit: `organization.js`
-already inserts one on org creation; the auth auto-create path gets the
-same insert.
+Wallet rows are created on demand (`INSERT … ON CONFLICT DO NOTHING`) by
+`credit`; a spend against a missing wallet is simply a spend against 0.
 
-### `src/lib/tokens.js` (org-level)
+### `src/lib/tokens.js` (owner-level)
 
-- `getBalance(orgId)`.
-- `spend(orgId, amount, reason, { propertyId, refId, source })`: one
-  `UPDATE organization SET buxs_balance = buxs_balance - $amount WHERE
-  clerk_org_id = $org AND buxs_balance >= $amount RETURNING buxs_balance`,
-  plus the ledger row, in one transaction. No row → `{ ok: false, balance }`.
-  HOTAL callers pass `TOKEN_COSTS[reason]`; forge-app passes its measured
-  usage.
-- `credit(orgId, amount, reason, { idemKey, refId, propertyId, source })`:
-  locks the org row, returns `{ credited: false }` when `idemKey` is
-  already in the ledger. Replaces `checkoutSessionId`.
+- `ownerOfProperty(propertyId)`, `getWalletBalance(owner)`.
+- `spendFrom(owner, amount, reason, { propertyId, refId, source, partial })`:
+  one `UPDATE buxs_wallet SET balance = balance - $amount WHERE owner = $1
+  AND balance >= $amount RETURNING balance` (with `partial`, it debits
+  `LEAST(amount, balance)` instead), plus the ledger row, in one
+  transaction. No row → `{ ok: false, balance }`.
+- `creditTo(owner, amount, reason, { idemKey, refId, propertyId, source })`:
+  creates the wallet if missing, locks it, returns `{ credited: false }`
+  when `idemKey` is already in the ledger. Replaces `checkoutSessionId`.
+- The property-level functions HOTAL already calls keep their signatures
+  (`getBalance(propertyId)`, `spend(propertyId, reason, refId)`,
+  `credit(propertyId, amount, reason, { refId, idemKey })`,
+  `grantStarter(propertyId)`, `listLedger(propertyId, limit)`) and resolve
+  the owner first, so `aiReplyPipeline.js`, `inquiryReplies.js`,
+  `eventInquiries.js`, `auth.js` and `organization.js` don't change.
 - `TOKEN_COSTS = { ai_reply: 2500, reply_send: 2500 }`;
-  `STARTER_BALANCE = 50_000` (env `BUXS_STARTER_BALANCE`), granted on org
-  creation with `idem_key = 'starter:<org>'`, so it's once per org whichever
-  path creates it.
-- Callers (`aiReplyPipeline.js`, `inquiryReplies.js`) pass the
-  inquiry's property's org; behaviour at zero is unchanged (fallback email,
-  402 on manual send).
+  `STARTER_BALANCE = 50_000` (env `BUXS_STARTER_BALANCE`), granted with
+  `idem_key = 'starter:<owner>'`, so it's once per owner whichever path
+  (first-login auto-create, `POST /api/organization/properties`) creates a
+  property. Behaviour at zero is unchanged (fallback email, 402 on manual
+  send).
 
 ### Purchases (dashboard)
 
@@ -85,8 +95,13 @@ same insert.
 in `£STEP_GBP` (10 / 1000 / 10), `TOKENS_PER_POUND = 25_000`, the same
 constants as forge's `src/lib/buxs.ts`. `/api/billing/payment-intent` and
 `/checkout` take `{ amount_gbp }` instead of `{ pack }`, validated the same
-way. Webhook and confirm routes credit the active org with
-`idem_key = <PaymentIntent or Session id>`. `GET /api/billing` returns
+way. New intents and sessions carry `owner` and `buxs` metadata, and the
+webhook and confirm routes credit that owner with
+`idem_key = <PaymentIntent or Session id>`. One created before the deploy
+carries only `property_id` and `tokens` (old units): it credits
+`tokens × 2500` to that property's owner. A request still sending
+`{ pack }` (a dashboard tab open across the deploy) maps small/medium/large
+to £10/£40/£120. `GET /api/billing` returns
 `balance` (the org's), `costs`, `currency`, `min_gbp`/`max_gbp`/`step_gbp`/
 `tokens_per_pound` instead of `packs`. `/ledger` lists the org's
 `buxs_ledger` (all sources).
@@ -98,7 +113,8 @@ compare); no Clerk auth, because forge and forge-app vouch for the org from
 their own verified Clerk session.
 
 - `GET /api/buxs/balance?org=<clerk_org_id>` → `{ balance }` (0 for an
-  unknown org).
+  unknown org). `org` is a Clerk org id (`org_…`), never a
+  `property:` owner.
 - `POST /api/buxs/spend` `{ org, amount, reason, ref, source, partial? }` →
   `{ spent, balance }` or `402 { balance }`. With `partial: true` it never
   402s: it debits `min(amount, balance)` (forge-app's after-the-fact
@@ -140,7 +156,12 @@ is 400.
 
 ## One-time Clerk → OTA move
 
-A script in OTA (`scripts/migrate-clerk-buxs.js`, Clerk secret from env):
+A script in OTA (`scripts/migrate-clerk-buxs.js`, Clerk secret from env),
+with separate `--orgs` and `--users` modes. `--orgs` runs right after forge
+reads from OTA (Order step 3); `--users` runs right after forge-app does
+(step 5). Running `--users` earlier would leave forge-app reading an
+emptied Clerk balance (and `TokenBudget.astro` re-granting 50k on an
+undefined one).
 
 1. For every Clerk org with `private_metadata.tokenBudget > 0`: `credit`
    with `idem_key = 'clerk-org:<orgId>'`, source `migration`, then clear
@@ -191,8 +212,9 @@ checks them against Clerk before the real run.
    `balance`).
 2. Dashboard: BUXS display and £ slider.
 3. forge: read/credit via OTA.
-4. Clerk → OTA move script (dry run, then real).
-5. forge-app: org-required builds spending via OTA.
+4. `migrate-clerk-buxs.js --orgs` (dry run, then real).
+5. forge-app: org-required builds spending via OTA, then
+   `migrate-clerk-buxs.js --users`.
 6. Cleanup migration: drop `property.token_balance`,
    `property_token_ledger`.
 
