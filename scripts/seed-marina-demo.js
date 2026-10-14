@@ -1,15 +1,23 @@
 // Seeds a local demo marina for the booking widget's demo page: property
-// 'Marina Demo' (EUR, Europe/Rome, API key on) with marina demo-marina --
-// one pontoon, six berths, a 12-month price tier, two document
-// requirements and a contract. Safe to re-run: rows are matched on natural
-// keys and updated in place, so ids (and any demo bookings, uploads and
-// signatures on them) survive. Local DB only.
+// 'Marina Demo' (EUR, Europe/Rome, API key on) with marina demo-marina (or
+// MARINA_DEMO_SLUG) -- one pontoon, six berths, a 12-month price tier, two
+// document requirements and a contract. Safe to re-run: rows are matched on
+// natural keys and updated in place, so ids (and any demo bookings, uploads
+// and signatures on them) survive. Local DB only.
 //   node scripts/seed-marina-demo.js
+//   MARINA_DEMO_SLUG=pirates-bight node scripts/seed-marina-demo.js
 require('dotenv').config();
 const crypto = require('crypto');
 const { Client } = require('pg');
 
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
+
+// Consumer sites hard-code their own marina slug (pirates-bight,
+// fox-mooring, ...), so a site is checked against local OTA by seeding the
+// demo marina under that slug. Every slug shares the one 'Marina Demo'
+// property, so they all answer to the same API key.
+const SLUG = process.env.MARINA_DEMO_SLUG || 'demo-marina';
+if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(SLUG)) throw new Error(`MARINA_DEMO_SLUG must be a lower-case slug like pirates-bight (got ${JSON.stringify(SLUG)})`);
 
 const BERTHS = [
   { label: 'A1', length_m: 8, beam_m: 3, depth_m: 2.5, price_per_night: 3.5, price_mode: 'per_metre' },
@@ -77,7 +85,7 @@ async function seed(db) {
   // Generated once and then kept, so a running widget demo survives a re-seed.
   const { rows: [{ api_key: apiKey }] } = await db.query(
     'UPDATE property SET api_key = COALESCE(api_key, $2) WHERE id = $1 RETURNING api_key', [P, `prop_${crypto.randomBytes(32).toString('hex')}`]);
-  const M = await put(db, 'marina', { property_id: P, slug: 'demo-marina' }, {
+  const M = await put(db, 'marina', { property_id: P, slug: SLUG }, {
     name: 'Demo Marina', description: 'A local demo marina for the booking widget.', phone: '+39 0185 000000',
     email: 'demo-marina@example.com', website: 'https://example.com', lat: 44.30332, lng: 9.2096,
     booking_url: 'http://localhost:5173/booking.html?booking={id}&token={token}', status: 'active',
@@ -120,7 +128,7 @@ async function seed(db) {
     console.log(`Marina Demo seeded (property ${P})`);
     // Machine-readable for the widget demo: KEY=$(... | sed -n 's/^api_key=//p')
     console.log(`api_key=${apiKey}`);
-    console.log('slug=demo-marina');
+    console.log(`slug=${SLUG}`);
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
     throw err;
