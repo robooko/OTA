@@ -67,6 +67,11 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal(r.shipping, 'US:ALL:Delivery::20.00 USD');
       assert.equal(r.disable_checkout, '');
     });
+    await check('feed: sale_price, when set, is the charged price', async () => {
+      const { product, pricing } = feed.buildFeeds({ items: [item({ sale_price: '15.00' })], docs: [doc()], settings: null, config: CFG, currency: 'USD' });
+      assert.equal(product[0].price, '15.00 USD');
+      assert.equal(pricing[0].price, '15.00 USD');
+    });
     await check('feed: name join ignores case and whitespace', async () => {
       const { product } = feed.buildFeeds({ items: [item({ name: '  BURGEE ' })], docs: [doc()], settings: null, config: CFG, currency: 'USD' });
       assert.equal(product.length, 1);

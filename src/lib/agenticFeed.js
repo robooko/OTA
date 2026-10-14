@@ -19,6 +19,8 @@ const norm = (s) => String(s ?? '').trim().toLowerCase();
 // "Grey — L" -> "Grey": the option the site's per-colour product docs differ by.
 const firstOption = (label) => String(label ?? '').split(' — ')[0].trim();
 const money = (n, currency) => `${Number(n).toFixed(2)} ${currency}`;
+// What the agent charges: the sale price while one is set.
+const charged = (item) => item.sale_price ?? item.price;
 const availability = (item) => (item.stock_quantity === 0 ? 'out_of_stock' : 'in_stock');
 
 // Same join as the site (willy-t-bvi src/lib/products.ts): by normalised
@@ -83,7 +85,7 @@ function buildFeeds({ items, docs, settings, config, currency }) {
       item_group_title: i.product_group ?? '',
       custom_variant_option_name_1: i.variant_label ? 'Variant' : '',
       custom_variant_option_value_1: i.variant_label ?? '',
-      price: money(i.price, currency),
+      price: money(charged(i), currency),
       availability: availability(i),
       inventory_not_tracked: tracked ? 'false' : 'true',
       inventory_quantity: tracked ? String(i.stock_quantity) : '',
@@ -95,7 +97,7 @@ function buildFeeds({ items, docs, settings, config, currency }) {
   const inventory = included
     .filter((i) => i.stock_quantity != null)
     .map((i) => ({ id: feedId(i.id), availability: availability(i), inventory_quantity: String(i.stock_quantity) }));
-  const pricing = included.map((i) => ({ id: feedId(i.id), price: money(i.price, currency) }));
+  const pricing = included.map((i) => ({ id: feedId(i.id), price: money(charged(i), currency) }));
   const skipped = items.filter((i) => !matched.has(i.id)).map((i) => i.name);
   return { product, inventory, pricing, skipped };
 }
@@ -125,7 +127,7 @@ async function fetchSanity(config) {
 
 async function loadItems(db, propertyId) {
   const { rows } = await db.query(
-    `SELECT id, name, price, category, product_group, variant_label, stock_quantity
+    `SELECT id, name, price, sale_price, category, product_group, variant_label, stock_quantity
      FROM proshop_item WHERE property_id = $1 AND status = 'active' ORDER BY name`,
     [propertyId]
   );

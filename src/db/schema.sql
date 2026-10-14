@@ -981,7 +981,11 @@ CREATE TABLE IF NOT EXISTS proshop_item (
   -- migrate-2026-09-08-proshop-item-grouping.sql. NULL = standalone item.
   product_group  VARCHAR(100),
   variant_label  VARCHAR(50),
-  CONSTRAINT proshop_item_stock_quantity_check CHECK (stock_quantity IS NULL OR stock_quantity >= 0)
+  -- Optional sale price -- see migrate-2026-10-14-proshop-sale-price.sql.
+  -- NULL = not on sale. Set, it's what gets charged; price stays the "was".
+  sale_price     NUMERIC(10,2),
+  CONSTRAINT proshop_item_stock_quantity_check CHECK (stock_quantity IS NULL OR stock_quantity >= 0),
+  CONSTRAINT proshop_item_sale_price_check CHECK (sale_price IS NULL OR (sale_price >= 0 AND sale_price < price))
 );
 
 CREATE INDEX IF NOT EXISTS idx_proshop_item_product_group ON proshop_item(product_group);

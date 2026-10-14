@@ -84,9 +84,15 @@ function isValidStockQuantity(value) {
   return value === undefined || value === null || (Number.isInteger(value) && value >= 0);
 }
 
+// sale_price: null/omitted = not on sale. Set, it's charged instead of
+// price (which stays the "was" price) -- the DB check keeps it below price.
+const unitPrice = (item) => parseFloat(item.sale_price ?? item.price);
+const SALE_PRICE_ERROR = 'sale_price must be non-negative and below price, or null to end the sale';
+const isSalePriceViolation = (err) => err.constraint === 'proshop_item_sale_price_check';
+
 async function createItem(req, res, next) {
   try {
-    const { name, category, price, shop_id, stock_quantity, product_group, variant_label } = req.body;
+    const { name, category, price, sale_price, shop_id, stock_quantity, product_group, variant_label } = req.body;
     if (!name || price == null) return res.status(400).json({ error: 'name and price are required' });
     if (!shop_id) return res.status(400).json({ error: 'shop_id is required' });
     if (!isValidStockQuantity(stock_quantity)) {
@@ -99,26 +105,29 @@ async function createItem(req, res, next) {
     if (!shops.length) return res.status(404).json({ error: 'Shop not found' });
 
     const { rows } = await pool.query(
-      `INSERT INTO proshop_item (property_id, shop_id, name, category, price, stock_quantity, product_group, variant_label)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.property_id, shop_id, name, category || null, price, stock_quantity ?? null, product_group || null, variant_label || null]
+      `INSERT INTO proshop_item (property_id, shop_id, name, category, price, sale_price, stock_quantity, product_group, variant_label)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.property_id, shop_id, name, category || null, price, sale_price ?? null, stock_quantity ?? null, product_group || null, variant_label || null]
     );
     res.status(201).json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (isSalePriceViolation(err)) return res.status(400).json({ error: SALE_PRICE_ERROR });
+    next(err);
+  }
 }
 
 async function updateItem(req, res, next) {
   try {
-    const { name, category, price, status, stock_quantity, product_group, variant_label } = req.body;
+    const { name, category, price, sale_price, status, stock_quantity, product_group, variant_label } = req.body;
     if (stock_quantity !== undefined && !isValidStockQuantity(stock_quantity)) {
       return res.status(400).json({ error: 'stock_quantity must be a non-negative integer, or null for unlimited' });
     }
-    // stock_quantity, product_group and variant_label are all nullable-on-
+    // sale_price, stock_quantity, product_group and variant_label are all nullable-on-
     // purpose (untracked / ungrouped), so they can't use the same
     // "COALESCE = omit" convention as the other fields here -- a
     // present-but-null value must clear them, not leave the old value in
     // place. undefined (the field wasn't sent at all) still means "leave
-    // unchanged" for all three.
+    // unchanged" for all four.
     const { rows } = await pool.query(
       `UPDATE proshop_item SET
          name           = COALESCE($1, name),
@@ -127,19 +136,24 @@ async function updateItem(req, res, next) {
          status         = COALESCE($4, status),
          stock_quantity = CASE WHEN $5 THEN $6  ELSE stock_quantity END,
          product_group  = CASE WHEN $7 THEN $8  ELSE product_group END,
-         variant_label  = CASE WHEN $9 THEN $10 ELSE variant_label END
-       WHERE id = $11 AND property_id = $12 RETURNING *`,
+         variant_label  = CASE WHEN $9 THEN $10 ELSE variant_label END,
+         sale_price     = CASE WHEN $11 THEN $12 ELSE sale_price END
+       WHERE id = $13 AND property_id = $14 RETURNING *`,
       [
         name, category, price, status,
         stock_quantity !== undefined, stock_quantity ?? null,
         product_group !== undefined, product_group ?? null,
         variant_label !== undefined, variant_label ?? null,
+        sale_price !== undefined, sale_price ?? null,
         req.params.id, req.property_id,
       ]
     );
     if (!rows.length) return res.status(404).json({ error: 'Item not found' });
     res.json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (isSalePriceViolation(err)) return res.status(400).json({ error: SALE_PRICE_ERROR });
+    next(err);
+  }
 }
 
 // ── Booking items ─────────────────────────────────────────────────────────────
@@ -181,7 +195,7 @@ async function addBookingItem(req, res, next) {
     const { rows } = await pool.query(
       `INSERT INTO golf_booking_item (property_id, booking_id, item_id, item_name, quantity, unit_price)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.property_id, booking_id, item_id, items[0].name, quantity, items[0].price]
+      [req.property_id, booking_id, item_id, items[0].name, quantity, unitPrice(items[0])]
     );
     // Racy against a concurrent sale of the same item (two staff members,
     // same tee sheet) -- the WHERE guard means a loser here just leaves
@@ -229,7 +243,7 @@ async function removeBookingItem(req, res, next) {
 // docs/superpowers/specs/2026-08-23-restaurant-tap-to-pay-backend-requirements.md
 // for the pattern this follows. shipping_cost is trusted as given (the
 // ordering website computes it); item prices never are -- items_subtotal is
-// always recomputed here from the live proshop_item.price.
+// always recomputed here from the live proshop_item price (sale_price if set).
 
 async function orderTotalCents(order) {
   return Math.round((parseFloat(order.total_price)) * 100);
@@ -420,7 +434,7 @@ async function createOrder(req, res, next) {
           return res.status(400).json({ error: 'Each item needs a valid item_id and a positive integer quantity' });
         }
         const { rows: catalog } = await client.query(
-          `SELECT name, price, stock_quantity FROM proshop_item WHERE id = $1 AND shop_id = $2 AND property_id = $3 AND status = 'active'`,
+          `SELECT name, price, sale_price, stock_quantity FROM proshop_item WHERE id = $1 AND shop_id = $2 AND property_id = $3 AND status = 'active'`,
           [item_id, shop_id, req.property_id]
         );
         if (!catalog.length) {
@@ -431,10 +445,10 @@ async function createOrder(req, res, next) {
           await client.query('ROLLBACK');
           return res.status(409).json({ error: `Only ${catalog[0].stock_quantity} of "${catalog[0].name}" left in stock` });
         }
-        const unitPrice = parseFloat(catalog[0].price);
-        const subtotal = Math.round(unitPrice * qty * 100) / 100;
+        const price = unitPrice(catalog[0]);
+        const subtotal = Math.round(price * qty * 100) / 100;
         itemsSubtotal += subtotal;
-        lineItems.push({ item_id, item_name: catalog[0].name, unit_price: unitPrice, quantity: qty, subtotal });
+        lineItems.push({ item_id, item_name: catalog[0].name, unit_price: price, quantity: qty, subtotal });
       }
       itemsSubtotal = Math.round(itemsSubtotal * 100) / 100;
       const { taxAmount, totalExtra } = computeOrderTax(properties[0], itemsSubtotal);
