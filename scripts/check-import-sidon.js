@@ -666,6 +666,211 @@ INSERT INTO sidon_fixture.marina_message (owner_id, sailor_email, sailor_name, d
         assert.equal(c.signatures, 2);
       });
     }
+    // ---- Task 4: documents, images, archive, messages, report ----
+    {
+      const { alias, uid, readSource, readTargets, planMapping, importSidon, formatReport, sourcePath, extOf, typeFromExt } = require('./import-sidon-marina');
+      const blobSeam = require('../src/lib/marinaDocuments');
+      // Own source schema with sidon_fixture's exact column types, so these
+      // documents don't disturb what the earlier checks count.
+      const S = 'sidon_docs';
+      const A = 'org_docsCheckA1';  // imported into a created property
+      const SK = 'org_docsCheckS2'; // skipped: its marina-docs go to the archive
+      const STORE = 'https://sidonstore.public.blob.vercel-storage.com/';
+      const day = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+      await db.query(`CREATE SCHEMA ${S}`);
+      for (const t of ['marina_profile', 'marina_layout', 'marina_overlay', 'marina_berth', 'marina_price_tier', 'berth_booking',
+        'marina_doc_requirement', 'marina_document', 'marina_contract_template', 'marina_contract_signature', 'marina_poi', 'marina_image', 'marina_message']) {
+        await db.query(`CREATE TABLE ${S}.${t} (LIKE sidon_fixture.${t})`);
+      }
+      await db.query(
+        `INSERT INTO ${S}.marina_profile (owner_id, slug, name, lat, lng, description, phone, email, website, response_window_hours, currency, updated_at)
+         VALUES ($1, 'docs-check', 'Docs Check Harbour', 43.1, 9.5, '', '', 'harbour@docs-check.example', '', 24, 'eur', now()),
+                ($2, 'docs-skip', 'Docs Skip Harbour', 43.2, 9.6, '', '', 'skip@docs-check.example', '', 24, 'eur', now())`, [A, SK]);
+      await db.query(
+        `INSERT INTO ${S}.marina_berth (id, owner_id, berth_id, overlay_id, lat, lng, length_m, min_length_m, beam_m, depth_m, status, guest_name, notes, price_per_night, price_mode, rotation)
+         VALUES (1, $1, 'D1', NULL, 43.1, 9.5, 12, NULL, 4, 3, 'available', NULL, NULL, 50, 'fixed', 0),
+                (2, $1, 'D2', NULL, 43.1, 9.5, 12, NULL, 4, 3, 'available', NULL, NULL, 50, 'fixed', 0),
+                (3, $2, 'S1', NULL, 43.2, 9.6, 12, NULL, 4, 3, 'available', NULL, NULL, 50, 'fixed', 0)`, [A, SK]);
+      // Booking 1 departs in a week (inside retention), booking 2 departed
+      // 200 days ago (outside), booking 10 belongs to the skipped owner.
+      await db.query(
+        `INSERT INTO ${S}.berth_booking (id, owner_id, berth_id, sailor_name, sailor_email, boat_name, boat_loa, boat_beam, arrival_date, departure_date, notes, status, payment_intent_id, amount_cents, expires_at, created_at, updated_at)
+         VALUES (1, $1, 'D1', 'Ann Sailor', 'ann.sailor@docs-check.example', 'Docs One', 10, 3.5, $3, $4, NULL, 'confirmed', NULL, 10000, NULL, now(), now()),
+                (2, $1, 'D2', 'Bob Mariner', 'bob.mariner@docs-check.example', 'Docs Two', 10, 3.5, $5, $6, NULL, 'confirmed', NULL, 10000, NULL, now() - interval '210 days', now() - interval '200 days'),
+                (10, $2, 'S1', 'Cy Skipper', 'cy.skipper@docs-check.example', 'Docs Skip', 10, 3.5, $3, $4, NULL, 'confirmed', NULL, 10000, NULL, now(), now())`,
+        [A, SK, day(5), day(8), day(-205), day(-200)]);
+      await db.query(
+        `INSERT INTO ${S}.marina_doc_requirement (id, owner_id, type, name, description, schema, mandatory, sort_order)
+         VALUES (1, $1, 'insurance', 'Insurance', '', '[{"name":"policy_number","label":"Policy number","type":"string"}]', 1, 0)`, [A]);
+      const doc = (id, owner, booking, path, extracted = '{}', expiry = null, requirement = 1) => db.query(
+        `INSERT INTO ${S}.marina_document (id, owner_id, requirement_id, booking_id, status, notes, submitted_at, verified_at, type, file_url, file_name, extracted_data, expiry_date)
+         VALUES ($1, $2, $3, $4, 'pending', '', now(), NULL, 'insurance', $5, $6, $7, $8)`,
+        [id, owner, requirement, booking, STORE + path, path.split('/').pop(), extracted, expiry]);
+      await doc(1, A, 1, `marina-docs/${A}/1/1700000000001.PDF`, '{"policy_number":"P-1"}', '2027-03-31T00:00:00Z'); // linked, inside retention -> copied
+      await doc(2, A, 2, `marina-docs/${A}/1/1700000000002.jpg`, '');                                            // linked, outside retention
+      await doc(3, A, 1, 'sailor-docs/guest/5/passport/scan%20one.png', 'not json', null, 99);                    // linked wallet file, dangling requirement
+      await doc(4, A, null, `marina-docs/${A}/1/1700000000004.pdf`);                                              // unlinked -> archive
+      await doc(5, SK, 10, `marina-docs/${SK}/1/1700000000005.png`);                                              // skipped owner's booking -> archive
+      await doc(6, A, null, 'sailor-docs/guest/6/insurance/wallet.pdf');                                          // unlinked wallet file -> counted only
+      await doc(7, A, 1, `marina-docs/${A}/1/broken.pdf`);                                                        // fetch throws
+      await doc(8, A, 1, `marina-docs/${A}/1/notpdf.pdf`);                                                        // bytes don't sniff
+      await doc(9, A, null, `marina-docs/${A}/1/broken-orphan.pdf`);                                              // archive fetch throws
+      await db.query(`INSERT INTO ${S}.marina_image (id, owner_id, url, description, sort_order, created_at) VALUES (1, $1, $2, 'Pontoon D', 0, now())`,
+        [A, `${STORE}marina/${A}/1700000000000.webp`]);
+      await db.query(
+        `INSERT INTO ${S}.marina_message (id, owner_id, sailor_id, enquiry_cookie_hash, sailor_email, sailor_name, direction, body, created_at, read_at)
+         VALUES (1, $1, NULL, 'h1', 'ann.sailor@docs-check.example', 'Ann Sailor', 'sailor', 'Is D1 free?', now(), NULL),
+                (2, $1, NULL, 'h1', 'ann.sailor@docs-check.example', 'Ann Sailor', 'marina', 'Yes.', now(), NULL),
+                (3, $2, NULL, 'h2', 'dee.sailor@docs-check.example', 'Dee Sailor', 'sailor', 'Hello', now(), NULL)`, [A, SK]);
+      const PII = [A, SK, 'harbour@docs-check.example', 'skip@docs-check.example', 'ann.sailor@docs-check.example', 'bob.mariner@docs-check.example',
+        'cy.skipper@docs-check.example', 'dee.sailor@docs-check.example', 'Ann Sailor', 'Bob Mariner', 'Cy Skipper', 'Dee Sailor'];
+      const docsMap = { owners: {
+        [A]: { action: 'create', name: 'Docs Check Property', timezone: 'UTC', clerk_org_id: 'org_check_import_docs' },
+        [SK]: { action: 'skip', reason: 'check' },
+      } };
+      // Blob seams swapped on the module object, the same way the importer
+      // calls them. fetchBlob records every URL it is asked for.
+      const WEBP = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBPVP8 ')]);
+      const stubs = () => {
+        const s = { blobs: new Map(), publics: [], fetched: [], calls: 0 };
+        blobSeam.store = { put: async (p, buf, type) => { s.calls++; s.blobs.set(p, { buf, type }); }, get: async () => null, del: async () => {} };
+        blobSeam.putPublic = async (p, buf, type) => { s.calls++; s.publics.push([p, type]); return 'https://public.example/' + p; };
+        s.fetchBlob = async (url) => {
+          s.calls++; s.fetched.push(url);
+          if (url.includes('broken')) throw new Error('fetch failed');
+          if (url.endsWith('.webp')) return { buf: WEBP, contentType: 'image/webp' };
+          if (url.includes('notpdf')) return { buf: Buffer.from('not a pdf'), contentType: 'application/pdf' };
+          return { buf: Buffer.from('%PDF-1.4 check'), contentType: 'application/pdf' };
+        };
+        return s;
+      };
+      // Each run reads targets afresh, so a second run finds the created
+      // property through Targets.reruns.
+      const runDocs = async (files, s) => {
+        const source = await readSource(db, S);
+        const plan = planMapping(source, docsMap, await readTargets(db, source, docsMap));
+        return importSidon(db, source, plan, { mode: 'commit', target: 'local', files, fetchBlob: s.fetchBlob });
+      };
+      const docRows = async () => (await db.query(
+        `SELECT id, blob_pathname, content_type, size_bytes, file_deleted_at IS NOT NULL AS deleted, requirement_id, extracted_data, expiry_date
+           FROM marina_document WHERE marina_id = $1 ORDER BY blob_pathname`, [uid('marina', A)])).rows;
+      const countsOf = (report) => {
+        const c = report.marinas.find((m) => m.alias === alias(A)).counts;
+        return [c.documents_copied, c.documents_not_copied, c.documents_sailor_docs, c.documents_fetch_failed];
+      };
+      const archiveExpected = [`marina-docs-archive/sidon/${alias(A)}/4.pdf`, `marina-docs-archive/sidon/${alias(A)}/9.pdf`, `marina-docs-archive/sidon/${alias(SK)}/5.png`].sort();
+      const imageUrl = async () => (await db.query('SELECT url FROM marina_image WHERE id = $1', [uid('image', 1)])).rows[0].url;
+
+      await check('sourcePath, extOf and typeFromExt edges', async () => {
+        assert.equal(sourcePath('https://abc.public.blob.vercel-storage.com/marina-docs/org_x/3/1700000000000.pdf'), 'marina-docs/org_x/3/1700000000000.pdf');
+        assert.equal(sourcePath('https://abc.public.blob.vercel-storage.com/sailor-docs/guest/5/passport/scan%20one.PNG'), 'sailor-docs/guest/5/passport/scan one.PNG');
+        assert.equal(sourcePath('https://abc.public.blob.vercel-storage.com/marina/x/a.webp?download=1'), 'marina/x/a.webp');
+        assert.equal(sourcePath('https://abc.public.blob.vercel-storage.com/bad%E0'), null); // malformed escape
+        assert.equal(sourcePath(null), null);
+        assert.equal(sourcePath('  '), null);
+        assert.equal(sourcePath('not a url'), null);
+        assert.equal(extOf('sailor-docs/guest/5/passport/scan one.PNG'), 'png');
+        assert.equal(extOf('marina-docs/org_x/3/noext'), 'bin');
+        assert.equal(extOf('marina-docs/v1.2/noext'), 'bin'); // a dot in a folder is not an extension
+        assert.equal(extOf('a/file.'), 'bin');
+        assert.equal(extOf(null), 'bin');
+        assert.equal(typeFromExt('pdf'), 'application/pdf');
+        assert.equal(typeFromExt('jpg'), 'image/jpeg');
+        assert.equal(typeFromExt('jpeg'), 'image/jpeg');
+        assert.equal(typeFromExt('png'), 'image/png');
+        assert.equal(typeFromExt('webp'), 'application/octet-stream');
+        assert.equal(typeFromExt('bin'), 'application/octet-stream');
+        assert.equal(typeFromExt('toString'), 'application/octet-stream'); // no prototype lookups
+      });
+
+      await check('documents: in-retention marina-docs copied; out-of-retention, failed and sailor-docs rows not copied; sailor-docs never fetched', async () => {
+        const s = stubs();
+        const report = await runDocs(true, s);
+        const P = report.properties[0].property_id;
+        const path = (b, d, ext) => `marina-docs/${P}/${uid('booking', b)}/sidon-${d}.${ext}`;
+        const rows = new Map((await docRows()).map((r) => [r.id, r]));
+        assert.deepEqual([...rows.keys()].sort(), [1, 2, 3, 7, 8].map((d) => uid('document', d)).sort());
+        assert.deepEqual({ ...rows.get(uid('document', 1)) }, {
+          id: uid('document', 1), blob_pathname: path(1, 1, 'pdf'), content_type: 'application/pdf', size_bytes: 14, deleted: false,
+          requirement_id: uid('requirement', 1), extracted_data: { policy_number: 'P-1' }, expiry_date: '2027-03-31',
+        });
+        assert.equal(s.blobs.get(path(1, 1, 'pdf')).type, 'application/pdf');
+        for (const [d, b, ext, type] of [[2, 2, 'jpg', 'image/jpeg'], [3, 1, 'png', 'image/png'], [7, 1, 'pdf', 'application/pdf'], [8, 1, 'pdf', 'application/pdf']]) {
+          const r = rows.get(uid('document', d));
+          assert.deepEqual([r.blob_pathname, r.content_type, r.size_bytes, r.deleted], [path(b, d, ext), type, 0, true], `document ${d}`);
+          assert.equal(s.blobs.has(path(b, d, ext)), false, `document ${d} stored`);
+        }
+        assert.equal(rows.get(uid('document', 3)).requirement_id, null); // Sidon requirement 99 was never imported
+        assert.equal(rows.get(uid('document', 3)).extracted_data, null); // 'not json'
+        assert.equal(rows.get(uid('document', 2)).extracted_data, null); // ''
+        // Review Focus 4: the sidon-ai wallet is never even requested.
+        assert.ok(s.fetched.length > 0);
+        assert.deepEqual(s.fetched.filter((u) => (sourcePath(u) || '').startsWith('sailor-docs/')), []);
+        assert.ok(!s.fetched.some((u) => u.includes('1700000000002')), 'out-of-retention file fetched');
+        assert.deepEqual(countsOf(report), [1, 3, 1, 2]);
+        assert.equal(report.sailor_docs_unlinked, 1);
+      });
+
+      await check('archive paths for unlinked marina-docs, messages export by alias, webp image via putPublic', async () => {
+        const s = stubs();
+        const report = await runDocs(true, s);
+        const P = report.properties[0].property_id;
+        assert.deepEqual([...report.archived].sort(), archiveExpected);
+        assert.equal(s.blobs.get(`marina-docs-archive/sidon/${alias(A)}/4.pdf`).type, 'application/pdf');
+        assert.equal(s.blobs.has(`marina-docs-archive/sidon/${alias(SK)}/5.png`), true);
+        assert.equal(s.blobs.has(`marina-docs-archive/sidon/${alias(A)}/9.pdf`), false); // fetch failed: listed and warned, not stored
+        assert.ok(report.warnings.some((w) => w.includes(`marina-docs-archive/sidon/${alias(A)}/9.pdf`)));
+        const msgs = s.blobs.get(`marina-archive/messages-${alias(A)}.json`);
+        assert.equal(msgs.type, 'application/json');
+        assert.deepEqual(JSON.parse(msgs.buf.toString()).map((m) => m.id).sort(), [1, 2]);
+        assert.equal(s.blobs.has(`marina-archive/messages-${alias(SK)}.json`), true); // skipped owners' messages too
+        assert.equal(report.messages_exported, 3);
+        assert.ok(![...s.blobs.keys()].some((p) => p.includes(A) || p.includes(SK)), 'owner id in a blob path');
+        const imgPath = `marina-images/${P}/${uid('marina', A)}.webp`;
+        assert.deepEqual(s.publics, [[imgPath, 'image/webp']]);
+        assert.equal(await imageUrl(), 'https://public.example/' + imgPath);
+      });
+
+      await check('formatReport lists files by alias and path, with no emails, names or owner ids', async () => {
+        const out = formatReport(await runDocs(true, stubs()));
+        for (const p of archiveExpected) assert.ok(out.includes(p), `missing ${p}`);
+        assert.match(out, /messages exported 3/);
+        assert.match(out, /sailor-docs unlinked \(not read\) 1/);
+        assert.ok(PII.every((x) => !out.includes(x)), 'report leaks fixture personal data or an owner id');
+      });
+
+      await check('a second run writes the same private-store pathnames and archive paths', async () => {
+        const s1 = stubs();
+        const r1 = await runDocs(true, s1);
+        const rows1 = await docRows();
+        const s2 = stubs();
+        const r2 = await runDocs(true, s2);
+        const rows2 = await docRows();
+        assert.equal(s1.blobs.size, 5); // document 1, archive 4 and 5, two message exports
+        assert.equal(r2.properties[0].created, false);
+        assert.deepEqual([...s2.blobs.keys()].sort(), [...s1.blobs.keys()].sort());
+        assert.deepEqual([...r2.archived].sort(), [...r1.archived].sort());
+        assert.deepEqual(rows2.map((r) => [r.id, r.blob_pathname]), rows1.map((r) => [r.id, r.blob_pathname]));
+        // Public image URLs are allowed to differ per run (putPublic adds a random suffix).
+      });
+
+      await check('files:false makes no fetch, store, putPublic or export call; rows otherwise the same', async () => {
+        const s = stubs();
+        const report = await runDocs(false, s);
+        assert.equal(s.calls, 0);
+        const P = report.properties[0].property_id;
+        const rows = await docRows();
+        assert.equal(rows.length, 5);
+        assert.ok(rows.every((r) => r.deleted && r.size_bytes === 0));
+        const d1 = rows.find((r) => r.id === uid('document', 1));
+        assert.deepEqual([d1.blob_pathname, d1.content_type], [`marina-docs/${P}/${uid('booking', 1)}/sidon-1.pdf`, 'application/pdf']);
+        assert.deepEqual([...report.archived].sort(), archiveExpected); // would-be paths
+        assert.equal(report.messages_exported, 0);
+        assert.deepEqual(countsOf(report), [0, 4, 1, 0]);
+        assert.equal(await imageUrl(), `${STORE}marina/${A}/1700000000000.webp`);
+      });
+    }
+
     // (later tasks append checks here)
   } finally {
     await db.query('ROLLBACK');

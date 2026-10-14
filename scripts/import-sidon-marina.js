@@ -416,7 +416,7 @@ async function importBookings(dst, source, plan, report, opts) {
   }
   return imported;
 }
-async function importSidon(dst, source, plan, opts) {
+async function importCore(dst, source, plan, opts) {
   if (plan.refusals.length) throw new ImportRefused(plan.refusals.join('; '));
   const report = {
     mode: opts.mode, target: opts.target, files: opts.files,
@@ -621,7 +621,7 @@ async function importSidon(dst, source, plan, opts) {
 
 // For terminals and sign-off notes: aliases, slugs, property ids and counts
 // only. It never carries a name, email or Sidon owner id.
-function formatReport(report) {
+function formatCoreReport(report) {
   const r = report;
   const out = [`import ${r.mode === 'commit' ? 'committed' : 'dry run (rolled back)'}; target ${r.target}; files ${r.files ? 'on' : 'off'}`];
   out.push('properties:', ...r.properties.map((p) => `  ${p.property_id} ${p.created ? 'created' : 'reused'} (today ${p.today})`));
@@ -643,8 +643,175 @@ function formatReport(report) {
   return out.join('\n');
 }
 
+// ---- Steps 9-10: documents, images, the archive and messages ----
+
+const TYPE_BY_EXT = new Map([['pdf', 'application/pdf'], ['jpg', 'image/jpeg'], ['jpeg', 'image/jpeg'], ['png', 'image/png']]);
+
+// Sidon file_url values are full public-store URLs. The path inside the
+// store (marina-docs/, sailor-docs/, marina/) decides what the import does.
+function sourcePath(fileUrl) {
+  if (typeof fileUrl !== 'string' || !fileUrl.trim()) return null;
+  try { return decodeURIComponent(new URL(fileUrl).pathname.slice(1)) || null; } catch { return null; }
+}
+
+// The extension lands in a blob pathname, so anything unusual becomes 'bin'.
+function extOf(path) {
+  const m = /\.([a-z0-9]{1,10})$/i.exec(String(path ?? '').split('/').pop());
+  return m ? m[1].toLowerCase() : 'bin';
+}
+
+// For rows whose bytes are never read (G4): the type the file name claims.
+// A Map, so 'toString' and friends can't hit Object.prototype.
+function typeFromExt(ext) {
+  return TYPE_BY_EXT.get(ext) || 'application/octet-stream';
+}
+
+// Sidon keeps extracted_data as JSON text; blank or broken text -> NULL.
+// Re-stringified so pg sends arrays as JSON, not as a Postgres array.
+function extractedJson(text) {
+  try { return text && String(text).trim() ? JSON.stringify(JSON.parse(text)) : null; } catch { return null; }
+}
+
+// Every Sidon URL is on a public store, so no token is needed.
+async function defaultFetchBlob(url) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return { buf: Buffer.from(await res.arrayBuffer()), contentType: res.headers.get('content-type') };
+}
+
+async function importSidon(dst, source, plan, opts) {
+  const report = await importCore(dst, source, plan, opts); // steps 1-8
+  await importFiles(dst, source, plan, opts, report);       // steps 9-10
+  return report;
+}
+
+// "Linked" means its booking was imported by step 6 of THIS run. That is
+// read back from the transaction, so overlap/no-berth skips and skipped
+// owners' bookings are simply absent. Every blob call sits behind
+// opts.files, so --no-files writes the same rows and touches no store.
+async function importFiles(dst, source, plan, opts, report) {
+  const { files } = opts;
+  const fetchBlob = opts.fetchBlob || defaultFetchBlob;
+  const now = opts.now || new Date();
+  const importing = plan.owners.filter((o) => o.action === 'import');
+  const ownerIds = importing.map((o) => o.owner_id);
+  const today = new Map(report.properties.map((p) => [p.property_id, p.today]));
+  const counts = new Map();
+  for (const o of importing) {
+    const c = report.marinas.find((m) => m.alias === o.alias).counts;
+    Object.assign(c, { documents_copied: 0, documents_not_copied: 0, documents_sailor_docs: 0, documents_fetch_failed: 0 });
+    counts.set(uid('marina', o.owner_id), c); // re-keyed bookings already sit under their target marina
+  }
+  Object.assign(report, { archived: [], sailor_docs_unlinked: 0, messages_exported: 0 });
+
+  const { rows: booked } = await dst.query(
+    `SELECT mb.id, mb.property_id, mb.marina_id, mb.status, mb.departure, mb.updated_at
+       FROM marina_booking mb JOIN marina m ON m.id = mb.marina_id
+      WHERE mb.id = ANY($1) AND m.sidon_owner_id = ANY($2)`,
+    [source.bookings.map((b) => uid('booking', b.id)), ownerIds]);
+  const bookings = new Map(booked.map((b) => [b.id, b]));
+  const { rows: reqRows } = await dst.query(
+    `SELECT r.id FROM marina_doc_requirement r JOIN marina m ON m.id = r.marina_id
+      WHERE r.id = ANY($1) AND m.sidon_owner_id = ANY($2)`,
+    [source.requirements.map((r) => uid('requirement', r.id)), ownerIds]);
+  const reqs = new Set(reqRows.map((r) => r.id));
+
+  for (const d of source.documents) {
+    const p = sourcePath(d.file_url);
+    const ext = extOf(p);
+    const b = d.booking_id == null ? undefined : bookings.get(uid('booking', d.booking_id));
+    if (!b) {
+      // Unlinked. Sidon's own guest uploads go to the private archive
+      // (retentionOnce purges it after 90 days). sailor-docs/* is sidon-ai's
+      // wallet: counted, never read.
+      if (!p?.startsWith('marina-docs/')) { report.sailor_docs_unlinked += 1; continue; }
+      const path = `marina-docs-archive/sidon/${alias(d.owner_id)}/${d.id}.${ext}`;
+      report.archived.push(path);
+      if (files) {
+        const got = await fetchBlob(d.file_url).catch(() => null);
+        if (got) await docs.store.put(path, got.buf, got.contentType || typeFromExt(ext));
+        else report.warnings.push(`archive copy failed: ${path}`);
+      }
+      continue;
+    }
+    const c = counts.get(b.marina_id);
+    const pathname = `marina-docs/${b.property_id}/${b.id}/sidon-${d.id}.${ext}`;
+    let copied = null;
+    if (!p?.startsWith('marina-docs/')) c.documents_sailor_docs += 1; // G4: never fetched
+    else if (!files || !insideRetention(b, today.get(b.property_id), now)) c.documents_not_copied += 1;
+    else {
+      const got = await fetchBlob(d.file_url).catch(() => null);
+      const type = got && docs.sniffType(got.buf);
+      if (type) {
+        await docs.store.put(pathname, got.buf, type);
+        copied = { type, size: got.buf.length };
+        c.documents_copied += 1;
+      } else {
+        c.documents_fetch_failed += 1;
+        c.documents_not_copied += 1;
+      }
+    }
+    const req = uid('requirement', d.requirement_id);
+    // Not-copied rows keep the would-be pathname (NOT NULL) with the file
+    // marked deleted, so staff see the document and that its file is gone.
+    await dst.query(
+      `INSERT INTO marina_document (id, property_id, marina_id, booking_id, requirement_id, type, blob_pathname, file_name,
+         content_type, size_bytes, extracted_data, expiry_date, status, notes, submitted_at, verified_at, file_deleted_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, CASE WHEN $17::boolean THEN NULL ELSE now() END)`,
+      [uid('document', d.id), b.property_id, b.marina_id, b.id, reqs.has(req) ? req : null, d.type, pathname, d.file_name,
+        copied ? copied.type : typeFromExt(ext), copied ? copied.size : 0, extractedJson(d.extracted_data),
+        d.expiry_date ? new Date(d.expiry_date).toISOString().slice(0, 10) : null, // stored at midnight UTC: the UTC date
+        d.status, d.notes, d.submitted_at, d.verified_at, copied !== null]);
+  }
+
+  if (!files) return;
+
+  // Images were inserted with the Sidon URL (step 4) and are re-hosted here,
+  // so every blob call of the run sits behind opts.files. putPublic adds a
+  // random suffix: each run gets new URLs and leaves the last run's copies
+  // behind (accepted).
+  const images = new Map(source.images.map((i) => [uid('image', i.id), i]));
+  const { rows: imported } = await dst.query(
+    `SELECT i.id, i.property_id, i.marina_id FROM marina_image i JOIN marina m ON m.id = i.marina_id
+      WHERE i.id = ANY($1) AND m.sidon_owner_id = ANY($2)`, [[...images.keys()], ownerIds]);
+  for (const row of imported) {
+    const src = images.get(row.id);
+    const got = await fetchBlob(src.url).catch(() => null);
+    // Without a copy the row keeps the Sidon URL, which stays public.
+    if (!got) { report.warnings.push(`image copy failed: ${alias(src.owner_id)} image ${src.id}`); continue; }
+    const ext = extOf(sourcePath(src.url));
+    const url = await docs.putPublic(`marina-images/${row.property_id}/${row.marina_id}.${ext}`, got.buf, got.contentType || typeFromExt(ext));
+    await dst.query('UPDATE marina_image SET url = $1 WHERE id = $2', [url, row.id]);
+  }
+
+  // R17: messages are personal data with no OTA table. One private JSON per
+  // owner, any action (skipped owners included), named by alias so the
+  // path never shows an owner id.
+  for (const [owner, rows] of Map.groupBy(source.messages, (m) => m.owner_id)) {
+    await docs.store.put(`marina-archive/messages-${alias(owner)}.json`, Buffer.from(JSON.stringify(rows)), 'application/json');
+    report.messages_exported += rows.length;
+  }
+}
+
+// The files part of the report: counts, the archive's paths (alias + Sidon
+// document id) and totals. No URLs, since Sidon URLs contain owner ids.
+function formatFiles(report) {
+  const lines = ['', `files${report.files ? '' : ' (--no-files: nothing fetched or stored; archive paths are would-be paths)'}`];
+  for (const m of report.marinas) {
+    const c = m.counts;
+    lines.push(`  ${m.alias} ${m.slug}: documents copied ${c.documents_copied}, not copied ${c.documents_not_copied} (fetch failed ${c.documents_fetch_failed}), sailor-docs ${c.documents_sailor_docs}`);
+  }
+  lines.push(`  archived ${report.archived.length}:`, ...report.archived.map((p) => `    ${p}`));
+  lines.push(`  sailor-docs unlinked (not read) ${report.sailor_docs_unlinked}`, `  messages exported ${report.messages_exported}`);
+  return lines;
+}
+
+function formatReport(report) {
+  return [formatCoreReport(report), ...formatFiles(report)].join('\n');
+}
+
 module.exports = { ImportRefused, alias, uid, slugify, tierDate, cleanEmail, mapBookingStatus, insideRetention,
-  loadMap, readSource, readTargets, planMapping, importSidon, formatPlan, formatReport };
+  loadMap, readSource, readTargets, planMapping, importSidon, formatPlan, formatReport, sourcePath, extOf, typeFromExt };
 
 if (require.main === module) {
   const argv = process.argv.slice(2);
