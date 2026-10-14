@@ -6,10 +6,13 @@ const { unknownPlaceholders } = require('../lib/marinaContracts');
 // Staff CRUD for marinas and their catalogue tables. Every child table is
 // property-scoped and soft-deletes through status, so one table-driven
 // handler set serves all of them; list returns active rows (berths: all
-// but inactive), get returns any status.
+// but inactive) unless ?include_inactive=1 (the dashboard's Reactivate);
+// get returns any status.
 
 const badRequest = (res, error) => res.status(400).json({ error });
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+// Same shape check as the guest booking form (marinaGuard.js).
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // column -> validator returning the stored value or throws {status:400}
 const fail = (msg) => { const e = new Error(msg); e.status = 400; throw e; };
@@ -18,12 +21,15 @@ const v = {
   required: (max) => (x) => (typeof x === 'string' && x.trim() && x.length <= max ? x.trim() : fail('is required')),
   longText: (x) => (x == null || x === '' ? null : typeof x === 'string' ? x : fail('must be text')),
   num: (x) => (x == null || x === '' ? null : Number.isFinite(Number(x)) ? Number(x) : fail('must be a number')),
+  // Prices and sizes: a negative one prices a stay below zero or fits any boat.
+  nonNeg: (x) => (x == null || x === '' ? null : Number.isFinite(Number(x)) && Number(x) >= 0 ? Number(x) : fail('must be a number, 0 or more')),
   int: (x) => (x == null || x === '' ? null : Number.isInteger(Number(x)) ? Number(x) : fail('must be an integer')),
   bool: (x) => (typeof x === 'boolean' ? x : fail('must be true or false')),
   date: (x) => (/^\d{4}-\d{2}-\d{2}$/.test(x) ? x : fail('must be YYYY-MM-DD')),
   oneOf: (...opts) => (x) => (opts.includes(x) ? x : fail(`must be one of ${opts.join(', ')}`)),
   json: (x) => (Array.isArray(x) ? JSON.stringify(x) : fail('must be an array')),
   url: (x) => (x == null || x === '' ? null : isValidUrl(x) ? x : fail('must be an http(s) URL')),
+  email: (x) => (x == null || x === '' ? null : typeof x === 'string' && x.length <= 255 && EMAIL_RE.test(x) ? x : fail('must be an email address')),
   uuidOrNull: (x) => (x == null ? null : isValidUuid(x) ? x : fail('must be a UUID')),
 };
 const STATUS = v.oneOf('active', 'inactive');
@@ -33,11 +39,11 @@ const TABLES = {
     name: v.required(100), svg_data: v.longText, sw_lat: v.num, sw_lng: v.num, ne_lat: v.num, ne_lng: v.num, rotation: v.num, sort_order: v.int, status: STATUS }, required: ['name'] },
   berths: { table: 'marina_berth', order: 'label', listWhere: "status <> 'inactive'", cols: {
     label: v.required(30), pontoon_id: v.uuidOrNull, lat: v.num, lng: v.num, rotation: v.num,
-    length_m: v.num, min_length_m: v.num, beam_m: v.num, depth_m: v.num, price_per_night: v.num,
+    length_m: v.nonNeg, min_length_m: v.nonNeg, beam_m: v.nonNeg, depth_m: v.nonNeg, price_per_night: v.nonNeg,
     price_mode: v.oneOf('per_metre', 'fixed'), notes: v.longText, status: v.oneOf('active', 'maintenance', 'inactive') }, required: ['label'] },
   'price-tiers': { table: 'marina_price_tier', order: 'valid_from, max_length_m', cols: {
-    valid_from: v.date, valid_to: v.date, max_length_m: v.num, max_beam_m: v.num, price_per_night: v.num,
-    price_per_month: v.num, price_per_year: v.num, status: STATUS }, required: ['valid_from', 'valid_to', 'max_length_m', 'price_per_night'] },
+    valid_from: v.date, valid_to: v.date, max_length_m: v.nonNeg, max_beam_m: v.nonNeg, price_per_night: v.nonNeg,
+    price_per_month: v.nonNeg, price_per_year: v.nonNeg, status: STATUS }, required: ['valid_from', 'valid_to', 'max_length_m', 'price_per_night'] },
   'doc-requirements': { table: 'marina_doc_requirement', order: 'sort_order, name', cols: {
     type: v.required(30), name: v.required(100), description: v.longText, fields: v.json, mandatory: v.bool, sort_order: v.int, status: STATUS }, required: ['type', 'name'] },
   'contract-templates': { table: 'marina_contract_template', order: 'min_nights, name', cols: {
@@ -50,7 +56,7 @@ const TABLES = {
 
 const MARINA_COLS = {
   name: v.required(100), slug: (x) => (typeof x === 'string' && SLUG_RE.test(x) && x.length <= 100 ? x : fail('must be lowercase letters, digits and dashes')),
-  description: v.longText, phone: v.text(30), email: v.text(255), website: v.url, lat: v.num, lng: v.num,
+  description: v.longText, phone: v.text(30), email: v.email, website: v.url, lat: v.num, lng: v.num,
   layout_svg: v.longText, layout_sw_lat: v.num, layout_sw_lng: v.num, layout_ne_lat: v.num, layout_ne_lng: v.num, layout_rotation: v.num,
   response_window_hours: (x) => (Number.isInteger(x) && x >= 1 && x <= 144 ? x : fail('must be a whole number of hours, 1-144')),
   auto_confirm: v.bool,
@@ -80,6 +86,13 @@ async function checkPontoon(client, marinaId, values) {
   if (!rowCount) fail('pontoon_id must be a pontoon of this marina');
 }
 
+// valid_to is inclusive, so a one-day tier has valid_from = valid_to.
+// Dates are 'YYYY-MM-DD' strings (src/db sets the DATE parser), so string
+// order is date order.
+function checkTierDates(t) {
+  if (t.valid_from > t.valid_to) fail('valid_to must be on or after valid_from');
+}
+
 async function marinaOr404(req, res, client = pool) {
   if (!isValidUuid(req.params.marina_id)) { res.status(404).json({ error: 'Marina not found' }); return null; }
   const { rows: [m] } = await client.query('SELECT * FROM marina WHERE id = $1 AND property_id = $2', [req.params.marina_id, req.property_id]);
@@ -103,7 +116,9 @@ function updateSql(table, values, id, propertyId) {
 
 async function listMarinas(req, res, next) {
   try {
-    const { rows } = await pool.query("SELECT * FROM marina WHERE property_id = $1 AND status = 'active' ORDER BY name", [req.property_id]);
+    // ?include_inactive=1 (exactly '1'): every status, for the dashboard's Reactivate.
+    const all = req.query.include_inactive === '1';
+    const { rows } = await pool.query(`SELECT * FROM marina WHERE property_id = $1${all ? '' : " AND status = 'active'"} ORDER BY name`, [req.property_id]);
     res.json(rows);
   } catch (err) { next(err); }
 }
@@ -157,7 +172,10 @@ function childHandlers(kind) {
     list: async (req, res, next) => {
       try {
         if (!(await marinaOr404(req, res))) return;
-        const { rows } = await pool.query(`SELECT * FROM ${table} WHERE marina_id = $1 AND ${listWhere} ORDER BY ${order}`, [req.params.marina_id]);
+        // ?include_inactive=1 (exactly '1'): every status, same order -- the
+        // dashboard's setup tabs show inactive rows with Reactivate.
+        const where = req.query.include_inactive === '1' ? '' : ` AND ${listWhere}`;
+        const { rows } = await pool.query(`SELECT * FROM ${table} WHERE marina_id = $1${where} ORDER BY ${order}`, [req.params.marina_id]);
         res.json(rows);
       } catch (err) { next(err); }
     },
@@ -166,6 +184,7 @@ function childHandlers(kind) {
         if (!(await marinaOr404(req, res))) return;
         const values = pick(req.body, cols, { create: true, required });
         if (table === 'marina_berth') await checkPontoon(pool, req.params.marina_id, values);
+        if (table === 'marina_price_tier') checkTierDates(values);
         const { rows: [row] } = await pool.query(insertSql(table, { ...values, property_id: req.property_id, marina_id: req.params.marina_id }));
         res.status(201).json(withWarnings(table, row));
       } catch (err) {
@@ -183,6 +202,8 @@ function childHandlers(kind) {
         const { rows: [before] } = await client.query(`SELECT * FROM ${table} WHERE id = $1 AND marina_id = $2 AND property_id = $3 FOR UPDATE`, [req.params.id, req.params.marina_id, req.property_id]);
         if (!before) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
         if (table === 'marina_berth') await checkPontoon(client, req.params.marina_id, values);
+        // Against the stored row: an update may move just one end.
+        if (table === 'marina_price_tier') checkTierDates({ ...before, ...values });
         const { rows: [row] } = await client.query(updateSql(table, values, req.params.id, req.property_id));
         // A berth's label is what its pontoon SVG's data-berth-id points
         // at; keep them in step in the same transaction.

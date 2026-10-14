@@ -14,8 +14,10 @@ const { toCents } = require('../lib/folio');
 const { createSubscribeTokenRequest } = require('../lib/ably');
 
 // Guest routes: /api/marina/guest/:marina/... -- the only prefix a site's
-// forwarder passes through. On the key rail the guest rules apply; a
-// bearer (the dashboard's own forwarder) gets staff behaviour on reads.
+// forwarder passes through. A bearer (the dashboard's own forwarder) gets
+// the same whitelisted guest payloads as the key rail; only the guest rate
+// limits (skipped), client_ip (not stored) and guest booking create (403:
+// staff book through POST /api/marina/bookings) differ.
 
 async function resolveMarina(req, res, next) {
   try {
@@ -327,6 +329,7 @@ async function agreeContract(req, res, next) {
        RETURNING template_id, rendered_body, agreed_at`,
       [b.property_id, b.id, t.id, rendered, b.contact_email, guard.clientIp(req), req.get('User-Agent')?.slice(0, 500) ?? null]);
     if (!sig) return res.status(409).json({ error: 'Already agreed' });
+    await life.republish(b.id);
     life.maybeAutoConfirm(b.id).catch((err) => console.error('Marina auto-confirm failed:', err.message));
     res.status(201).json(sig);
   } catch (err) { next(err); }

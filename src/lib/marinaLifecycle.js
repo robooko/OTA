@@ -219,6 +219,20 @@ function afterChange(before, after) {
   if (kind) sendGuestEmail(after, kind);
 }
 
+// Re-sends the joined row to the staff feed after a change that isn't a
+// status transition (document upload/verify/reject, contract agreed).
+// afterChange(b, b): same status, so 'booking-status-changed' only -- no
+// guest update, no email. The hold check repeats afterChange's own guard so
+// a stubbed afterChange still never sees a hold. Never throws.
+async function republish(bookingId) {
+  try {
+    const b = await q.joinedBooking(pool, bookingId);
+    if (b && b.status !== 'hold') module.exports.afterChange(b, b);
+  } catch (err) {
+    console.error('Marina republish failed:', err.message);
+  }
+}
+
 // Lapsed guest holds and unanswered pending requests. Each row is handled
 // under its own row lock, so the sweep and a staff confirm can't both win:
 // whichever locks second re-checks the status the first one left.
@@ -321,4 +335,4 @@ function startMarinaHoldExpiryJob() {
 }
 
 module.exports = {
-  promoteHeldBooking, piMatches, maybeAutoConfirm, sweepOnce, startMarinaHoldExpiryJob, withLockedBooking, setRow, toPending, confirmBooking, declineBooking, cancelBooking, endBooking, afterChange, LIVE, fail };
+  promoteHeldBooking, piMatches, maybeAutoConfirm, sweepOnce, startMarinaHoldExpiryJob, withLockedBooking, setRow, toPending, confirmBooking, declineBooking, cancelBooking, endBooking, afterChange, republish, LIVE, fail };

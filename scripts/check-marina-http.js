@@ -237,9 +237,9 @@ const { bookingToken } = require('../src/lib/marinaToken');
     // ---- Task 10 ----
     const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(1000)]);
     const upload = (b, buf, type = 'application/pdf', t = b.booking_token) => api('POST', `${G}/bookings/${b.booking.id}/documents`, { raw: buf, headers: { 'Content-Type': type, 'X-File-Name': 'passport.pdf', 'X-Booking-Token': t, 'X-Client-Ip': '192.0.2.120' } });
-    const pendingBooking = async () => {
+    const pendingBooking = async (ip = '192.0.2.121') => {
       await pool.query('UPDATE property SET stripe_publishable_key = NULL WHERE id = $1', [P]); // email-confirm path
-      const b = (await api('POST', `${G}/bookings`, { body: guestBody(), headers: { 'X-Client-Ip': '192.0.2.121' } })).body;
+      const b = (await api('POST', `${G}/bookings`, { body: guestBody(), headers: { 'X-Client-Ip': ip } })).body;
       await pool.query("UPDATE marina_booking SET status = 'pending' WHERE id = $1", [b.booking.id]);
       return b;
     };
@@ -467,6 +467,143 @@ const { bookingToken } = require('../src/lib/marinaToken');
       fake.store.delete(row.stripe_payment_intent_id);
       const v = (await view(card)).body;
       assert.equal(v.payment, null); assert.equal(v.booking.card_hold, true);
+    });
+
+    // ---- Plan C Task 1 (R12-R15) ----
+    const docCtrl = require('../src/controllers/marinaDocuments');
+    // Bearer-only controllers can't be reached over HTTP without a real
+    // Clerk token; drive them directly (check-multi-property-http.js).
+    const call = async (fn, req) => {
+      const res = { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+      let error;
+      await fn({ params: {}, query: {}, body: {}, ...req }, res, (e) => { error = e; });
+      if (error) throw error;
+      return res;
+    };
+    // Records afterChange calls (the staff-feed publish) instead of publishing.
+    const spyAfterChange = async (fn) => {
+      const real = life.afterChange; const calls = [];
+      life.afterChange = (...args) => { calls.push(args); };
+      try { await fn(); } finally { life.afterChange = real; }
+      return calls;
+    };
+    // Exactly one republish: the same joined row as before and after (no
+    // status change, so no guest update or email), never a hold.
+    const republishedOnce = (calls, id) => {
+      assert.equal(calls.length, 1, `afterChange calls: ${calls.length}`);
+      const [before, after] = calls[0];
+      assert.equal(before, after); assert.equal(after.id, id); assert.notEqual(after.status, 'hold');
+      return after;
+    };
+    const ipR12 = '192.0.2.150';
+    const review = (id, status) => call(docCtrl.updateDocument, { params: { id }, body: { status }, property_id: P, auth_method: 'bearer' });
+    // Off, so a verify or an agreement can't add a second, status-changing event.
+    await pool.query('UPDATE marina SET auto_confirm = false WHERE id = $1', [m.id]);
+    await check('R12: a guest document upload republishes the booking once', async () => {
+      const b = await pendingBooking(ipR12);
+      const calls = await spyAfterChange(async () => assert.equal((await upload(b, pdf)).status, 201));
+      assert.equal(republishedOnce(calls, b.booking.id).doc_count, 1);
+    });
+    await check('R12: a staff verify and a reject each republish the booking once', async () => {
+      const b = await pendingBooking(ipR12);
+      const d = (await upload(b, pdf)).body;
+      const verified = await spyAfterChange(async () => {
+        const r = await review(d.id, 'verified');
+        assert.equal(r.statusCode, 200); assert.equal(r.body.status, 'verified');
+      });
+      assert.equal(republishedOnce(verified, b.booking.id).docs_verified, 1);
+      const rejected = await spyAfterChange(async () => assert.equal((await review(d.id, 'rejected')).body.status, 'rejected'));
+      assert.equal(republishedOnce(rejected, b.booking.id).docs_verified, 0);
+    });
+    const tpl = (await api('POST', `/api/marina/marinas/${m.id}/contract-templates`, { body: { name: 'R12', body_markdown: 'Agreed by {{sailor_name}}' } })).body;
+    const agree = (b) => api('POST', `${G}/bookings/${b.booking.id}/contract`, { headers: { 'X-Booking-Token': b.booking_token } });
+    await check('R12: a contract agreement republishes the booking once', async () => {
+      const b = await pendingBooking(ipR12);
+      const calls = await spyAfterChange(async () => assert.equal((await agree(b)).status, 201));
+      republishedOnce(calls, b.booking.id);
+    });
+    await check('R13: staff GET /bookings/:id returns the agreed contract text', async () => {
+      const b = await pendingBooking(ipR12);
+      assert.equal((await agree(b)).status, 201);
+      const r = await api('GET', `/api/marina/bookings/${b.booking.id}`);
+      assert.equal(r.status, 200);
+      assert.deepEqual(Object.keys(r.body.signature).sort(), ['agreed_at', 'rendered_body', 'signer_email', 'template_id']);
+      assert.equal(r.body.signature.rendered_body, 'Agreed by Ann'); assert.equal(r.body.signature.template_id, tpl.id);
+    });
+    await pool.query("UPDATE marina_contract_template SET status = 'inactive' WHERE id = $1", [tpl.id]);
+    await check('R12: republish never sends a hold to the staff feed', async () => {
+      const h = await insert({ arrival: future(3300), departure: future(3302), status: 'hold', source: 'guest', expires: new Date(Date.now() + 3600000) });
+      const calls = await spyAfterChange(() => life.republish(h.id));
+      assert.equal(calls.length, 0);
+    });
+    await check('R14: include_inactive=1 lists deactivated rows; the default and include_inactive=true do not', async () => {
+      const mk = async (path, body) => { const r = await api('POST', path, { body }); assert.equal(r.status, 201, JSON.stringify(r.body)); return r.body; };
+      const M = `/api/marina/marinas/${m.id}`;
+      const pon = await mk(`${M}/pontoons`, { name: 'R14 pontoon' });
+      const berth = await mk(`${M}/berths`, { label: 'R14', length_m: 10 });
+      const tier = await mk(`${M}/price-tiers`, { valid_from: '2090-01-01', valid_to: '2090-12-31', max_length_m: 10, price_per_night: 1 });
+      const other = await mk('/api/marina/marinas', { name: 'Porto R14', slug: 'porto-r14' });
+      const lists = [[`${M}/pontoons`, pon.id], [`${M}/berths`, berth.id], [`${M}/price-tiers`, tier.id], ['/api/marina/marinas', other.id]];
+      for (const [path, id] of lists) assert.equal((await api('PUT', `${path}/${id}`, { body: { status: 'inactive' } })).status, 200, `deactivate ${path}`);
+      const ids = async (path) => (await api('GET', path)).body.map((r) => r.id);
+      for (const [path, id] of lists) {
+        assert.ok(!(await ids(path)).includes(id), `${path} default`);
+        assert.ok(!(await ids(`${path}?include_inactive=true`)).includes(id), `${path} =true`);
+        assert.ok((await ids(`${path}?include_inactive=1`)).includes(id), `${path} =1`);
+      }
+      assert.ok((await ids('/api/marina/marinas?include_inactive=1')).includes(m.id), 'active rows stay listed');
+    });
+    await check('R15: negative berth and tier prices or sizes → 400', async () => {
+      const M = `/api/marina/marinas/${m.id}`;
+      const b = await api('POST', `${M}/berths`, { body: { label: 'NEG', length_m: 10, price_per_night: -1 } });
+      assert.equal(b.status, 400); assert.equal(b.body.error, 'price_per_night must be a number, 0 or more');
+      const l = await api('PUT', `${M}/berths/${berthRes.body.id}`, { body: { length_m: -0.5 } });
+      assert.equal(l.status, 400); assert.equal(l.body.error, 'length_m must be a number, 0 or more');
+      const t = await api('POST', `${M}/price-tiers`, { body: { valid_from: '2091-01-01', valid_to: '2091-12-31', max_length_m: 10, price_per_night: -5 } });
+      assert.equal(t.status, 400); assert.equal(t.body.error, 'price_per_night must be a number, 0 or more');
+      const bulk = await api('POST', `${M}/berths/bulk`, { body: { rows: [{ label: 'NB1' }, { label: 'NB2', beam_m: -3 }] } });
+      assert.equal(bulk.status, 400); assert.equal(bulk.body.error, 'row 2: beam_m must be a number, 0 or more');
+    });
+    await check('R15: price tier valid_from after valid_to → 400 on create and update', async () => {
+      const T = `/api/marina/marinas/${m.id}/price-tiers`;
+      const bad = await api('POST', T, { body: { valid_from: '2092-06-10', valid_to: '2092-06-01', max_length_m: 10, price_per_night: 1 } });
+      assert.equal(bad.status, 400); assert.equal(bad.body.error, 'valid_to must be on or after valid_from');
+      const ok = await api('POST', T, { body: { valid_from: '2092-06-01', valid_to: '2092-06-01', max_length_m: 10, price_per_night: 1, status: 'inactive' } });
+      assert.equal(ok.status, 201, 'a one-day tier is fine');
+      const upd = await api('PUT', `${T}/${ok.body.id}`, { body: { valid_from: '2092-06-02' } });
+      assert.equal(upd.status, 400); assert.equal(upd.body.error, 'valid_to must be on or after valid_from');
+      assert.equal((await api('PUT', `${T}/${ok.body.id}`, { body: { valid_to: '2092-06-30' } })).status, 200);
+    });
+    await check('R15: staff booking contact_phone over 30 and bad boat sizes → 400, on create and edit', async () => {
+      const base = { berth_id: berthRes.body.id, contact_name: 'Val', arrival: future(3100), departure: future(3102), status: 'pending' };
+      const post = (o) => api('POST', '/api/marina/bookings', { body: { ...base, ...o } });
+      const phone = await post({ contact_phone: '1'.repeat(31) });
+      assert.equal(phone.status, 400); assert.equal(phone.body.error, 'contact_phone must be up to 30 characters');
+      for (const [k, val] of [['boat_length_m', -1], ['boat_length_m', 'abc'], ['boat_beam_m', -2]]) {
+        const r = await post({ [k]: val });
+        assert.equal(r.status, 400, `${k}=${val}`); assert.equal(r.body.error, `${k} must be a number, 0 or more`);
+      }
+      const ok = await post({ contact_phone: '1'.repeat(30), boat_length_m: 0, boat_beam_m: '' });
+      assert.equal(ok.status, 201, JSON.stringify(ok.body));
+      const put = (body) => api('PUT', `/api/marina/bookings/${ok.body.id}`, { body });
+      const p2 = await put({ contact_phone: '+39 '.padEnd(31, '0') });
+      assert.equal(p2.status, 400); assert.equal(p2.body.error, 'contact_phone must be up to 30 characters');
+      const l2 = await put({ boat_length_m: -4 });
+      assert.equal(l2.status, 400); assert.equal(l2.body.error, 'boat_length_m must be a number, 0 or more');
+      assert.equal((await put({ boat_length_m: '12.5', boat_beam_m: '' })).status, 200);
+    });
+    await check('R15: marina email must be an email address', async () => {
+      const r = await api('POST', '/api/marina/marinas', { body: { name: 'Porto Mail', slug: 'porto-mail', email: 'harbour office' } });
+      assert.equal(r.status, 400); assert.equal(r.body.error, 'email must be an email address');
+      const u = await api('PUT', `/api/marina/marinas/${m.id}`, { body: { email: 'a@b' } });
+      assert.equal(u.status, 400); assert.equal(u.body.error, 'email must be an email address');
+      assert.equal((await api('PUT', `/api/marina/marinas/${m.id}`, { body: { email: '' } })).status, 200, "'' clears it");
+    });
+    await check('R15: an image over 4 MB → 413 JSON', async () => {
+      // PNG signature + padding = 4 MB + 1 byte.
+      const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(4 * 1024 * 1024 - 7)]);
+      const r = await api('POST', `/api/marina/marinas/${m.id}/images/upload`, { raw: png, headers: { 'Content-Type': 'image/png' } });
+      assert.equal(r.status, 413); assert.deepEqual(r.body, { error: 'Images are limited to 4 MB' });
     });
 
     // (later tasks append here)

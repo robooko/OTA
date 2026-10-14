@@ -14,6 +14,7 @@ const enquiryLimiter = guestLimiter('marina-enquiry', 10);
 const rawDoc = express.raw({ type: ['application/pdf', 'image/jpeg', 'image/png'], limit: '4mb' });
 const rawDocSafe = (req, res, next) => rawDoc(req, res, (err) => (err?.status === 413 ? res.status(413).json({ error: 'Files are limited to 4 MB' }) : next(err)));
 const rawImage = express.raw({ type: ['image/jpeg', 'image/png'], limit: '4mb' });
+const rawImageSafe = (req, res, next) => rawImage(req, res, (err) => (err?.status === 413 ? res.status(413).json({ error: 'Images are limited to 4 MB' }) : next(err)));
 const { authenticate, authenticateOrApiKey, requireRole } = require('../middleware/auth');
 
 // Literal segments before '/:id' throughout (see eventInquiries.js).
@@ -29,7 +30,7 @@ router.get('/marinas/:id', authenticateOrApiKey, cat.getMarina);
 router.put('/marinas/:id', authenticateOrApiKey, cat.updateMarina);
 
 router.post('/marinas/:marina_id/berths/bulk', authenticateOrApiKey, cat.bulkBerths);
-router.post('/marinas/:marina_id/images/upload', authenticateOrApiKey, rawImage, cat.uploadImage);
+router.post('/marinas/:marina_id/images/upload', authenticateOrApiKey, rawImageSafe, cat.uploadImage);
 for (const kind of Object.keys(cat.TABLES)) {
   const h = cat.childHandlers(kind);
   router.get(`/marinas/:marina_id/${kind}`, authenticateOrApiKey, h.list);

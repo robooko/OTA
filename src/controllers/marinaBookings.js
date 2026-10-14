@@ -6,6 +6,18 @@ const { priceStay } = require('../lib/marinaPricing');
 const { emailKey } = require('../lib/spaBookingGuard');
 const { sendGuestEmail } = require('../lib/marinaEmails');
 
+// Checked here rather than left to the DB: contact_phone is VARCHAR(30) (a
+// longer one was a 500), and a negative boat size would price or fit
+// nonsense. '' means "not given", as on the edit path.
+function fieldError(f) {
+  if (f.contact_phone != null && String(f.contact_phone).length > 30) return 'contact_phone must be up to 30 characters';
+  for (const k of ['boat_length_m', 'boat_beam_m']) {
+    if (f[k] != null && f[k] !== '' && !(Number.isFinite(Number(f[k])) && Number(f[k]) >= 0)) return `${k} must be a number, 0 or more`;
+  }
+  return null;
+}
+const numOrNull = (x) => (x == null || x === '' ? null : Number(x));
+
 // Staff booking routes (authenticateOrApiKey, so MCP tools work over a
 // key). Holds are a guest's in-flight checkout: hidden from staff lists.
 
@@ -52,7 +64,8 @@ async function getBooking(req, res, next) {
       pool.query(`SELECT id, requirement_id, type, file_name, content_type, size_bytes, status,
                          ${req.auth_method === 'bearer' ? 'expiry_date,' : ''} submitted_at, verified_at, file_deleted_at
                   FROM marina_document WHERE booking_id = $1 ORDER BY submitted_at`, [b.id]),
-      pool.query('SELECT template_id, signer_email, agreed_at FROM marina_contract_signature WHERE booking_id = $1', [b.id]),
+      // rendered_body: the contract text exactly as the guest agreed it.
+      pool.query('SELECT template_id, signer_email, agreed_at, rendered_body FROM marina_contract_signature WHERE booking_id = $1', [b.id]),
     ]);
     const { confirm_token_hash, ...safe } = b;
     res.json({ ...safe, documents: docs.rows, signature: sig.rows[0] || null });
@@ -71,18 +84,21 @@ async function createBooking(req, res, next) {
     const status = b.status ?? 'confirmed';
     if (!['pending', 'confirmed'].includes(status)) return res.status(400).json({ error: 'status must be pending or confirmed' });
     if (b.total_price != null && !(Number(b.total_price) >= 0)) return res.status(400).json({ error: 'total_price must be a non-negative number' });
+    const bad = fieldError(b);
+    if (bad) return res.status(400).json({ error: bad });
     const { rows: [berth] } = await pool.query("SELECT * FROM marina_berth WHERE id = $1 AND property_id = $2 AND status <> 'inactive'", [b.berth_id, req.property_id]);
     if (!berth) return res.status(404).json({ error: 'Berth not found' });
-    const len = b.boat_length_m != null ? Number(b.boat_length_m) : null;
+    const len = numOrNull(b.boat_length_m);
+    const beam = numOrNull(b.boat_beam_m);
     const total = b.total_price != null ? Number(b.total_price).toFixed(2)
-      : priceStay({ berth, tiers: await q.activeTiers(pool, berth.marina_id), arrival: b.arrival, departure: b.departure ?? null, boatLengthM: len, boatBeamM: b.boat_beam_m != null ? Number(b.boat_beam_m) : null }).total_price;
+      : priceStay({ berth, tiers: await q.activeTiers(pool, berth.marina_id), arrival: b.arrival, departure: b.departure ?? null, boatLengthM: len, boatBeamM: beam }).total_price;
     const { rows: [row] } = await pool.query(
       `INSERT INTO marina_booking (property_id, marina_id, berth_id, contact_name, contact_email, contact_email_key, contact_phone,
          boat_name, boat_length_m, boat_beam_m, arrival, departure, status, source, locale, total_price, currency, notes)
        SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'staff', $14, $15, upper(p.currency), $16 FROM property p WHERE p.id = $1
        RETURNING id`,
       [req.property_id, berth.marina_id, berth.id, b.contact_name.trim().slice(0, 100), b.contact_email || null, b.contact_email ? emailKey(b.contact_email) : null,
-        b.contact_phone || null, b.boat_name || null, len, b.boat_beam_m ?? null, b.arrival, b.departure ?? null, status,
+        b.contact_phone || null, b.boat_name || null, len, beam, b.arrival, b.departure ?? null, status,
         ['en', 'it', 'fr', 'es'].includes(b.locale) ? b.locale : 'en', total, b.notes || null]);
     const booking = await q.joinedBooking(pool, row.id);
     life.afterChange(null, booking);
@@ -112,6 +128,8 @@ async function updateBooking(req, res, next) {
       const fields = Object.fromEntries(EDITABLE.filter((k) => req.body[k] !== undefined).map((k) => [k, req.body[k] === '' ? null : req.body[k]]));
       if (!Object.keys(fields).length) return res.status(400).json({ error: 'Nothing to update' });
       if ('contact_name' in fields && !fields.contact_name) return res.status(400).json({ error: 'contact_name cannot be empty' });
+      const bad = fieldError(fields);
+      if (bad) return res.status(400).json({ error: bad });
       if ('contact_email' in fields) fields.contact_email_key = fields.contact_email ? emailKey(fields.contact_email) : null;
       r = await life.withLockedBooking(b.id, async (client) => ({ ok: true, booking: await life.setRow(client, b.id, fields) }));
     } else return res.status(400).json({ error: 'action must be confirm, decline, cancel or end' });

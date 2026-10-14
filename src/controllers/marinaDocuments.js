@@ -33,6 +33,8 @@ async function uploadDocument(req, res, next) {
        RETURNING id, requirement_id, type, file_name, content_type, size_bytes, status, submitted_at`,
       [b.property_id, b.marina_id, b.id, requirement?.id ?? null, requirement?.type ?? null, pathname, fileName, type, buf.length]);
     docs.extractDocument(d.id);
+    // Staff tables and an open detail dialog update live (doc_count).
+    await life.republish(b.id);
     res.status(201).json(d);
   } catch (err) { next(err); }
 }
@@ -75,6 +77,9 @@ async function updateDocument(req, res, next) {
        RETURNING id, booking_id, status, notes, verified_at, verified_by`,
       [status ?? null, notes ?? null, req.user?.id ?? null, req.params.id, req.property_id]);
     if (!d) return res.status(404).json({ error: 'Document not found' });
+    // Before auto-confirm, so the feed sees the document change ahead of any
+    // confirmation it triggers.
+    await life.republish(d.booking_id);
     if (status === 'verified') life.maybeAutoConfirm(d.booking_id).catch((err) => console.error('Marina auto-confirm failed:', err.message));
     res.json(d);
   } catch (err) { next(err); }
