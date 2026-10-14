@@ -294,6 +294,128 @@ const zeroCounts = () => ({
   documents_copied: 0, documents_not_copied: 0, documents_sailor_docs: 0, documents_fetch_failed: 0,
 });
 
+// ---- importSidon steps 6-8: bookings, occupancy, signatures (R13, R15, R16) ----
+
+// One row under its own savepoint: an exclusion violation (23P01, an
+// overlapping live stay on the berth) skips just that row instead of
+// aborting the whole run's transaction. Any other error still aborts.
+async function insertOrOverlap(dst, sql, params) {
+  await dst.query('SAVEPOINT b');
+  try {
+    await dst.query(sql, params);
+    await dst.query('RELEASE SAVEPOINT b');
+    return true;
+  } catch (err) {
+    if (err.code !== '23P01') throw err;
+    await dst.query('ROLLBACK TO SAVEPOINT b');
+    return false;
+  }
+}
+
+// Returns Map<Sidon booking id, ImportedBooking> for signatures (here) and
+// documents (step 9). Everything is looked up through the deterministic ids
+// step 4 wrote, so this needs no in-memory maps from the catalogue steps.
+async function importBookings(dst, source, plan, report, opts) {
+  const now = opts.now ?? new Date();
+  const owners = new Map(plan.owners.map((o) => [o.owner_id, o]));
+  // Re-keyed owners' rows are counted under their target (R13).
+  const counts = (ownerId) => report.marinas.find((m) => m.alias === alias(ownerId)).counts;
+  const targets = new Map();
+  const target = async (ownerId) => {
+    if (!targets.has(ownerId)) {
+      const marinaId = uid('marina', ownerId);
+      const { rows: [m] } = await dst.query(
+        'SELECT m.property_id, upper(p.currency) AS currency FROM marina m JOIN property p ON p.id = m.property_id WHERE m.id = $1',
+        [marinaId]);
+      const { rows } = await dst.query('SELECT id, label FROM marina_berth WHERE marina_id = $1', [marinaId]);
+      targets.set(ownerId, {
+        marina_id: marinaId, property_id: m.property_id, currency: m.currency,
+        // "Today" is the target property's own calendar day (Pacific/Tahiti
+        // can be a day behind UTC), never the server's.
+        today: await propertyToday(dst, m.property_id),
+        drop: owners.get(ownerId).prices === 'drop',
+        berths: new Map(rows.map((r) => [r.label, r.id])),
+      });
+    }
+    return targets.get(ownerId);
+  };
+
+  // Step 6: Source.bookings is already in created_at, id order, so the
+  // later of an overlapping pair is the one skipped.
+  const imported = new Map();
+  for (const b of source.bookings) {
+    const o = owners.get(b.owner_id);
+    if (!o || o.action === 'skip') continue;
+    const targetOwner = o.action === 'rekey' ? o.rekey_to : o.owner_id;
+    const t = await target(targetOwner);
+    const c = counts(targetOwner);
+    const berthId = t.berths.get(b.berth_id);
+    if (!berthId) { c.bookings_no_berth += 1; continue; }
+    const mapped = mapBookingStatus(b, t.today, now);
+    if (!mapped) { report.warnings.push(`${alias(b.owner_id)}: a booking with an unknown status was skipped`); continue; }
+    const email = cleanEmail(b.sailor_email);
+    const id = uid('booking', b.id);
+    const ok = await insertOrOverlap(dst,
+      `INSERT INTO marina_booking (id, property_id, marina_id, berth_id, contact_name, contact_email, contact_email_key,
+         boat_name, boat_length_m, boat_beam_m, arrival, departure, status, cancel_reason, source, locale,
+         total_price, currency, payment_status, legacy_payment_intent_id, notes, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, round($9::numeric, 2), round($10::numeric, 2), $11, $12, $13, $14,
+         'import', 'en', $15, $16, 'none', $17, $18, $19, $20)`,
+      [id, t.property_id, t.marina_id, berthId, b.sailor_name, email, emailKey(email),
+        b.boat_name, b.boat_loa, b.boat_beam, b.arrival_date, b.departure_date, mapped.status, mapped.cancel_reason,
+        // drop_prices: the Sidon number is in the marina's currency, not the property's (Review Focus 1).
+        b.amount_cents == null || t.drop ? null : b.amount_cents / 100, t.currency,
+        b.payment_intent_id, b.notes, b.created_at, b.updated_at]);
+    if (!ok) { c.bookings_overlap += 1; continue; }
+    c.bookings += 1;
+    if (b.status === 'pending' && mapped.cancel_reason === 'expired') c.pending_expired += 1;
+    if (email === null) c.emails_nulled += 1;
+    imported.set(b.id, { id, owner_id: targetOwner, property_id: t.property_id, marina_id: t.marina_id,
+      status: mapped.status, cancel_reason: mapped.cancel_reason, departure: b.departure_date,
+      updated_at: b.updated_at, today: t.today, email });
+  }
+
+  // Step 7: Sidon kept manual occupancy on the berth; OTA only has bookings,
+  // so each still-occupied berth becomes an open-ended stay from today (R16).
+  for (const s of source.berths) {
+    if (s.status !== 'occupied' && s.status !== 'reserved') continue;
+    const o = owners.get(s.owner_id);
+    if (!o || o.action !== 'import') continue;
+    const t = await target(s.owner_id);
+    const berthId = uid('berth', s.id);
+    const { rows: [r] } = await dst.query(
+      `SELECT EXISTS (SELECT 1 FROM marina_berth WHERE id = $1) AS imported,
+              EXISTS (SELECT 1 FROM marina_booking WHERE berth_id = $1 AND status IN ('hold', 'pending', 'confirmed')
+                        AND daterange(arrival, departure) @> $2::date) AS covered`,
+      [berthId, t.today]);
+    if (!r.imported || r.covered) continue;
+    const ok = await insertOrOverlap(dst,
+      `INSERT INTO marina_booking (id, property_id, marina_id, berth_id, contact_name, arrival, departure, status,
+         source, locale, total_price, currency, payment_status)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL, 'confirmed', 'import', 'en', NULL, $7, 'none')`,
+      [uid('occupancy', s.id), t.property_id, t.marina_id, berthId,
+        (s.guest_name || '').trim().slice(0, 100) || 'Reserved', t.today, t.currency]);
+    counts(s.owner_id)[ok ? 'occupancy' : 'occupancy_overlap'] += 1;
+  }
+
+  // Step 8: only for bookings imported above ("skipped with their booking").
+  // The template is NULL when it wasn't imported (e.g. a re-keyed owner's,
+  // when the target already had one).
+  for (const s of source.signatures) {
+    const b = imported.get(s.booking_id);
+    if (!b) continue;
+    // Sidon has no one-signature-per-booking rule; OTA does (UNIQUE booking_id).
+    const { rowCount } = await dst.query(
+      `INSERT INTO marina_contract_signature (id, property_id, booking_id, template_id, rendered_body, signer_email,
+         agreed_at, ip_address, user_agent)
+       VALUES ($1, $2, $3, (SELECT id FROM marina_contract_template WHERE id = $4), $5, $6, $7, $8, $9)
+       ON CONFLICT (booking_id) DO NOTHING`,
+      [uid('signature', s.id), b.property_id, b.id, uid('template', s.template_id), s.rendered_body, b.email,
+        s.signed_at, s.ip_address, s.user_agent]);
+    counts(b.owner_id).signatures += rowCount;
+  }
+  return imported;
+}
 async function importSidon(dst, source, plan, opts) {
   if (plan.refusals.length) throw new ImportRefused(plan.refusals.join('; '));
   const report = {
@@ -490,6 +612,9 @@ async function importSidon(dst, source, plan, opts) {
     if (dropped) report.warnings.push(`${o.alias} (re-keyed to ${m.alias}): ${dropped} overlay/tier/POI/image row(s) not imported`);
   }
   report.skips = plan.owners.filter((o) => o.action === 'skip').map((o) => ({ alias: o.alias, reason: o.reason }));
+
+  // Steps 6-8; step 9 (documents) classifies each Sidon document by `imported`.
+  const imported = await importBookings(dst, source, plan, report, opts);
 
   return report;
 }

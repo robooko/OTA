@@ -471,6 +471,201 @@ INSERT INTO sidon_fixture.marina_message (owner_id, sailor_email, sailor_name, d
       fs.rmSync(MAP_FILE, { force: true });
     }
 
+    // ---- Task 3: bookings, occupancy, signatures (R13, R15, R16) ----
+    // Block-scoped so these names never collide with earlier tasks' helpers.
+    // In-memory Source objects (the exact readSource shape) keep these cases
+    // independent of the shared sidon_fixture rows.
+    {
+      const I = require('./import-sidon-marina');
+      const { propertyToday } = require('../src/lib/marinaQueries');
+      const { emailKey } = require('../src/lib/spaBookingGuard');
+      const { bookingToken } = require('../src/lib/marinaToken');
+      const OA = 'org_t3_alpha';    // created property in Pacific/Tahiti (UTC-10, like BBYC)
+      const OR = 'org_t3_rekey';    // profile-less, re-keyed onto OA
+      const OB = 'org_t3_sterling'; // reuses a GBP property with a eur profile
+      const TZ = 'Pacific/Tahiti';
+      const hour = 3600 * 1000;
+      // Days relative to the Tahiti property's own today (now() is fixed for
+      // the whole transaction), so "covers today" holds at any UTC hour.
+      const day = async (offset) => (await db.query(
+        'SELECT ((now() AT TIME ZONE $1)::date + $2::int)::text AS d', [TZ, offset])).rows[0].d;
+      const empty = () => ({ profiles: [], layouts: [], overlays: [], berths: [], tiers: [], bookings: [], requirements: [],
+        documents: [], templates: [], signatures: [], pois: [], images: [], messages: [] });
+      const profile = (owner_id, slug, currency) => ({ owner_id, slug, name: slug, lat: null, lng: null, description: null,
+        phone: null, email: null, website: null, response_window_hours: null, currency, updated_at: new Date('2026-01-01T00:00:00Z') });
+      const berth = (id, owner_id, label, status, guest_name = null) => ({ id, owner_id, berth_id: label, overlay_id: null,
+        lat: null, lng: null, length_m: 12, min_length_m: null, beam_m: 4, depth_m: null, status, guest_name, notes: null,
+        price_per_night: 3, price_mode: 'per_metre', rotation: null });
+      let seq = 0;
+      // Source.bookings is in created_at, id order: each call is one second later.
+      const booking = (id, owner_id, label, arrival, departure, status, extra = {}) => {
+        const at = new Date(Date.UTC(2026, 2, 1, 0, 0, seq++));
+        return { id, owner_id, berth_id: label, sailor_name: `Sailor ${id}`, sailor_email: `sailor${id}@example.com`,
+          boat_name: `Boat ${id}`, boat_loa: 10, boat_beam: 3.5, arrival_date: arrival, departure_date: departure, notes: null,
+          status, payment_intent_id: null, amount_cents: 10000, expires_at: null, created_at: at, updated_at: at, ...extra };
+      };
+      const alphaSource = async () => {
+        seq = 0;
+        const s = empty();
+        s.profiles.push(profile(OA, 't3-alpha', 'eur'));
+        s.berths.push(berth(9301, OA, 'A1', 'available'), berth(9302, OA, 'A2', 'available'),
+          berth(9303, OA, 'A3', 'occupied', '  Capt Nemo  '), berth(9304, OA, 'A4', 'reserved', '   '),
+          berth(9305, OA, 'A5', 'occupied'), berth(9306, OA, 'A6', 'occupied'),
+          berth(9311, OR, 'A1', 'occupied'));
+        s.bookings.push(
+          booking(9401, OA, 'A1', '2030-06-01', '2030-06-05', 'confirmed', { sailor_email: '  Sailor.One+x@Example.com ',
+            boat_loa: 12.346, boat_beam: 4.004, amount_cents: 12345, payment_intent_id: 'pi_t3_1', notes: 'n1' }),
+          booking(9402, OA, 'A1', '2030-06-03', '2030-06-07', 'confirmed'),
+          booking(9403, OA, 'Z9', '2030-06-01', '2030-06-03', 'confirmed'),
+          booking(9404, OA, 'A2', '2030-07-01', '2030-07-05', 'pending', { expires_at: new Date(Date.now() - hour) }),
+          booking(9405, OA, 'A2', '2030-07-10', '2030-07-12', 'pending'),
+          booking(9406, OA, 'A2', '2030-08-01', '2030-08-03', 'pending', { expires_at: new Date(Date.now() + 24 * hour) }),
+          booking(9407, OA, 'A2', '2030-09-01', '2030-09-03', 'declined', { sailor_email: 'no-at-sign' }),
+          booking(9408, OA, 'A2', '2030-09-01', '2030-09-03', 'cancelled', { sailor_email: '   ' }),
+          booking(9409, OA, 'A5', await day(-2), await day(3), 'confirmed'),
+          booking(9410, OA, 'A6', await day(10), await day(12), 'confirmed'),
+          booking(9411, OR, 'A1', '2031-01-10', '2031-01-12', 'confirmed'));
+        s.templates.push({ id: 9601, owner_id: OA, name: 'T3 terms', body_markdown: 'I agree to the marina terms.',
+          min_nights: 0, active: 1, created_at: new Date('2026-01-01T00:00:00Z') });
+        s.signatures.push(
+          { id: 9501, owner_id: OA, template_id: 9601, booking_id: 9401, rendered_body: 'Signed 9401',
+            signed_at: new Date('2026-03-02T10:00:00Z'), ip_address: '203.0.113.7', user_agent: 'UA' },
+          { id: 9502, owner_id: OA, template_id: 9601, booking_id: 9402, rendered_body: 'Signed 9402',
+            signed_at: new Date('2026-03-02T11:00:00Z'), ip_address: null, user_agent: null },
+          { id: 9503, owner_id: OR, template_id: 9699, booking_id: 9411, rendered_body: 'Signed 9411',
+            signed_at: new Date('2026-03-02T12:00:00Z'), ip_address: null, user_agent: null });
+        return s;
+      };
+      const alphaMap = { owners: {
+        [OA]: { action: 'create', name: 'T3 Alpha', timezone: TZ, clerk_org_id: 'org_t3_check' },
+        [OR]: { action: 'rekey', to_owner: OA },
+      } };
+      // Fresh readTargets + planMapping per run, so a second run finds the
+      // first run's created property through Targets.reruns.
+      const run = async (source, map) => {
+        const targets = await I.readTargets(db, source, map);
+        return I.importSidon(db, source, I.planMapping(source, map, targets), { mode: 'commit', target: 'local', files: false });
+      };
+      const countsOf = (report, ownerId) => report.marinas.find((m) => m.alias === I.alias(ownerId)).counts;
+      const mb = async (kind, id) => (await db.query('SELECT * FROM marina_booking WHERE id = $1', [I.uid(kind, id)])).rows[0];
+      const alpha = async () => countsOf(await run(await alphaSource(), alphaMap), OA);
+
+      await check('T3: expired or expiry-less pending -> cancelled/expired; declined, cancelled, live pending as-is', async () => {
+        const c = await alpha();
+        const st = async (id) => { const r = await mb('booking', id); return [r.status, r.cancel_reason]; };
+        assert.deepEqual(await st(9401), ['confirmed', null]);
+        assert.deepEqual(await st(9404), ['cancelled', 'expired']);
+        assert.deepEqual(await st(9405), ['cancelled', 'expired']);
+        assert.deepEqual(await st(9406), ['pending', null]);
+        assert.deepEqual(await st(9407), ['declined', null]);
+        assert.deepEqual(await st(9408), ['cancelled', null]);
+        assert.equal(c.pending_expired, 2);
+        assert.equal(c.bookings, 9); // 11 source rows minus the overlap and the berth-less one
+      });
+      await check('T3: imported booking fields (R15)', async () => {
+        await alpha();
+        const r = await mb('booking', 9401);
+        const { property_id } = (await db.query('SELECT property_id FROM marina WHERE id = $1', [I.uid('marina', OA)])).rows[0];
+        assert.deepEqual([r.property_id, r.marina_id, r.berth_id], [property_id, I.uid('marina', OA), I.uid('berth', 9301)]);
+        assert.deepEqual([r.arrival, r.departure], ['2030-06-01', '2030-06-05']);
+        assert.deepEqual([r.source, r.locale, r.payment_status, r.hold_expires_at], ['import', 'en', 'none', null]);
+        assert.equal(r.legacy_payment_intent_id, 'pi_t3_1');
+        assert.deepEqual([r.total_price, r.currency], ['123.45', 'EUR']);
+        assert.deepEqual([r.boat_length_m, r.boat_beam_m], ['12.35', '4.00']);
+        assert.deepEqual([r.contact_name, r.boat_name, r.notes], ['Sailor 9401', 'Boat 9401', 'n1']);
+        assert.equal(r.contact_email, 'Sailor.One+x@Example.com');
+        assert.equal(r.contact_email_key, emailKey('Sailor.One+x@Example.com'));
+        assert.equal(r.contact_email_key, 'sailor.one@example.com');
+        assert.equal(r.created_at.getTime(), Date.UTC(2026, 2, 1, 0, 0, 0));
+        assert.equal(r.updated_at.getTime(), Date.UTC(2026, 2, 1, 0, 0, 0));
+      });
+      await check('T3: blank or @-less emails import as NULL with a NULL key, and are counted', async () => {
+        const c = await alpha();
+        for (const id of [9407, 9408]) {
+          const r = await mb('booking', id);
+          assert.deepEqual([r.contact_email, r.contact_email_key], [null, null]);
+        }
+        assert.equal(c.emails_nulled, 2);
+      });
+      await check('T3: the later of an overlapping confirmed pair is skipped and counted', async () => {
+        const c = await alpha();
+        assert.ok(await mb('booking', 9401), 'the earlier one is kept');
+        assert.equal(await mb('booking', 9402), undefined);
+        assert.equal(c.bookings_overlap, 1);
+      });
+      await check('T3: a booking whose berth label is not in the target marina is skipped and counted', async () => {
+        const c = await alpha();
+        assert.equal(await mb('booking', 9403), undefined);
+        assert.equal(c.bookings_no_berth, 1);
+      });
+      await check("T3 (R13): a re-keyed owner's booking lands on the target's berth, counted under the target", async () => {
+        const c = await alpha();
+        const r = await mb('booking', 9411);
+        assert.deepEqual([r.marina_id, r.berth_id], [I.uid('marina', OA), I.uid('berth', 9301)]);
+        assert.equal(c.bookings, 9);
+      });
+      const sterling = async (decision) => {
+        const P = (await db.query(
+          "INSERT INTO property (name, timezone, currency) VALUES ('T3 Sterling', 'Europe/London', 'GBP') RETURNING id")).rows[0].id;
+        seq = 0;
+        const s = empty();
+        s.profiles.push(profile(OB, 't3-sterling', 'eur'));
+        s.berths.push(berth(9321, OB, 'B1', 'available'));
+        s.bookings.push(booking(9701, OB, 'B1', '2030-05-01', '2030-05-03', 'confirmed', { amount_cents: 5000 }));
+        await run(s, { owners: { [OB]: { action: 'property', property_id: P, currency_decision: decision } } });
+        return mb('booking', 9701);
+      };
+      await check('T3 (Review Focus 1): drop_prices -> the property currency and a NULL total', async () => {
+        const r = await sterling('drop_prices');
+        assert.deepEqual([r.currency, r.total_price], ['GBP', null]);
+      });
+      await check('T3 (Review Focus 1): accept_as_property_currency keeps the number, in the property currency', async () => {
+        const r = await sterling('accept_as_property_currency');
+        assert.deepEqual([r.currency, r.total_price], ['GBP', '50.00']);
+      });
+      await check("T3 (Review Focus 3): occupancy starts on the Tahiti property's today; blank guest -> Reserved", async () => {
+        const c = await alpha();
+        const occ = await mb('occupancy', 9303);
+        const today = await propertyToday(db, occ.property_id);
+        assert.equal(today, await day(0));
+        assert.deepEqual([occ.arrival, occ.departure, occ.status, occ.source], [today, null, 'confirmed', 'import']);
+        assert.deepEqual([occ.contact_name, occ.total_price, occ.currency, occ.payment_status], ['Capt Nemo', null, 'EUR', 'none']);
+        assert.equal(occ.berth_id, I.uid('berth', 9303));
+        assert.equal((await mb('occupancy', 9304)).contact_name, 'Reserved');
+        assert.equal(await mb('occupancy', 9305), undefined, 'covered today by an imported booking');
+        assert.equal(await mb('occupancy', 9306), undefined, 'a future booking blocks the open-ended row');
+        assert.equal(await mb('occupancy', 9301), undefined, 'available berth');
+        assert.equal(await mb('occupancy', 9311), undefined, 're-keyed duplicate berth is not imported');
+        assert.deepEqual([c.occupancy, c.occupancy_overlap], [2, 1]);
+      });
+      await check('T3 (Review Focus 2): booking ids and bookingToken(id) are identical across two runs', async () => {
+        const snapshot = async () => (await db.query(
+          'SELECT id FROM marina_booking WHERE marina_id = $1 ORDER BY id', [I.uid('marina', OA)])).rows
+          .map((r) => [r.id, bookingToken(r.id)]);
+        const c1 = await alpha();
+        const first = await snapshot();
+        const c2 = await alpha();
+        const second = await snapshot();
+        assert.equal(first.length, 11); // 9 bookings + 2 occupancy rows
+        assert.deepEqual(second, first);
+        assert.deepEqual(c2, c1);
+        assert.ok(first.some(([id]) => id === I.uid('booking', 9401)));
+      });
+      await check('T3: signatures exist only for imported bookings', async () => {
+        const c = await alpha();
+        const { rows } = await db.query(
+          'SELECT * FROM marina_contract_signature WHERE booking_id = ANY($1) ORDER BY agreed_at',
+          [[9401, 9402, 9403, 9411].map((id) => I.uid('booking', id))]);
+        assert.deepEqual(rows.map((r) => r.id), [I.uid('signature', 9501), I.uid('signature', 9503)]);
+        const [a, b] = rows;
+        assert.deepEqual([a.booking_id, a.template_id, a.rendered_body, a.signer_email, a.ip_address, a.user_agent],
+          [I.uid('booking', 9401), I.uid('template', 9601), 'Signed 9401', 'Sailor.One+x@Example.com', '203.0.113.7', 'UA']);
+        assert.equal(a.agreed_at.getTime(), Date.parse('2026-03-02T10:00:00Z'));
+        assert.equal(a.property_id, (await mb('booking', 9401)).property_id);
+        assert.deepEqual([b.booking_id, b.template_id, b.signer_email], [I.uid('booking', 9411), null, 'sailor9411@example.com']);
+        assert.equal(c.signatures, 2);
+      });
+    }
     // (later tasks append checks here)
   } finally {
     await db.query('ROLLBACK');
