@@ -229,7 +229,12 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.deepEqual(calls[1][2].body, { status: 'maintenance' });
       assert.deepEqual(calls[3][2].body, { action: 'cancel', refund: true });
       for (const n of ['get_marina', 'list_marina_berths', 'get_marina_booking', 'create_marina_booking']) t(n);
-      assert.equal(t('list_marina_bookings').run.toString().includes('sidon-bookings'), true, 'stays on the interim proxy until Switch');
+      // Switch: the staff list is OTA's own paged route; the args pass straight through as the query.
+      calls.length = 0;
+      const args = { from: '2027-06-01', status: 'pending', limit: 50 };
+      await t('list_marina_bookings').run(args);
+      assert.deepEqual(calls, [['GET', '/api/marina/bookings', { query: { from: '2027-06-01', status: 'pending', limit: 50 } }]]);
+      assert.equal(t('list_marina_bookings').run.toString().includes('sidon-bookings'), false, 'no interim proxy after Switch');
     });
     await check('MCP marina catalogue and document tools call the marina routes', async () => {
       const calls = [];

@@ -19,10 +19,9 @@ const { authenticate, authenticateOrApiKey, requireRole } = require('../middlewa
 
 // Literal segments before '/:id' throughout (see eventInquiries.js).
 
-// Interim Sidon link, removed at cleanup / Switch.
+// Interim Sidon link, removed at cleanup.
 router.put('/key', authenticate, requireRole('admin'), ctrl.setSidonMarinaKey);
 router.post('/key/clear', authenticate, requireRole('admin'), ctrl.clearSidonMarinaKey);
-router.get('/sidon-bookings', authenticateOrApiKey, ctrl.listMarinaBookings);
 
 router.get('/marinas', authenticateOrApiKey, cat.listMarinas);
 router.post('/marinas', authenticateOrApiKey, cat.createMarina);
