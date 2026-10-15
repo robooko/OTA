@@ -237,6 +237,46 @@ const app = require('../src/app');
       assert.equal((await api('GET', `/api/courses/runs/${run.id}/roster`, null, OTHER_KEY)).status, 404);
     });
 
+    // ---- MCP tools ----
+    await check('MCP courses tools call the courses routes', async () => {
+      const calls = [];
+      const tools = require('../mcp-server/tools').createTools(async (method, path, opts) => { calls.push([method, path, opts]); return {}; });
+      const t = (name) => { const x = tools.find((y) => y.name === name); assert.ok(x, `missing tool ${name}`); return x; };
+      await t('list_courses').run({});
+      await t('create_course').run({ name: 'Kids', price: 200 });
+      await t('update_course').run({ id: 'c1', max_age: null });
+      await t('delete_course').run({ id: 'c1' });
+      await t('create_course_runs').run({ course_id: 'c1', runs: [camp] });
+      await t('update_course_run').run({ id: 'r1', capacity: 5 });
+      await t('delete_course_run').run({ id: 'r1' });
+      await t('search_course_runs').run({ from: '2030-07-01', to: '2030-07-02', age: 9 });
+      await t('get_course_roster').run({ run_id: 'r1' });
+      await t('list_course_enrolments').run({ run_id: 'r1' });
+      await t('create_course_enrolment').run({ run_id: 'r1', contact_name: 'Ana', participants: [] });
+      await t('update_course_enrolment').run({ id: 'e1', status: 'cancelled' });
+      assert.deepEqual(calls.map(([m, p]) => `${m} ${p}`), [
+        'GET /api/courses', 'POST /api/courses', 'PUT /api/courses/c1', 'DELETE /api/courses/c1',
+        'POST /api/courses/c1/runs', 'PUT /api/courses/runs/r1', 'DELETE /api/courses/runs/r1',
+        'GET /api/courses/runs/search', 'GET /api/courses/runs/r1/roster',
+        'GET /api/courses/enrolments', 'POST /api/courses/enrolments', 'PUT /api/courses/enrolments/e1',
+      ]);
+      assert.deepEqual(calls[2][2].body, { max_age: null });
+      assert.deepEqual(calls[4][2].body, { runs: [camp] });
+      assert.deepEqual(calls[7][2].query, { from: '2030-07-01', to: '2030-07-02', age: 9 });
+      assert.deepEqual(calls[11][2].body, { status: 'cancelled' });
+    });
+    await check('MCP endpoint lists the courses tools', async () => {
+      process.env.PORT = String(server.address().port); // routes/mcp.js loops back to localhost:PORT
+      const r = await fetch(`${base}/api/mcp`, {
+        method: 'POST',
+        headers: { 'X-Api-Key': KEY, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      });
+      const text = await r.text();
+      assert.equal(r.status, 200, text);
+      for (const n of ['search_course_runs', 'create_course_enrolment', 'get_course_roster']) assert.ok(text.includes(`"${n}"`), `tools/list missing ${n}`);
+    });
+
     // ---- Final review: bad ids and oversize values never reach Postgres ----
     await check('non-UUID ids are 404 (path) or 400 (body/query), never 500', async () => {
       assert.equal((await api('PUT', '/api/courses/runs/abc', { capacity: 5 })).status, 404);
