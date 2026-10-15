@@ -1,6 +1,11 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/courses');
 const { authenticateOrApiKey } = require('../middleware/auth');
+const { isValidUuid } = require('../middleware/validate');
+
+// Every :id here is a row UUID; anything else can't exist, and would
+// otherwise reach Postgres as a cast error (500).
+router.param('id', (req, res, next, id) => (isValidUuid(id) ? next() : res.status(404).json({ error: 'Not found' })));
 
 // Enrolments
 router.get('/enrolments', authenticateOrApiKey, ctrl.listEnrolments);

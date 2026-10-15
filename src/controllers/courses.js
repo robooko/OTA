@@ -1,8 +1,11 @@
 const pool = require('../db');
-const { isValidDate, isValidTime } = require('../middleware/validate');
+const { isValidDate, isValidTime, isValidUuid } = require('../middleware/validate');
 const { sessionDates, ageOn } = require('../lib/courseSessions');
 
-const isMoney = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+// NUMERIC(10,2) and INT ceilings, so oversize values are a 400, not a Postgres 500.
+const MAX_MONEY = 99999999.99;
+const MAX_INT = 2147483647;
+const isMoney = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= MAX_MONEY;
 const isAgeBound = (v) => v === null || (Number.isInteger(v) && v >= 0 && v <= 120);
 const STATUSES = ['active', 'inactive'];
 const MAX_RUN_DAYS = 366;
@@ -54,7 +57,7 @@ function runError(r) {
   if (!Array.isArray(r.skip_dates) || !r.skip_dates.every(isValidDate)) return 'skip_dates must be an array of YYYY-MM-DD dates';
   if (!isValidTime(r.start_time) || !isValidTime(r.end_time)) return 'start_time and end_time must be HH:MM';
   if (r.end_time <= r.start_time) return 'end_time must be after start_time';
-  if (!Number.isInteger(r.capacity) || r.capacity < 1) return 'capacity must be a positive integer';
+  if (!Number.isInteger(r.capacity) || r.capacity < 1 || r.capacity > MAX_INT) return 'capacity must be a positive integer';
   if (r.price !== null && !isMoney(r.price)) return 'price must be a non-negative number, or null for the course price';
   if (!STATUSES.includes(r.status)) return "status must be 'active' or 'inactive'";
   if (!sessionDates(r).length) return 'this run has no sessions -- check weekdays and skip_dates against the dates';
@@ -254,12 +257,27 @@ function participantsError(participants) {
   return null;
 }
 
+// Column limits for the booker's contact details.
+const CONTACT_LIMITS = { contact_name: 100, contact_email: 255, contact_phone: 30 };
+function contactFieldsError(body) {
+  for (const [field, max] of Object.entries(CONTACT_LIMITS)) {
+    const v = body[field];
+    if (v != null && (typeof v !== 'string' || v.length > max)) return `${field} must be text of at most ${max} characters`;
+  }
+  return null;
+}
+
 async function createEnrolment(req, res, next) {
   const { run_id, guest_id, contact_name, contact_email, contact_phone, notes, participants, total_price } = req.body;
-  if (!run_id || !contact_name || typeof contact_name !== 'string') return res.status(400).json({ error: 'run_id and contact_name are required' });
+  if (!isValidUuid(run_id) || !contact_name || typeof contact_name !== 'string') {
+    return res.status(400).json({ error: 'run_id (a UUID) and contact_name are required' });
+  }
+  if (guest_id != null && !isValidUuid(guest_id)) return res.status(400).json({ error: 'guest_id must be a UUID' });
+  const contactError = contactFieldsError(req.body);
+  if (contactError) return res.status(400).json({ error: contactError });
   const pError = participantsError(participants);
   if (pError) return res.status(400).json({ error: pError });
-  if (total_price != null && !isMoney(total_price)) return res.status(400).json({ error: 'total_price must be a non-negative number' });
+  if (total_price != null && !isMoney(total_price)) return res.status(400).json({ error: `total_price must be a number from 0 to ${MAX_MONEY}` });
 
   const client = await pool.connect();
   try {
@@ -297,6 +315,10 @@ async function createEnrolment(req, res, next) {
     }
 
     const price = total_price ?? parseFloat(run.price ?? run.course_price) * participants.length;
+    if (price > MAX_MONEY) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'The total price is too large -- pass total_price' });
+    }
     const { rows: [enrolment] } = await client.query(
       `INSERT INTO course_enrolment (property_id, run_id, guest_id, contact_name, contact_email, contact_phone, total_price, notes)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
@@ -321,6 +343,9 @@ async function createEnrolment(req, res, next) {
 async function listEnrolments(req, res, next) {
   try {
     const { run_id, status, guest_id } = req.query;
+    if ((run_id && !isValidUuid(run_id)) || (guest_id && !isValidUuid(guest_id))) {
+      return res.status(400).json({ error: 'run_id and guest_id must be UUIDs' });
+    }
     let query = `
       SELECT ce.*, cr.start_date, cr.end_date, c.name AS course_name,
              COALESCE(json_agg(json_build_object('id', cp.id, 'first_name', cp.first_name, 'date_of_birth', cp.date_of_birth)
@@ -394,6 +419,7 @@ async function searchRuns(req, res, next) {
     if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'from and to are required, YYYY-MM-DD' });
     if (to <= from) return res.status(400).json({ error: 'to must be after from' });
     if (age != null && !/^\d{1,3}$/.test(age)) return res.status(400).json({ error: 'age must be a whole number' });
+    if (course_id && !isValidUuid(course_id)) return res.status(400).json({ error: 'course_id must be a UUID' });
     let query = `
       SELECT cr.id, cr.course_id, cr.start_date, cr.end_date, cr.weekdays, cr.skip_dates, cr.start_time, cr.end_time,
              cr.capacity, cr.status, COALESCE(cr.price, c.price) AS price,

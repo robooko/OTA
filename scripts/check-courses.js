@@ -236,6 +236,29 @@ const app = require('../src/app');
       assert.equal(r.body.run.sessions.length, 5);
       assert.equal((await api('GET', `/api/courses/runs/${run.id}/roster`, null, OTHER_KEY)).status, 404);
     });
+
+    // ---- Final review: bad ids and oversize values never reach Postgres ----
+    await check('non-UUID ids are 404 (path) or 400 (body/query), never 500', async () => {
+      assert.equal((await api('PUT', '/api/courses/runs/abc', { capacity: 5 })).status, 404);
+      assert.equal((await api('GET', '/api/courses/runs/abc/roster')).status, 404);
+      assert.equal((await api('PUT', '/api/courses/enrolments/abc', { notes: 'x' })).status, 404);
+      assert.equal((await api('POST', '/api/courses/abc/runs', { runs: [camp] })).status, 404);
+      assert.equal((await api('POST', '/api/courses/enrolments', { run_id: 'abc', contact_name: 'Ana', participants: [{ first_name: 'A', date_of_birth: '2019-01-01' }] })).status, 400);
+      assert.equal((await api('POST', '/api/courses/enrolments', { run_id: run.id, guest_id: 'abc', contact_name: 'Ana', participants: [{ first_name: 'A', date_of_birth: '2019-01-01' }] })).status, 400);
+      assert.equal((await api('GET', '/api/courses/enrolments?run_id=abc')).status, 400);
+      assert.equal((await api('GET', '/api/courses/runs/search?from=2030-07-01&to=2030-07-02&course_id=abc')).status, 400);
+    });
+    await check('oversize money, capacity and contact fields are 400, never 500', async () => {
+      assert.equal((await api('POST', '/api/courses', { name: 'Big', price: 100000000 })).status, 400);
+      assert.equal((await api('POST', `/api/courses/${course.id}/runs`, { runs: [{ ...camp, capacity: 3000000000 }] })).status, 400);
+      const kidA = [{ first_name: 'A', date_of_birth: '2019-01-01' }];
+      assert.equal((await api('POST', '/api/courses/enrolments', { run_id: run.id, contact_name: 'Ana', contact_phone: '+44 20 7946 0958 ext. 1234 (mobile)', participants: kidA })).status, 400);
+      assert.equal((await api('POST', '/api/courses/enrolments', { run_id: run.id, contact_name: 'A'.repeat(101), participants: kidA })).status, 400);
+      assert.equal((await api('POST', '/api/courses/enrolments', { run_id: run.id, contact_name: 'Ana', total_price: 1e9, participants: kidA })).status, 400);
+      const pricey = (await api('POST', '/api/courses', { name: 'Pricey', price: 99999999 })).body;
+      const [pr] = (await api('POST', `/api/courses/${pricey.id}/runs`, { runs: [camp] })).body;
+      assert.equal((await api('POST', '/api/courses/enrolments', { run_id: pr.id, contact_name: 'Ana', participants: [...kidA, ...kidA] })).status, 400); // 2 x price overflows
+    });
   } finally {
     const props = [P, Q];
     await pool.query('DELETE FROM course_participant WHERE enrolment_id IN (SELECT id FROM course_enrolment WHERE property_id = ANY($1))', [props]);
