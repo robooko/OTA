@@ -34,12 +34,20 @@ async function listBookings(req, res, next) {
     if (status) { if (!['pending', 'confirmed', 'declined', 'cancelled'].includes(status)) return res.status(400).json({ error: 'Invalid status' }); add('mb.status = ?', status); }
     if (berth_id) { if (!isValidUuid(berth_id)) return res.status(400).json({ error: 'Invalid berth_id' }); add('mb.berth_id = ?', berth_id); }
     if (marina_id) { if (!isValidUuid(marina_id)) return res.status(400).json({ error: 'Invalid marina_id' }); add('mb.marina_id = ?', marina_id); }
+    // Staff search over berth, contact, boat and notes (Sidon's search box).
+    const term = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
+    if (term) {
+      params.push(`%${term.replace(/[\\%_]/g, '\\$&')}%`);
+      const n = `$${params.length}`;
+      where.push(`(b.label ILIKE ${n} OR mb.contact_name ILIKE ${n} OR mb.contact_email ILIKE ${n} OR mb.boat_name ILIKE ${n} OR mb.notes ILIKE ${n})`);
+    }
     const w = where.join(' AND ');
     const [{ rows: [{ total }] }, { rows }] = await Promise.all([
-      pool.query(`SELECT count(*)::int AS total FROM marina_booking mb WHERE ${w}`, params),
+      pool.query(`SELECT count(*)::int AS total FROM marina_booking mb JOIN marina_berth b ON b.id = mb.berth_id WHERE ${w}`, params),
       pool.query(`SELECT mb.id, mb.marina_id, m.name AS marina_name, mb.berth_id, b.label AS berth_label, mb.contact_name, mb.contact_email,
-                         mb.contact_phone, mb.boat_name, mb.boat_length_m, mb.arrival, mb.departure, mb.status, mb.source,
-                         mb.total_price, mb.currency, mb.payment_status, mb.payment_error, mb.hold_expires_at, mb.created_at
+                         mb.contact_phone, mb.boat_name, mb.boat_length_m, mb.boat_beam_m, mb.notes, mb.arrival, mb.departure, mb.status, mb.source,
+                         mb.total_price, mb.currency, mb.payment_status, mb.payment_error, mb.hold_expires_at, mb.created_at,
+                         ${q.READY_COLS}
                   FROM marina_booking mb JOIN marina_berth b ON b.id = mb.berth_id JOIN marina m ON m.id = mb.marina_id
                   WHERE ${w} ORDER BY mb.arrival, b.label LIMIT ${limit} OFFSET ${offset}`, params),
     ]);

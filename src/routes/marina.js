@@ -50,6 +50,7 @@ router.get('/confirm-booking/:id/:confirmToken', guest.confirmBookingLink);
 
 // Bearer only: passport data never reaches the key rail (guest sites hold the key).
 router.get('/bookings/:id/documents', authenticate, docCtrl.listBookingDocuments);
+router.get('/bookings/:id/verification', authenticate, docCtrl.getBookingVerification);
 router.get('/documents/:id/file', authenticate, docCtrl.streamDocumentFile);
 router.put('/documents/:id', authenticate, docCtrl.updateDocument);
 

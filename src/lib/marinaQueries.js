@@ -39,13 +39,22 @@ async function activeTiers(client, marinaId) {
   return rows;
 }
 
+// Ready = the booking's verified mandatory requirements against the marina's
+// mandatory total -- the same rule maybeAutoConfirm applies. Needs `mb`.
+const READY_COLS = `(SELECT count(*)::int FROM marina_doc_requirement r
+     WHERE r.marina_id = mb.marina_id AND r.status = 'active' AND r.mandatory) AS docs_required,
+  (SELECT count(*)::int FROM marina_doc_requirement r
+     WHERE r.marina_id = mb.marina_id AND r.status = 'active' AND r.mandatory
+       AND EXISTS (SELECT 1 FROM marina_document d WHERE d.booking_id = mb.id AND d.requirement_id = r.id AND d.status = 'verified')) AS docs_required_verified`;
+
 async function joinedBooking(client, id) {
   const { rows: [r] } = await client.query(
     `SELECT mb.*, b.label AS berth_label, m.name AS marina_name, m.slug AS marina_slug,
             m.email AS marina_email, m.phone AS marina_phone, m.website AS marina_website,
             m.booking_url, m.response_window_hours, m.auto_confirm, p.name AS property_name,
             (SELECT count(*)::int FROM marina_document d WHERE d.booking_id = mb.id) AS doc_count,
-            (SELECT count(*)::int FROM marina_document d WHERE d.booking_id = mb.id AND d.status = 'verified') AS docs_verified
+            (SELECT count(*)::int FROM marina_document d WHERE d.booking_id = mb.id AND d.status = 'verified') AS docs_verified,
+            ${READY_COLS}
      FROM marina_booking mb
      JOIN marina_berth b ON b.id = mb.berth_id
      JOIN marina m ON m.id = mb.marina_id
@@ -54,4 +63,4 @@ async function joinedBooking(client, id) {
   return r || null;
 }
 
-module.exports = { propertyToday, marinaBySlug, freeBerths, berthAvailability, activeTiers, joinedBooking };
+module.exports = { READY_COLS, propertyToday, marinaBySlug, freeBerths, berthAvailability, activeTiers, joinedBooking };

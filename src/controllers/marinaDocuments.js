@@ -3,6 +3,9 @@ const pool = require('../db');
 const { isValidUuid } = require('../middleware/validate');
 const docs = require('../lib/marinaDocuments');
 const life = require('../lib/marinaLifecycle');
+const q = require('../lib/marinaQueries');
+const kc = require('../lib/marinaContracts');
+const { nightsBetween } = require('../lib/marinaPricing');
 
 // Guest upload (raw body, booking token). Only while pending/confirmed, so
 // a card-free hold can't trigger paid extraction.
@@ -51,6 +54,38 @@ async function listBookingDocuments(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// The staff verification panel in one read: the marina's active
+// requirements (with mandatory), every document on the booking, and the
+// contract -- the signed snapshot, or an unsigned preview of the template
+// this stay would get (same pick as agreeContract), or null when none applies.
+async function getBookingVerification(req, res, next) {
+  try {
+    if (!isValidUuid(req.params.id)) return res.status(404).json({ error: 'Booking not found' });
+    const b = await q.joinedBooking(pool, req.params.id);
+    if (!b || b.property_id !== req.property_id) return res.status(404).json({ error: 'Booking not found' });
+    const [reqs, documents, sig, templates] = await Promise.all([
+      pool.query("SELECT id, type, name, mandatory FROM marina_doc_requirement WHERE marina_id = $1 AND status = 'active' ORDER BY sort_order, name", [b.marina_id]),
+      pool.query(
+        `SELECT d.id, d.requirement_id, r.name AS requirement_name, d.type, d.file_name, d.content_type, d.size_bytes, d.extracted_data,
+                d.expiry_date, d.status, d.notes, d.submitted_at, d.verified_at, d.file_deleted_at
+         FROM marina_document d LEFT JOIN marina_doc_requirement r ON r.id = d.requirement_id
+         WHERE d.booking_id = $1 ORDER BY d.submitted_at`, [b.id]),
+      pool.query(
+        `SELECT s.agreed_at, s.signer_email, s.rendered_body, t.name FROM marina_contract_signature s
+         LEFT JOIN marina_contract_template t ON t.id = s.template_id WHERE s.booking_id = $1`, [b.id]),
+      b.departure ? pool.query("SELECT id, name, body_markdown, min_nights FROM marina_contract_template WHERE marina_id = $1 AND status = 'active'", [b.marina_id]) : { rows: [] },
+    ]);
+    let contract = null;
+    const s = sig.rows[0];
+    if (s) contract = { name: s.name ?? 'Contract', signed: true, agreed_at: s.agreed_at, signer_email: s.signer_email, rendered_body: s.rendered_body };
+    else if (b.departure) {
+      const t = kc.pickTemplate(templates.rows, nightsBetween(b.arrival, b.departure));
+      if (t) contract = { name: t.name, signed: false, rendered_body: kc.renderContract(t.body_markdown, kc.contractContext(b, await q.propertyToday(pool, b.property_id))) };
+    }
+    res.json({ requirements: reqs.rows, documents: documents.rows, contract });
+  } catch (err) { next(err); }
+}
+
 async function streamDocumentFile(req, res, next) {
   try {
     if (!isValidUuid(req.params.id)) return res.status(404).json({ error: 'Document not found' });
@@ -85,4 +120,4 @@ async function updateDocument(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { uploadDocument, listBookingDocuments, streamDocumentFile, updateDocument };
+module.exports = { uploadDocument, listBookingDocuments, getBookingVerification, streamDocumentFile, updateDocument };
