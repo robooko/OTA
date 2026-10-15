@@ -1,12 +1,15 @@
 // ?include_inactive=1 on the marina and catalogue list routes (dashboard Reactivate).
 const INCLUDE_INACTIVE = { name: 'include_inactive', in: 'query', schema: { type: 'string', enum: ['1'] }, description: "'1' = every status (inactive rows too), same order; any other value = the default list" };
 
+// Every courses route takes a staff session or a site API key.
+const COURSE_AUTH = [{ bearerAuth: [] }, { apiKeyAuth: [] }];
+
 const swaggerSpec = {
   openapi: '3.0.0',
   info: {
     title: 'Hotal PMS API',
     version: '1.0.0',
-    description: 'Property Management System API — rooms, restaurants, spa, beach club, tours, equipment hire, and golf.',
+    description: 'Property Management System API — rooms, restaurants, spa, beach club, tours, courses, equipment hire, and golf.',
   },
   servers: [
     { url: 'https://ota-u6ii.onrender.com', description: 'Production' },
@@ -28,6 +31,7 @@ const swaggerSpec = {
     { name: 'Spa' },
     { name: 'Beach Club' },
     { name: 'Tours' },
+    { name: 'Courses' },
     { name: 'Equipment' },
     { name: 'Golf' },
     { name: 'Extras' },
@@ -552,6 +556,36 @@ const swaggerSpec = {
     '/api/tours/bookings': {
       get: { tags: ['Tours'], summary: 'List tour bookings', security: [{ bearerAuth: [] }], parameters: [{ name: 'date', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'status', in: 'query', schema: { type: 'string' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of bookings' } } },
       post: { tags: ['Tours'], summary: 'Book a tour', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['slot_id', 'contact_name'], properties: { slot_id: { type: 'string', format: 'uuid' }, guest_id: { type: 'string', format: 'uuid' }, contact_name: { type: 'string' }, contact_email: { type: 'string' }, contact_phone: { type: 'string' }, adults: { type: 'integer' }, children: { type: 'integer', description: 'Charged the tour child_price; count toward capacity' }, group_size: { type: 'integer', description: 'Total headcount, instead of adults' }, notes: { type: 'string' } } } } } }, responses: { 201: { description: 'Booking created with total price' }, 404: { description: 'Slot or guest not found' }, 409: { description: 'Not enough spots' } } },
+    },
+
+    // ── Courses ──────────────────────────────────────────────────────────────
+    '/api/courses': {
+      get: { tags: ['Courses'], summary: 'List active courses', security: COURSE_AUTH, responses: { 200: { description: 'Array of courses' } } },
+      post: { tags: ['Courses'], summary: 'Create course', security: COURSE_AUTH, requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'price'], properties: { name: { type: 'string' }, description: { type: 'string' }, price: { type: 'number', description: 'Per participant, whole course' }, min_age: { type: 'integer', nullable: true }, max_age: { type: 'integer', nullable: true } } } } } }, responses: { 201: { description: 'Created' }, 400: { description: 'Invalid input' } } },
+    },
+    '/api/courses/{id}': {
+      put: { tags: ['Courses'], summary: 'Update course. null clears min_age / max_age.', security: COURSE_AUTH, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string', nullable: true }, price: { type: 'number' }, min_age: { type: 'integer', nullable: true }, max_age: { type: 'integer', nullable: true }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated' }, 400: { description: 'Invalid input' }, 404: { description: 'Course not found' } } },
+      delete: { tags: ['Courses'], summary: 'Permanently delete a course with its runs and enrolments. 409 while a run that hasn\'t finished has an active enrolment.', security: COURSE_AUTH, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 204: { description: 'Deleted' }, 404: { description: 'Course not found' }, 409: { description: 'Active enrolments' } } },
+    },
+    '/api/courses/{id}/runs': {
+      post: { tags: ['Courses'], summary: 'Create dated runs of a course (all or nothing). Sessions are every date from start_date to end_date on one of weekdays, minus skip_dates.', security: COURSE_AUTH, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['runs'], properties: { runs: { type: 'array', items: { type: 'object', required: ['start_date', 'end_date', 'weekdays', 'start_time', 'end_time', 'capacity'], properties: { start_date: { type: 'string', format: 'date' }, end_date: { type: 'string', format: 'date', description: 'Inclusive; at most 366 days after start_date' }, weekdays: { type: 'array', items: { type: 'integer', minimum: 0, maximum: 6 }, description: '0 = Sunday' }, skip_dates: { type: 'array', items: { type: 'string', format: 'date' } }, start_time: { type: 'string', example: '10:00' }, end_time: { type: 'string', example: '14:00' }, capacity: { type: 'integer' }, price: { type: 'number', nullable: true, description: 'Per participant; omit for the course price' } } } } } } } } }, responses: { 201: { description: 'Created runs, each with sessions' }, 400: { description: 'Invalid run (error names the index)' }, 404: { description: 'Course not found' } } },
+    },
+    '/api/courses/runs/{id}': {
+      put: { tags: ['Courses'], summary: 'Update a run. 409 if capacity would drop below places taken.', security: COURSE_AUTH, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { start_date: { type: 'string', format: 'date' }, end_date: { type: 'string', format: 'date' }, weekdays: { type: 'array', items: { type: 'integer' } }, skip_dates: { type: 'array', items: { type: 'string', format: 'date' } }, start_time: { type: 'string' }, end_time: { type: 'string' }, capacity: { type: 'integer' }, price: { type: 'number', nullable: true }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated run with sessions' }, 400: { description: 'Invalid input' }, 404: { description: 'Run not found' }, 409: { description: 'Capacity below places taken' } } },
+      delete: { tags: ['Courses'], summary: 'Permanently delete a run and its enrolments. 409 while it hasn\'t finished and has an active enrolment.', security: COURSE_AUTH, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 204: { description: 'Deleted' }, 404: { description: 'Run not found' }, 409: { description: 'Active enrolments' } } },
+    },
+    '/api/courses/runs/search': {
+      get: { tags: ['Courses'], summary: 'Runs starting in [from, to), with places left (full runs included), effective price and session dates', security: COURSE_AUTH, parameters: [{ name: 'from', in: 'query', required: true, schema: { type: 'string', format: 'date' } }, { name: 'to', in: 'query', required: true, schema: { type: 'string', format: 'date' }, description: 'Exclusive' }, { name: 'age', in: 'query', schema: { type: 'integer' }, description: 'Only courses whose age band includes this age' }, { name: 'course_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of runs' }, 400: { description: 'Invalid input' } } },
+    },
+    '/api/courses/runs/{id}/roster': {
+      get: { tags: ['Courses'], summary: 'Participants on a run\'s active enrolments, with age on the start date and the booker\'s contact details', security: COURSE_AUTH, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: '{ run, participants }' }, 404: { description: 'Run not found' } } },
+    },
+    '/api/courses/enrolments': {
+      get: { tags: ['Courses'], summary: 'List enrolments with participants', security: COURSE_AUTH, parameters: [{ name: 'run_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'status', in: 'query', schema: { type: 'string', enum: ['confirmed', 'cancelled'] } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of enrolments' } } },
+      post: { tags: ['Courses'], summary: 'Enrol participants on a whole run. OTA records total_price but takes no payment. Only first name and birth date are stored per participant.', security: COURSE_AUTH, requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['run_id', 'contact_name', 'participants'], properties: { run_id: { type: 'string', format: 'uuid' }, guest_id: { type: 'string', format: 'uuid' }, contact_name: { type: 'string' }, contact_email: { type: 'string' }, contact_phone: { type: 'string' }, notes: { type: 'string' }, total_price: { type: 'number', description: 'Overrides price x participants; required to enrol on a run that has already started' }, participants: { type: 'array', items: { type: 'object', required: ['first_name', 'date_of_birth'], properties: { first_name: { type: 'string' }, date_of_birth: { type: 'string', format: 'date' } } } } } } } } }, responses: { 201: { description: 'Enrolment with participants' }, 400: { description: 'Invalid input, or a participant outside the age band' }, 404: { description: 'Run or guest not found' }, 409: { description: 'Not enough places, run inactive, or already started' } } },
+    },
+    '/api/courses/enrolments/{id}': {
+      put: { tags: ['Courses'], summary: 'Cancel or reinstate an enrolment, or edit notes. Reinstating re-checks places.', security: COURSE_AUTH, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['confirmed', 'cancelled'] }, notes: { type: 'string' } } } } } }, responses: { 200: { description: 'Updated' }, 400: { description: 'Invalid status' }, 404: { description: 'Enrolment not found' }, 409: { description: 'Not enough places to reinstate' } } },
     },
 
     // ── Equipment ────────────────────────────────────────────────────────────
