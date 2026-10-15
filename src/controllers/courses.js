@@ -384,8 +384,60 @@ async function updateEnrolment(req, res, next) {
   }
 }
 
+// ── Search and roster ────────────────────────────────────────────────────────
+
+// Runs starting in [from, to), with places left and the price to charge.
+// Full runs are included (seats_left 0) so a site can show "full".
+async function searchRuns(req, res, next) {
+  try {
+    const { from, to, age, course_id } = req.query;
+    if (!isValidDate(from) || !isValidDate(to)) return res.status(400).json({ error: 'from and to are required, YYYY-MM-DD' });
+    if (to <= from) return res.status(400).json({ error: 'to must be after from' });
+    if (age != null && !/^\d{1,3}$/.test(age)) return res.status(400).json({ error: 'age must be a whole number' });
+    let query = `
+      SELECT cr.id, cr.course_id, cr.start_date, cr.end_date, cr.weekdays, cr.skip_dates, cr.start_time, cr.end_time,
+             cr.capacity, cr.status, COALESCE(cr.price, c.price) AS price,
+             cr.capacity - (SELECT COUNT(*)::int FROM course_participant cp JOIN course_enrolment ce ON ce.id = cp.enrolment_id
+                            WHERE ce.run_id = cr.id AND ce.status != 'cancelled') AS seats_left,
+             c.name AS course_name, c.description, c.min_age, c.max_age
+      FROM course_run cr JOIN course c ON c.id = cr.course_id
+      WHERE cr.property_id = $1 AND cr.status = 'active' AND c.status = 'active'
+        AND cr.start_date >= $2 AND cr.start_date < $3
+    `;
+    const params = [req.property_id, from, to];
+    if (course_id) { params.push(course_id); query += ` AND cr.course_id = $${params.length}`; }
+    if (age != null) {
+      params.push(parseInt(age, 10));
+      query += ` AND (c.min_age IS NULL OR c.min_age <= $${params.length}) AND (c.max_age IS NULL OR c.max_age >= $${params.length})`;
+    }
+    query += ' ORDER BY cr.start_date, cr.start_time, c.name';
+    const { rows } = await pool.query(query, params);
+    res.json(rows.map(withSessions));
+  } catch (err) { next(err); }
+}
+
+// Who's coming: everyone on the run's live enrolments, age as of the start.
+async function getRoster(req, res, next) {
+  try {
+    const { rows: [run] } = await pool.query(
+      `SELECT cr.*, c.name AS course_name FROM course_run cr JOIN course c ON c.id = cr.course_id
+       WHERE cr.id = $1 AND cr.property_id = $2`, [req.params.id, req.property_id]
+    );
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    const { rows } = await pool.query(
+      `SELECT cp.id, cp.first_name, cp.date_of_birth, ce.id AS enrolment_id, ce.contact_name, ce.contact_email, ce.contact_phone
+       FROM course_participant cp JOIN course_enrolment ce ON ce.id = cp.enrolment_id
+       WHERE ce.run_id = $1 AND ce.status != 'cancelled'
+       ORDER BY cp.first_name`, [run.id]
+    );
+    const participants = rows.map(({ date_of_birth, ...p }) => ({ ...p, age: ageOn(date_of_birth, run.start_date) }));
+    res.json({ run: withSessions(run), participants });
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   listCourses, createCourse, updateCourse, deleteCourse,
   createRuns, updateRun, deleteRun,
   createEnrolment, listEnrolments, updateEnrolment,
+  searchRuns, getRoster,
 };

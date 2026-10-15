@@ -210,7 +210,32 @@ const app = require('../src/app');
       assert.equal((await api('POST', '/api/courses/enrolments', { run_id: rn.id, contact_name: 'Ana', participants: [kid('X', '2019-01-01')] })).status, 409);
     });
 
-    // TASK_4_CHECKS
+    // ---- Task 4: search and roster ----
+    await check('search: seats_left, effective price, sessions; age filter', async () => {
+      const r = await api('GET', '/api/courses/runs/search?from=2030-07-01&to=2030-07-02');
+      assert.equal(r.status, 200, r.text);
+      const hit = r.body.find((x) => x.id === run.id);
+      assert.equal(hit.seats_left, 0);
+      assert.equal(hit.price, '200.00');
+      assert.equal(hit.sessions.length, 5);
+      assert.ok(!r.body.some((x) => x.start_date === '2030-09-07')); // starts outside [from, to)
+      assert.ok(!(await api('GET', '/api/courses/runs/search?from=2030-07-01&to=2030-07-02&age=14')).body.some((x) => x.id === run.id));
+      assert.ok((await api('GET', '/api/courses/runs/search?from=2030-07-01&to=2030-07-02&age=12')).body.some((x) => x.id === run.id));
+    });
+    await check('search: bad input is 400', async () => {
+      assert.equal((await api('GET', '/api/courses/runs/search?from=2030-07-01')).status, 400);
+      assert.equal((await api('GET', '/api/courses/runs/search?from=2030-07-02&to=2030-07-01')).status, 400);
+      assert.equal((await api('GET', '/api/courses/runs/search?from=2030-07-01&to=2030-07-02&age=x')).status, 400);
+    });
+    await check('roster: live participants with ages; other property 404', async () => {
+      const r = await api('GET', `/api/courses/runs/${run.id}/roster`);
+      assert.equal(r.status, 200, r.text);
+      assert.equal(r.body.participants.length, 10);
+      assert.ok(!r.body.participants.some((p) => p.first_name === 'Lucia')); // her enrolment is cancelled
+      assert.equal(r.body.participants.find((p) => p.first_name === 'Sofia').age, 11);
+      assert.equal(r.body.run.sessions.length, 5);
+      assert.equal((await api('GET', `/api/courses/runs/${run.id}/roster`, null, OTHER_KEY)).status, 404);
+    });
   } finally {
     const props = [P, Q];
     await pool.query('DELETE FROM course_participant WHERE enrolment_id IN (SELECT id FROM course_enrolment WHERE property_id = ANY($1))', [props]);

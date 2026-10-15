@@ -15,6 +15,8 @@ router.delete('/:id', authenticateOrApiKey, ctrl.deleteCourse);
 
 // Runs
 router.post('/:id/runs', authenticateOrApiKey, ctrl.createRuns);
+router.get('/runs/search', authenticateOrApiKey, ctrl.searchRuns);
+router.get('/runs/:id/roster', authenticateOrApiKey, ctrl.getRoster);
 router.put('/runs/:id', authenticateOrApiKey, ctrl.updateRun);
 router.delete('/runs/:id', authenticateOrApiKey, ctrl.deleteRun);
 
