@@ -130,7 +130,87 @@ const app = require('../src/app');
       assert.equal((await api('DELETE', `/api/courses/${c.id}`)).status, 404);
     });
 
-    // TASK_3_CHECKS
+    // ---- Task 3: enrolments ----
+    const kid = (first_name, date_of_birth) => ({ first_name, date_of_birth });
+    const enrol = (participants, extra = {}, key) => api('POST', '/api/courses/enrolments',
+      { run_id: run.id, contact_name: 'Ana', contact_email: 'ana@example.com', participants, ...extra }, key);
+    let first;
+    await check('enrol: priced from the course, participants returned', async () => {
+      const r = await enrol([kid('Lucia', '2018-07-01'), kid('Mateo', '2019-01-15')]);
+      assert.equal(r.status, 201, r.text);
+      first = r.body;
+      assert.equal(first.total_price, '400.00');
+      assert.deepEqual(first.participants.map((p) => p.first_name).sort(), ['Lucia', 'Mateo']);
+    });
+    await check('enrol: run price overrides course price', async () => {
+      const [sat] = (await api('POST', `/api/courses/${course.id}/runs`, { runs: [{ ...camp, price: 150 }] })).body;
+      const r = await api('POST', '/api/courses/enrolments', { run_id: sat.id, contact_name: 'Ana', participants: [kid('Leo', '2019-01-01')] });
+      assert.equal(r.body.total_price, '150.00');
+      assert.equal((await api('DELETE', `/api/courses/runs/${sat.id}`)).status, 409); // live enrolment
+      await api('PUT', `/api/courses/enrolments/${r.body.id}`, { status: 'cancelled' });
+      assert.equal((await api('DELETE', `/api/courses/runs/${sat.id}`)).status, 204);
+    });
+    await check('enrol: supplied total_price wins', async () => {
+      const r = await enrol([kid('Sofia', '2019-05-05')], { total_price: 99.5 });
+      assert.equal(r.body.total_price, '99.50');
+    });
+    await check('enrol: age band names the child', async () => {
+      const r = await enrol([kid('Lucia', '2018-07-01'), kid('Hugo', '2017-07-01')]);
+      assert.equal(r.status, 400);
+      assert.match(r.body.error, /Hugo is 13/);
+    });
+    await check('enrol: garbage participants are 400', async () => {
+      assert.equal((await enrol([])).status, 400);
+      assert.equal((await enrol([kid('', '2019-01-01')])).status, 400);
+      assert.equal((await enrol([kid('Ana', '2019-02-30')])).status, 400);
+      assert.equal((await enrol([kid('Ana', '2031-01-01')])).status, 400); // born after the course starts
+      assert.equal((await enrol([kid('Ana', '2019-01-01')], { contact_name: '' })).status, 400);
+      assert.equal((await enrol([kid('Ana', '2019-01-01')], { total_price: -1 })).status, 400);
+    });
+    await check('enrol: other property gets 404', async () => {
+      assert.equal((await enrol([kid('Ana', '2019-01-01')], {}, OTHER_KEY)).status, 404);
+      assert.equal((await api('PUT', `/api/courses/enrolments/${first.id}`, { status: 'cancelled' }, OTHER_KEY)).status, 404);
+      assert.ok(!(await api('GET', '/api/courses/enrolments', null, OTHER_KEY)).body.length);
+    });
+    await check('seats: 3 taken of 10, 8 more is 409, 7 fits', async () => {
+      const eight = Array.from({ length: 8 }, (_, i) => kid(`K${i}`, '2019-01-01'));
+      const full = await enrol(eight);
+      assert.equal(full.status, 409);
+      assert.match(full.body.error, /Only 7 places left/);
+      assert.equal((await enrol(eight.slice(0, 7))).status, 201);
+    });
+    await check('seats: two parents racing for the last place -- one wins', async () => {
+      await api('PUT', `/api/courses/enrolments/${first.id}`, { status: 'cancelled' }); // frees 2 -> 2 left
+      await enrol([kid('Fill', '2019-01-01')]); // 1 left
+      const [a, b] = await Promise.all([enrol([kid('A', '2019-01-01')]), enrol([kid('B', '2019-01-01')])]);
+      assert.deepEqual([a.status, b.status].sort(), [201, 409]);
+    });
+    await check('reinstate re-checks seats; capacity cut below taken is 409', async () => {
+      const r = await api('PUT', `/api/courses/enrolments/${first.id}`, { status: 'confirmed' });
+      assert.equal(r.status, 409, r.text); // run is full, Lucia + Mateo don't fit
+      assert.equal((await api('PUT', `/api/courses/runs/${run.id}`, { capacity: 5 })).status, 409);
+      assert.equal((await api('PUT', `/api/courses/enrolments/${first.id}`, { status: 'bogus' })).status, 400);
+      assert.equal((await api('PUT', `/api/courses/enrolments/${first.id}`, { notes: 'called back' })).body.notes, 'called back');
+    });
+    await check('list enrolments: filter by run and status, participants included', async () => {
+      const r = await api('GET', `/api/courses/enrolments?run_id=${run.id}&status=cancelled`);
+      assert.equal(r.status, 200, r.text);
+      assert.ok(r.body.length >= 1 && r.body.every((e) => e.status === 'cancelled'));
+      assert.ok(r.body.find((e) => e.id === first.id).participants.some((p) => p.date_of_birth === '2018-07-01'));
+    });
+    await check('started run: 409 without total_price, 201 with it', async () => {
+      const [old] = (await api('POST', `/api/courses/${course.id}/runs`, { runs: [{ ...camp, start_date: '2020-01-06', end_date: '2020-01-10' }] })).body;
+      const late = { run_id: old.id, contact_name: 'Ana', participants: [kid('Late', '2010-01-01')] };
+      assert.equal((await api('POST', '/api/courses/enrolments', late)).status, 409);
+      assert.equal((await api('POST', '/api/courses/enrolments', { ...late, total_price: 50 })).status, 201);
+    });
+    await check('inactive run is not bookable', async () => {
+      const [rn] = (await api('POST', `/api/courses/${course.id}/runs`, { runs: [camp] })).body;
+      await api('PUT', `/api/courses/runs/${rn.id}`, { status: 'inactive' });
+      assert.equal((await api('POST', '/api/courses/enrolments', { run_id: rn.id, contact_name: 'Ana', participants: [kid('X', '2019-01-01')] })).status, 409);
+    });
+
+    // TASK_4_CHECKS
   } finally {
     const props = [P, Q];
     await pool.query('DELETE FROM course_participant WHERE enrolment_id IN (SELECT id FROM course_enrolment WHERE property_id = ANY($1))', [props]);
