@@ -8,8 +8,11 @@ function requireFields(fields) {
   };
 }
 
+// Date.parse rolls '2030-02-30' over to 2 March, so also require the date
+// to round-trip unchanged.
 function isValidDate(str) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(str) && !isNaN(Date.parse(str));
+  return /^\d{4}-\d{2}-\d{2}$/.test(str) && !isNaN(Date.parse(str))
+    && new Date(str).toISOString().slice(0, 10) === str;
 }
 
 function isValidUuid(str) {
