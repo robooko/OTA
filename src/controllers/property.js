@@ -14,7 +14,7 @@ const googleAnalytics = require('../lib/googleAnalytics');
 // keeps menus, orders and tables (see
 // migrate-2026-09-17-restaurant-reservations-module.sql, which backfills it
 // on for every property that already had an explicit module list).
-const MODULE_KEYS = ['rooms', 'restaurants', 'restaurant_reservations', 'spa', 'tours', 'golf', 'equipment', 'shop', 'event_inquiries'];
+const MODULE_KEYS = ['rooms', 'restaurants', 'restaurant_reservations', 'spa', 'tours', 'courses', 'golf', 'equipment', 'shop', 'event_inquiries'];
 
 function isValidEnabledModules(v) {
   return Array.isArray(v) && v.every((m) => MODULE_KEYS.includes(m));
