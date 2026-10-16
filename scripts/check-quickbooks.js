@@ -2,7 +2,7 @@
 //   node -r dotenv/config scripts/check-quickbooks.js
 process.env.QBO_CLIENT_SECRET ||= 'check-secret';
 const assert = require('node:assert/strict');
-const { summarizeProfitAndLoss, signState, verifyState } = require('../src/controllers/quickbooks');
+const { summarizeProfitAndLoss, summarizeProfitAndLossByMonth, signState, verifyState } = require('../src/controllers/quickbooks');
 
 const data = (name, amount, id) => ({ type: 'Data', ColData: [{ value: name, id }, { value: amount }] });
 const section = (group, rows, total) => ({ group, Rows: { Row: rows }, Summary: { ColData: [{ value: `Total ${group}` }, { value: total }] } });
@@ -44,6 +44,26 @@ assert.equal(s.costs.reduce((a, c) => a + c.amount, 0).toFixed(2), '1775.75');
 
 // Empty company / no activity: QBO returns no Rows at all.
 assert.deepEqual(summarizeProfitAndLoss({ Header: {} }), { currency: null, income: 0, total_costs: 0, net_income: 0, costs: [] });
+
+// summarize_column_by=Month: account column, one per month, then Total.
+const col = (start) => ({ ColType: 'Money', MetaData: [{ Name: 'StartDate', Value: start }] });
+const sum = (group, ...v) => ({ group, Summary: { ColData: [{ value: `Total ${group}` }, ...v.map((value) => ({ value }))] } });
+const monthly = summarizeProfitAndLossByMonth({
+  Header: { Currency: 'USD' },
+  Columns: { Column: [{ ColType: 'Account' }, col('2026-09-01'), col('2026-10-01'), { ColTitle: 'Total', ColType: 'Money' }] },
+  Rows: { Row: [
+    sum('Income', '2417.00', '0.00', '2417.00'),
+    sum('COGS', '100.00', '', '100.00'),
+    sum('Expenses', '457.13', '53.99', '511.12'),
+    sum('OtherExpenses', '250.00', '0.00', '250.00'),
+    sum('NetIncome', '1609.87', '-53.99', '1555.88'),
+  ] },
+});
+assert.deepEqual(monthly, { currency: 'USD', months: [
+  { month: '2026-09', income: 2417, total_costs: 807.13, net_income: 1609.87 },
+  { month: '2026-10', income: 0, total_costs: 53.99, net_income: -53.99 },
+] });
+assert.deepEqual(summarizeProfitAndLossByMonth({ Header: {} }), { currency: null, months: [] });
 
 const state = signState('org_abc123');
 assert.equal(verifyState(state), 'org_abc123');

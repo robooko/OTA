@@ -207,11 +207,31 @@ function summarizeProfitAndLoss(report) {
   };
 }
 
+// summarize_column_by=Month report -> one row per month column (the last,
+// "Total", column is dropped). Same groups and totals as above.
+function summarizeProfitAndLossByMonth(report) {
+  const sections = report?.Rows?.Row ?? [];
+  const monthCols = (report?.Columns?.Column ?? [])
+    .map((c, i) => ({ i, start: c.MetaData?.find((m) => m.Name === 'StartDate')?.Value }))
+    .filter((c) => c.i > 0 && c.start);
+  const total = (group, i) => money(sections.find((s) => s.group === group)?.Summary?.ColData?.[i]?.value);
+  return {
+    currency: report?.Header?.Currency ?? null,
+    months: monthCols.map(({ i, start }) => ({
+      month: start.slice(0, 7),
+      income: total('Income', i),
+      total_costs: money(COST_GROUPS.reduce((sum, g) => sum + total(g, i), 0)),
+      net_income: total('NetIncome', i),
+    })),
+  };
+}
+
 // GET ?from=&to= (to exclusive, like every other range here; QBO's
 // end_date is inclusive) &location= (QBO Location/Department id) &class=
+// &by=month (per-month totals instead of cost lines)
 async function getProfitAndLoss(req, res, next) {
   try {
-    const { from, to, location, class: classId } = req.query;
+    const { from, to, location, class: classId, by } = req.query;
     if (!isValidDate(from) || !isValidDate(to) || from >= to) {
       return res.status(400).json({ error: 'from and to are required (YYYY-MM-DD, from < to, to exclusive)' });
     }
@@ -221,6 +241,7 @@ async function getProfitAndLoss(req, res, next) {
     const params = new URLSearchParams({ start_date: from, end_date: endDate, minorversion: MINOR_VERSION });
     if (location) params.set('department', location);
     if (classId) params.set('class', classId);
+    if (by === 'month') params.set('summarize_column_by', 'Month');
 
     const qbo = await fetch(`${apiBase()}/v3/company/${encodeURIComponent(realmId)}/reports/ProfitAndLoss?${params}`, {
       headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
@@ -230,11 +251,11 @@ async function getProfitAndLoss(req, res, next) {
       const fault = body.Fault?.Error?.[0];
       return res.status(502).json({ error: 'QuickBooks report request failed', details: fault?.Detail || fault?.Message || `HTTP ${qbo.status}` });
     }
-    res.json({ from, to, ...summarizeProfitAndLoss(body) });
+    res.json({ from, to, ...(by === 'month' ? summarizeProfitAndLossByMonth(body) : summarizeProfitAndLoss(body)) });
   } catch (err) {
     if (err instanceof QboError) return res.status(err.status).json({ error: err.message, ...(err.details && { details: err.details }) });
     next(err);
   }
 }
 
-module.exports = { getConnectUrl, connectCallback, getStatus, disconnect, getProfitAndLoss, summarizeProfitAndLoss, signState, verifyState };
+module.exports = { getConnectUrl, connectCallback, getStatus, disconnect, getProfitAndLoss, summarizeProfitAndLoss, summarizeProfitAndLossByMonth, signState, verifyState };
