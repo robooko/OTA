@@ -416,4 +416,30 @@ async function listBills(req, res, next) {
   }
 }
 
-module.exports = { loadAppointmentForPayment, treatmentPriceCents, createAppointmentPaymentIntent, confirmAppointmentPayment, createAppointmentInvoice, addAppointmentToBill, invoiceGuestBill, listBills };
+// Takes one unsent line off a guest's bill (deletes the pending invoice item).
+async function removeBillLine(req, res, next) {
+  try {
+    const { rows: [spa] } = await pool.query(
+      `SELECT p.stripe_secret_key FROM spa s JOIN property p ON p.id = s.property_id
+       WHERE s.id::text = $1 AND s.property_id = $2`,
+      [req.params.spa_id, req.property_id]
+    );
+    if (!spa) return res.status(404).json({ error: 'Spa not found' });
+    if (!spa.stripe_secret_key) return res.status(409).json({ error: 'No Stripe secret key configured for this property' });
+
+    const stripe = require('stripe')(spa.stripe_secret_key);
+    const item = await stripe.invoiceItems.retrieve(req.params.item_id).catch(() => null);
+    if (!item || item.metadata?.spa_id !== req.params.spa_id) return res.status(404).json({ error: 'Bill line not found' });
+    if (item.invoice) return res.status(409).json({ error: 'Bill line is already invoiced' });
+
+    await stripe.invoiceItems.del(item.id);
+    res.json({ removed: item.id, appointment_id: item.metadata.spa_appointment_id ?? null });
+  } catch (err) {
+    if (err.type?.startsWith('Stripe')) {
+      return res.status(502).json({ error: `Stripe error: ${err.message}` });
+    }
+    next(err);
+  }
+}
+
+module.exports = { loadAppointmentForPayment, treatmentPriceCents, createAppointmentPaymentIntent, confirmAppointmentPayment, createAppointmentInvoice, addAppointmentToBill, invoiceGuestBill, listBills, removeBillLine };

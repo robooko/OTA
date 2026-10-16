@@ -65,5 +65,6 @@ router.post('/:spa_id/appointments/:id/invoice', authenticateOrApiKey, payments.
 router.post('/:spa_id/appointments/:id/bill', authenticateOrApiKey, payments.addAppointmentToBill);
 router.get('/:spa_id/bills', authenticateOrApiKey, payments.listBills);
 router.post('/:spa_id/bills', authenticateOrApiKey, payments.invoiceGuestBill);
+router.delete('/:spa_id/bills/items/:item_id', authenticateOrApiKey, payments.removeBillLine);
 
 module.exports = router;
