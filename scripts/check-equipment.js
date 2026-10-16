@@ -197,6 +197,24 @@ const app = require('../src/app');
         assert.equal((await api('GET', `/api/equipment/search?date=2030-08-01&${q}`)).status, 400, q);
       }
     });
+
+    // ---- Task 5: MCP tools ----
+    await check('MCP tools carry the hours fields and search time window', async () => {
+      process.env.PORT = String(server.address().port); // routes/mcp.js loops back to localhost:PORT
+      const r = await fetch(`${base}/api/mcp`, {
+        method: 'POST',
+        headers: { 'X-Api-Key': KEY, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      });
+      const text = await r.text();
+      assert.equal(r.status, 200, text);
+      const { result } = JSON.parse(text.startsWith('{') ? text : text.match(/^data: (.*)$/m)[1]);
+      const props = (n) => Object.keys(result.tools.find((t) => t.name === n).inputSchema.properties);
+      for (const n of ['create_equipment', 'update_equipment']) {
+        for (const f of ['open_time', 'close_time', 'slot_interval_minutes']) assert.ok(props(n).includes(f), `${n} missing ${f}`);
+      }
+      for (const f of ['start_time', 'duration']) assert.ok(props('search_equipment').includes(f), `search_equipment missing ${f}`);
+    });
   } finally {
     const props = [P];
     await pool.query('DELETE FROM equipment_hire WHERE property_id = ANY($1)', [props]);
