@@ -170,6 +170,33 @@ const app = require('../src/app');
       const r = await hire(single, '00:00', 0.5, { hire_date: today });
       assert.equal(r.status, 400); assert.equal(r.body.error, 'That time has passed');
     });
+
+    // ---- Task 4: search ----
+    const hourly = await item({ name: 'Hourly', type: 'sup', quantity: 2, open_time: '09:00', close_time: '13:00' });
+    const daily = (await api('POST', '/api/equipment', { name: 'Daily', type: 'sup', quantity: 1, price_per_day: 40 })).body;
+    await hire(hourly, '10:00', 1, { hire_date: '2030-08-01' });
+    await check('search with start_time: window availability, leaves out per-day-only and out-of-hours', async () => {
+      let r = await api('GET', '/api/equipment/search?date=2030-08-01&type=sup&start_time=10:00&duration=1');
+      assert.equal(r.status, 200, r.text);
+      assert.ok(!r.body.some((e) => e.id === daily.id));
+      assert.equal(r.body.find((e) => e.id === hourly.id).available_quantity, 1);
+      r = await api('GET', '/api/equipment/search?date=2030-08-01&type=sup&start_time=12:00&duration=2');
+      assert.ok(!r.body.some((e) => e.id === hourly.id));
+    });
+    await check('search without start_time: start_times for duration, ending by close', async () => {
+      const r = await api('GET', '/api/equipment/search?date=2030-08-01&type=sup&duration=2&quantity=2');
+      const e = r.body.find((x) => x.id === hourly.id);
+      assert.deepEqual(e.start_times.map((s) => s.start_time), ['11:00']);
+      assert.ok(!r.body.some((x) => x.id === daily.id)); // qty 1 < 2
+      const all = await api('GET', '/api/equipment/search?date=2030-08-01&type=sup');
+      assert.equal(all.body.find((x) => x.id === daily.id).start_times, undefined);
+      assert.equal(all.body.find((x) => x.id === hourly.id).available_quantity, 1);
+    });
+    await check('search validation', async () => {
+      for (const q of ['start_time=25:00', 'duration=0', 'duration=0.7', 'quantity=abc']) {
+        assert.equal((await api('GET', `/api/equipment/search?date=2030-08-01&${q}`)).status, 400, q);
+      }
+    });
   } finally {
     const props = [P];
     await pool.query('DELETE FROM equipment_hire WHERE property_id = ANY($1)', [props]);

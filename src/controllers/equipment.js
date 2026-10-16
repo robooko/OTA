@@ -103,24 +103,45 @@ async function updateEquipment(req, res, next) {
 
 async function searchEquipment(req, res, next) {
   try {
-    const { date, type, quantity } = req.query;
+    const { date, type, start_time } = req.query;
     if (!date) return res.status(400).json({ error: 'date is required' });
     if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
+    const quantity = req.query.quantity == null ? null : Number(req.query.quantity);
+    const duration = Number(req.query.duration ?? 1);
+    if (quantity != null && !(Number.isInteger(quantity) && quantity > 0)) return res.status(400).json({ error: 'quantity must be a positive integer' });
+    if (!(duration > 0 && duration <= 24 && Number.isInteger(duration * 2))) return res.status(400).json({ error: 'duration must be hours, a multiple of 0.5 up to 24' });
+    if (start_time != null && !isValidTime(start_time)) return res.status(400).json({ error: 'start_time must be HH:MM' });
 
-    let query = `
-      SELECT e.*,
-             e.quantity - COALESCE(SUM(eh.quantity) FILTER (WHERE eh.status != 'cancelled'), 0) AS available_quantity
-      FROM equipment e
-      LEFT JOIN equipment_hire eh ON eh.equipment_id = e.id AND eh.hire_date = $1 AND eh.property_id = $2
-      WHERE e.status = 'active' AND e.property_id = $2
-    `;
-    const params = [date, req.property_id];
-    if (type) { params.push(type); query += ` AND e.type = $${params.length}`; }
-    query += ' GROUP BY e.id';
-    if (quantity) { query += ` HAVING e.quantity - COALESCE(SUM(eh.quantity) FILTER (WHERE eh.status != 'cancelled'), 0) >= ${parseInt(quantity, 10)}`; }
-    query += ' ORDER BY e.type, e.name';
-    const { rows } = await pool.query(query, params);
-    res.json(rows);
+    let query = "SELECT * FROM equipment WHERE status = 'active' AND property_id = $1";
+    const params = [req.property_id];
+    if (type) { params.push(type); query += ` AND type = $${params.length}`; }
+    query += ' ORDER BY type, name';
+    const { rows: items } = await pool.query(query, params);
+    const hires = await dayHires(pool, req.property_id, date, items.map((e) => e.id));
+    const { today, nowMinutes } = await propertyNow(pool, req.property_id);
+    const now = date === today ? nowMinutes : null;
+
+    // Same rules as POST /hires, so search never offers what a hire would refuse.
+    const out = [];
+    for (const e of items) {
+      const dayOf = hires.get(e.id);
+      if (start_time) {
+        const window = hireWindow({ rate_type: 'per_hour', start_time, duration });
+        if (e.price_per_hour == null || !fitsHours(e, window) || (now != null && window.start < now)) continue;
+        const available_quantity = e.quantity - peakUse(dayOf, window);
+        if (available_quantity >= (quantity ?? 0)) out.push({ ...e, available_quantity });
+        continue;
+      }
+      const available_quantity = e.quantity - peakUse(dayOf, { start: 0, end: 1440 });
+      if (e.price_per_hour == null) {
+        if (available_quantity >= (quantity ?? 0)) out.push({ ...e, available_quantity });
+        continue;
+      }
+      // Hourly kit is judged by its free slots, not the whole-day peak.
+      const start_times = startTimes(e, dayOf, duration, quantity ?? 1, now);
+      if (quantity == null || start_times.length) out.push({ ...e, available_quantity, start_times });
+    }
+    res.json(out);
   } catch (err) { next(err); }
 }
 
