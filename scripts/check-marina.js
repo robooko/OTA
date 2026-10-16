@@ -231,6 +231,25 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       for (const n of ['get_marina', 'list_marina_berths', 'get_marina_booking', 'create_marina_booking']) t(n);
       assert.equal(t('list_marina_bookings').run.toString().includes('sidon-bookings'), true, 'stays on the interim proxy until Switch');
     });
+    await check('MCP marina catalogue and document tools call the marina routes', async () => {
+      const calls = [];
+      const tools = require('../mcp-server/tools').createTools(async (method, path, opts) => { calls.push([method, path, opts]); return {}; });
+      const t = (name) => { const x = tools.find((y) => y.name === name); assert.ok(x, `missing tool ${name}`); return x; };
+      const { z } = require('zod');
+      assert.equal(z.object(t('create_marina').inputSchema).safeParse({ name: 'P' }).success, false, 'slug required on create');
+      assert.equal(z.object(t('update_marina').inputSchema).safeParse({ marina_id: 'm1', status: 'inactive' }).success, true);
+      await t('create_marina').run({ name: 'P', slug: 'p' });
+      await t('update_marina').run({ marina_id: 'm1', auto_confirm: true });
+      await t('bulk_upsert_marina_berths').run({ marina_id: 'm1', rows: [{ label: 'A1' }] });
+      await t('list_marina_booking_documents').run({ booking_id: 'k1' });
+      await t('get_marina_booking_verification').run({ booking_id: 'k1' });
+      await t('update_marina_document').run({ document_id: 'd1', status: 'verified' });
+      assert.deepEqual(calls.map(([m, p]) => `${m} ${p}`), ['POST /api/marina/marinas', 'PUT /api/marina/marinas/m1', 'POST /api/marina/marinas/m1/berths/bulk',
+        'GET /api/marina/bookings/k1/documents', 'GET /api/marina/bookings/k1/verification', 'PUT /api/marina/documents/d1']);
+      assert.deepEqual(calls[1][2].body, { auto_confirm: true });
+      assert.deepEqual(calls[2][2].body, { rows: [{ label: 'A1' }] });
+      assert.deepEqual(calls[5][2].body, { status: 'verified' });
+    });
 
     // (later tasks append their checks here)
   } finally {

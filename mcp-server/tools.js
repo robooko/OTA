@@ -9,6 +9,24 @@ const BRANDING_SCHEMA = z.object({
   header_bg: z.string().optional().describe('Hex background behind the logo, e.g. #ffffff -- keeps dark logos visible in dark mode'),
 }).optional();
 
+// Marina columns accepted by POST/PUT /api/marina/marinas (MARINA_COLS in
+// src/controllers/marinaCatalogue.js), all optional here.
+const MARINA_SLUG = z.string().max(100).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).describe('Lowercase letters, digits and dashes, e.g. porto-montenegro');
+const MARINA_FIELDS = {
+  name: z.string().max(100).optional(), slug: MARINA_SLUG.optional(),
+  description: z.string().nullable().optional(), phone: z.string().max(30).nullable().optional(),
+  email: z.string().email().nullable().optional(), website: z.string().url().nullable().optional(),
+  lat: z.number().nullable().optional(), lng: z.number().nullable().optional(),
+  layout_svg: z.string().nullable().optional().describe('Marina map SVG; berths are marked with data-berth-id="<label>"'),
+  layout_sw_lat: z.number().nullable().optional(), layout_sw_lng: z.number().nullable().optional(),
+  layout_ne_lat: z.number().nullable().optional(), layout_ne_lng: z.number().nullable().optional(),
+  layout_rotation: z.number().nullable().optional(),
+  response_window_hours: z.number().int().min(1).max(144).optional().describe('Hours the marina has to answer a pending request'),
+  auto_confirm: z.boolean().optional().describe('Confirm a pending request on its own once every mandatory document is verified'),
+  booking_url: z.string().nullable().optional().describe('http(s) guest booking page URL containing {id} and {token}'),
+  status: z.enum(['active', 'inactive']).optional(),
+};
+
 function createTools(apiRequest) {
   return [
   {
@@ -906,6 +924,34 @@ function createTools(apiRequest) {
     run: ({ marina_id }) => apiRequest('GET', `/api/marina/marinas/${marina_id}`),
   },
   {
+    name: 'create_marina',
+    description: 'Create a marina for this property. name and slug are required; slug is unique per property and is the guest booking-page path (409 if taken).',
+    inputSchema: { ...MARINA_FIELDS, name: z.string().max(100), slug: MARINA_SLUG },
+    run: (body) => apiRequest('POST', '/api/marina/marinas', { body }),
+  },
+  {
+    name: 'update_marina',
+    description: "Update a marina. Omit a field to leave it; null clears an optional one. status inactive hides it from list_marinas and guests (set active to reactivate).",
+    inputSchema: { marina_id: z.string(), ...MARINA_FIELDS },
+    run: ({ marina_id, ...body }) => apiRequest('PUT', `/api/marina/marinas/${marina_id}`, { body }),
+  },
+  {
+    name: 'bulk_upsert_marina_berths',
+    description: "Create or update up to 2000 berths in one marina, matched by label (an existing label is updated, a new one created). All or nothing: one bad row fails the whole call with its row number. pontoon_id must be a pontoon of this marina.",
+    inputSchema: {
+      marina_id: z.string(),
+      rows: z.array(z.object({
+        label: z.string().max(30), pontoon_id: z.string().nullable().optional(),
+        lat: z.number().nullable().optional(), lng: z.number().nullable().optional(), rotation: z.number().nullable().optional(),
+        length_m: z.number().min(0).nullable().optional(), min_length_m: z.number().min(0).nullable().optional(),
+        beam_m: z.number().min(0).nullable().optional(), depth_m: z.number().min(0).nullable().optional(),
+        price_per_night: z.number().min(0).nullable().optional(), price_mode: z.enum(['per_metre', 'fixed']).optional(),
+        status: z.enum(['active', 'maintenance', 'inactive']).optional(), notes: z.string().nullable().optional(),
+      })).min(1).max(2000),
+    },
+    run: ({ marina_id, rows }) => apiRequest('POST', `/api/marina/marinas/${marina_id}/berths/bulk`, { body: { rows } }),
+  },
+  {
     name: 'list_marina_berths',
     description: "A marina's berths (active and maintenance; inactive hidden): label, pontoon, dimensions in metres, nightly price and whether it's per metre or fixed. Occupancy is not stored on berths -- use search_berth_availability or list_marina_bookings.",
     inputSchema: { marina_id: z.string() },
@@ -937,6 +983,28 @@ function createTools(apiRequest) {
     description: 'One berth booking with berth, payment status/error, document metadata and contract agreement.',
     inputSchema: { booking_id: z.string() },
     run: ({ booking_id }) => apiRequest('GET', `/api/marina/bookings/${booking_id}`),
+  },
+  {
+    name: 'list_marina_booking_documents',
+    description: "Documents a sailor uploaded for a berth booking (passport, insurance, registration...): requirement, file name/type/size, extracted_data, expiry_date, status (pending/verified/rejected), notes, file_deleted_at (retention). Metadata only, not the file. Needs a staff session (Bearer), not an API key.",
+    inputSchema: { booking_id: z.string() },
+    run: ({ booking_id }) => apiRequest('GET', `/api/marina/bookings/${booking_id}/documents`),
+  },
+  {
+    name: 'get_marina_booking_verification',
+    description: "Everything staff check before confirming a berth booking: the marina's active document requirements (mandatory flag), every document on the booking, and the contract (signed snapshot, an unsigned preview of the one this stay would get, or null). Needs a staff session (Bearer), not an API key.",
+    inputSchema: { booking_id: z.string() },
+    run: ({ booking_id }) => apiRequest('GET', `/api/marina/bookings/${booking_id}/verification`),
+  },
+  {
+    name: 'update_marina_document',
+    description: "Verify or reject a sailor's document, or add notes. Verifying may auto-confirm the booking when the marina auto-confirms and every mandatory document is verified. Needs a staff session (Bearer), not an API key.",
+    inputSchema: {
+      document_id: z.string(),
+      status: z.enum(['verified', 'rejected', 'pending']).optional(),
+      notes: z.string().optional().describe('Replaces the notes; omit to leave them'),
+    },
+    run: ({ document_id, ...body }) => apiRequest('PUT', `/api/marina/documents/${document_id}`, { body }),
   },
   {
     name: 'create_marina_booking',
