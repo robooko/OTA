@@ -110,6 +110,15 @@ async function connectCallback(req, res, next) {
     if (!code || !realmId || !orgId) {
       return res.status(400).send('Invalid or expired connect link. Close this tab and try again from Settings.');
     }
+    // One QuickBooks company belongs to one org -- otherwise every org
+    // connected through the same Intuit login reads the same books.
+    const { rows: [taken] } = await pool.query(
+      'SELECT 1 FROM organization WHERE qbo_realm_id = $1 AND clerk_org_id <> $2',
+      [realmId, orgId]
+    );
+    if (taken) {
+      return res.status(409).send('That QuickBooks company is already connected to another organisation. Pick a different company, or disconnect it there first.');
+    }
     let t;
     try {
       t = await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: process.env.QBO_REDIRECT_URI });
