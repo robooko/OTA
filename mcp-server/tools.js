@@ -1278,6 +1278,12 @@ function createTools(apiRequest) {
     run: ({ spa_id, id }) => apiRequest('POST', `/api/spa/${spa_id}/appointments/${id}/bill`),
   },
   {
+    name: 'list_spa_bills',
+    description: "List a spa's billing: pending lines (added to a guest's bill, not sent yet) and sent invoices newest first with status (open = awaiting payment, paid, void, uncollectible), guest email, amounts in minor units and hosted_invoice_url. Read-only -- invoice_spa_guest_bill marks paid bills' appointments paid.",
+    inputSchema: { spa_id: z.string() },
+    run: ({ spa_id }) => apiRequest('GET', `/api/spa/${spa_id}/bills`),
+  },
+  {
     name: 'invoice_spa_guest_bill',
     description: "Send one Stripe invoice (due in 7 days) for everything on a guest's open bill, by email. Appointments since cancelled or paid by tap are dropped first. Safe to call again: it also marks appointments on paid bills paid (settled_appointment_ids) and lists still-unpaid bills (open_bills); invoice is null when nothing new was pending. 404 if the email has no bill.",
     inputSchema: { spa_id: z.string(), email: z.string().describe("Guest's contact email, as on their appointments") },

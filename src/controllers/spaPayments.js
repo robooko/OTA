@@ -345,4 +345,53 @@ async function invoiceGuestBill(req, res, next) {
   }
 }
 
-module.exports = { loadAppointmentForPayment, treatmentPriceCents, createAppointmentPaymentIntent, confirmAppointmentPayment, createAppointmentInvoice, addAppointmentToBill, invoiceGuestBill };
+// What the spa has billed: lines waiting on a guest's open bill (not sent
+// yet) and invoices sent, newest first -- bills and single-appointment
+// invoices alike, both tagged spa_id. Read-only; settling stays with the
+// POST endpoints.
+// ponytail: latest 100 invoices/pending items across the property's Stripe
+// account; filter by created or paginate once a spa outgrows that.
+async function listBills(req, res, next) {
+  try {
+    const { rows: [spa] } = await pool.query(
+      `SELECT p.stripe_secret_key FROM spa s JOIN property p ON p.id = s.property_id
+       WHERE s.id::text = $1 AND s.property_id = $2`,
+      [req.params.spa_id, req.property_id]
+    );
+    if (!spa) return res.status(404).json({ error: 'Spa not found' });
+    if (!spa.stripe_secret_key) return res.json({ pending: [], invoices: [] });
+
+    const stripe = require('stripe')(spa.stripe_secret_key);
+    const [{ data: items }, { data: invoices }] = await Promise.all([
+      stripe.invoiceItems.list({ pending: true, limit: 100, expand: ['data.customer'] }),
+      stripe.invoices.list({ limit: 100 }),
+    ]);
+    const mine = (o) => o.metadata?.spa_id === req.params.spa_id;
+    res.json({
+      pending: items.filter(mine).map(i => ({
+        invoice_item_id: i.id,
+        appointment_id: i.metadata.spa_appointment_id,
+        email: i.customer?.email ?? null,
+        description: i.description,
+        amount: i.amount,
+        currency: i.currency,
+      })),
+      invoices: invoices.filter(i => mine(i) && i.status !== 'draft').map(i => ({
+        ...invoiceSummary(i),
+        number: i.number,
+        email: i.customer_email,
+        amount_paid: i.amount_paid,
+        currency: i.currency,
+        created: new Date(i.created * 1000).toISOString(),
+        bill: !!i.metadata.spa_bill,
+      })),
+    });
+  } catch (err) {
+    if (err.type?.startsWith('Stripe')) {
+      return res.status(502).json({ error: `Stripe error: ${err.message}` });
+    }
+    next(err);
+  }
+}
+
+module.exports = { loadAppointmentForPayment, treatmentPriceCents, createAppointmentPaymentIntent, confirmAppointmentPayment, createAppointmentInvoice, addAppointmentToBill, invoiceGuestBill, listBills };
