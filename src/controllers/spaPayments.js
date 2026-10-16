@@ -416,6 +416,30 @@ async function listBills(req, res, next) {
   }
 }
 
+// Undoes addAppointmentToBill: takes the appointment's unsent line off its
+// guest's bill. 404 when it isn't on one.
+async function removeAppointmentFromBill(req, res, next) {
+  try {
+    const appt = await loadAppointmentForPayment(req.params.id, req.params.spa_id, req.property_id);
+    if (!appt) return res.status(404).json({ error: 'Appointment not found' });
+    if (!appt.stripe_secret_key) return res.status(409).json({ error: 'No Stripe secret key configured for this property' });
+    if (!appt.contact_email) return res.status(404).json({ error: 'Appointment is not on a bill' });
+
+    const stripe = require('stripe')(appt.stripe_secret_key);
+    const customer = await findCustomer(stripe, appt.contact_email);
+    const { pendingItem } = customer ? await findAppointmentBilling(stripe, customer.id, appt.id) : {};
+    if (!pendingItem) return res.status(404).json({ error: 'Appointment is not on a bill' });
+
+    await stripe.invoiceItems.del(pendingItem.id);
+    res.json({ removed: pendingItem.id, email: customer.email });
+  } catch (err) {
+    if (err.type?.startsWith('Stripe')) {
+      return res.status(502).json({ error: `Stripe error: ${err.message}` });
+    }
+    next(err);
+  }
+}
+
 // Takes one unsent line off a guest's bill (deletes the pending invoice item).
 async function removeBillLine(req, res, next) {
   try {
@@ -442,4 +466,4 @@ async function removeBillLine(req, res, next) {
   }
 }
 
-module.exports = { loadAppointmentForPayment, treatmentPriceCents, createAppointmentPaymentIntent, confirmAppointmentPayment, createAppointmentInvoice, addAppointmentToBill, invoiceGuestBill, listBills, removeBillLine };
+module.exports = { loadAppointmentForPayment, treatmentPriceCents, createAppointmentPaymentIntent, confirmAppointmentPayment, createAppointmentInvoice, addAppointmentToBill, invoiceGuestBill, listBills, removeBillLine, removeAppointmentFromBill };

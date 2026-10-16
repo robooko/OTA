@@ -63,6 +63,7 @@ router.post('/:spa_id/appointments/:id/confirm-payment', authenticateOrApiKey, p
 router.post('/:spa_id/appointments/:id/invoice', authenticateOrApiKey, payments.createAppointmentInvoice);
 // Guest bill: appointments queue as pending lines, then go out as one invoice per email.
 router.post('/:spa_id/appointments/:id/bill', authenticateOrApiKey, payments.addAppointmentToBill);
+router.delete('/:spa_id/appointments/:id/bill', authenticateOrApiKey, payments.removeAppointmentFromBill);
 router.get('/:spa_id/bills', authenticateOrApiKey, payments.listBills);
 router.post('/:spa_id/bills', authenticateOrApiKey, payments.invoiceGuestBill);
 router.delete('/:spa_id/bills/items/:item_id', authenticateOrApiKey, payments.removeBillLine);
