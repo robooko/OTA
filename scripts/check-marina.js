@@ -250,6 +250,20 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.deepEqual(calls[2][2].body, { rows: [{ label: 'A1' }] });
       assert.deepEqual(calls[5][2].body, { status: 'verified' });
     });
+    await check('MCP doc requirement tools call the catalogue routes', async () => {
+      const calls = [];
+      const tools = require('../mcp-server/tools').createTools(async (method, path, opts) => { calls.push([method, path, opts]); return {}; });
+      const t = (name) => { const x = tools.find((y) => y.name === name); assert.ok(x, `missing tool ${name}`); return x; };
+      const { z } = require('zod');
+      assert.equal(z.object(t('create_marina_doc_requirement').inputSchema).safeParse({ marina_id: 'm1', name: 'Passport' }).success, false, 'type required on create');
+      await t('list_marina_doc_requirements').run({ marina_id: 'm1', include_inactive: true });
+      await t('create_marina_doc_requirement').run({ marina_id: 'm1', type: 'passport', name: 'Passport', mandatory: true });
+      await t('update_marina_doc_requirement').run({ marina_id: 'm1', requirement_id: 'r1', status: 'inactive' });
+      assert.deepEqual(calls.map(([m, p]) => `${m} ${p}`), ['GET /api/marina/marinas/m1/doc-requirements', 'POST /api/marina/marinas/m1/doc-requirements', 'PUT /api/marina/marinas/m1/doc-requirements/r1']);
+      assert.deepEqual(calls[0][2].query, { include_inactive: 1 });
+      assert.deepEqual(calls[1][2].body, { type: 'passport', name: 'Passport', mandatory: true });
+      assert.deepEqual(calls[2][2].body, { status: 'inactive' });
+    });
 
     // (later tasks append their checks here)
   } finally {

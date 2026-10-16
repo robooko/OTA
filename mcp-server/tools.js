@@ -26,6 +26,11 @@ const MARINA_FIELDS = {
   booking_url: z.string().nullable().optional().describe('http(s) guest booking page URL containing {id} and {token}'),
   status: z.enum(['active', 'inactive']).optional(),
 };
+const DOC_REQUIREMENT_FIELDS = {
+  type: z.string().max(30).optional(), name: z.string().max(100).optional(), description: z.string().nullable().optional(),
+  fields: z.array(z.any()).optional().describe('What to extract from the upload, e.g. ["passport_number", "nationality"]'),
+  mandatory: z.boolean().optional(), sort_order: z.number().int().optional(), status: z.enum(['active', 'inactive']).optional(),
+};
 
 function createTools(apiRequest) {
   return [
@@ -968,6 +973,24 @@ function createTools(apiRequest) {
       status: z.enum(['active', 'maintenance', 'inactive']).optional(), notes: z.string().nullable().optional(),
     },
     run: ({ marina_id, berth_id, ...body }) => apiRequest('PUT', `/api/marina/marinas/${marina_id}/berths/${berth_id}`, { body }),
+  },
+  {
+    name: 'list_marina_doc_requirements',
+    description: "Documents a marina asks sailors to upload (passport, insurance, registration...): type, name, description, fields (what is extracted from the upload), mandatory, sort_order. Active only unless include_inactive.",
+    inputSchema: { marina_id: z.string(), include_inactive: z.boolean().optional() },
+    run: ({ marina_id, include_inactive }) => apiRequest('GET', `/api/marina/marinas/${marina_id}/doc-requirements`, { query: include_inactive ? { include_inactive: 1 } : {} }),
+  },
+  {
+    name: 'create_marina_doc_requirement',
+    description: "Add a document a marina asks sailors to upload. type (e.g. passport, insurance) and name are required. fields lists what to extract from the upload; mandatory ones must be verified before an auto-confirm marina confirms.",
+    inputSchema: { marina_id: z.string(), ...DOC_REQUIREMENT_FIELDS, type: z.string().max(30), name: z.string().max(100) },
+    run: ({ marina_id, ...body }) => apiRequest('POST', `/api/marina/marinas/${marina_id}/doc-requirements`, { body }),
+  },
+  {
+    name: 'update_marina_doc_requirement',
+    description: 'Update a document requirement. Omit a field to leave it. status inactive removes it (set active to restore).',
+    inputSchema: { marina_id: z.string(), requirement_id: z.string(), ...DOC_REQUIREMENT_FIELDS },
+    run: ({ marina_id, requirement_id, ...body }) => apiRequest('PUT', `/api/marina/marinas/${marina_id}/doc-requirements/${requirement_id}`, { body }),
   },
   {
     name: 'search_berth_availability',
