@@ -367,15 +367,37 @@ async function listBills(req, res, next) {
       stripe.invoices.list({ limit: 100 }),
     ]);
     const mine = (o) => o.metadata?.spa_id === req.params.spa_id;
+    const pending = items.filter(mine);
+    // What each unsent line is for, so the dashboard can show a bill's contents.
+    const { rows: appts } = await pool.query(
+      `SELECT sa.id::text AS id, to_char(sa.appointment_date, 'YYYY-MM-DD') AS appointment_date,
+              to_char(sa.start_time, 'HH24:MI') AS start_time, tr.name AS treatment_name, st.name AS therapist_name
+       FROM spa_appointment sa
+       JOIN spa_therapist st ON st.id = sa.therapist_id
+       LEFT JOIN spa_treatment tr ON tr.id = sa.treatment_id
+       WHERE sa.id::text = ANY($1::text[]) AND sa.property_id = $2`,
+      [pending.map(i => i.metadata.spa_appointment_id), req.property_id]
+    );
+    const apptById = new Map(appts.map(a => [a.id, a]));
     res.json({
-      pending: items.filter(mine).map(i => ({
-        invoice_item_id: i.id,
-        appointment_id: i.metadata.spa_appointment_id,
-        email: i.customer?.email ?? null,
-        description: i.description,
-        amount: i.amount,
-        currency: i.currency,
-      })),
+      // Staff "View in Stripe" links: the customer page lists unsent lines.
+      stripe_dashboard_url: spa.stripe_secret_key.includes('_test_') ? 'https://dashboard.stripe.com/test' : 'https://dashboard.stripe.com',
+      pending: pending.map(i => {
+        const a = apptById.get(i.metadata.spa_appointment_id);
+        return {
+          invoice_item_id: i.id,
+          appointment_id: i.metadata.spa_appointment_id,
+          customer_id: i.customer?.id ?? null,
+          email: i.customer?.email ?? null,
+          description: i.description,
+          treatment_name: a?.treatment_name ?? null,
+          therapist_name: a?.therapist_name ?? null,
+          appointment_date: a?.appointment_date ?? null,
+          start_time: a?.start_time ?? null,
+          amount: i.amount,
+          currency: i.currency,
+        };
+      }),
       invoices: invoices.filter(i => mine(i) && i.status !== 'draft').map(i => ({
         ...invoiceSummary(i),
         number: i.number,
