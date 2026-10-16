@@ -91,7 +91,13 @@ CREATE TABLE IF NOT EXISTS organization (
   clerk_org_id     VARCHAR(255) PRIMARY KEY,
   api_key          TEXT UNIQUE,
   api_key_enabled  BOOLEAN NOT NULL DEFAULT true,
-  created_at       TIMESTAMPTZ DEFAULT now()
+  created_at       TIMESTAMPTZ DEFAULT now(),
+  -- QuickBooks Online -- see migrate-2026-10-16-organization-quickbooks.sql.
+  qbo_realm_id                 VARCHAR(50),
+  qbo_refresh_token            TEXT,
+  qbo_access_token             TEXT,
+  qbo_access_token_expires_at  TIMESTAMPTZ,
+  qbo_connected_at             TIMESTAMPTZ
 );
 
 -- Every token_balance change, as a receipt -- see migrate-2026-09-01-property-token-billing.sql.

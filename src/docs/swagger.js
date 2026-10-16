@@ -41,6 +41,7 @@ const swaggerSpec = {
     { name: 'AI Replies' },
     { name: 'Billing' },
     { name: 'Marina' },
+    { name: 'QuickBooks' },
   ],
   components: {
     securitySchemes: {
@@ -240,6 +241,18 @@ const swaggerSpec = {
     },
     '/api/property/vercel/pat/clear': {
       post: { tags: ['Property'], summary: "Clear the current property's Vercel Personal Access Token (admin only)", security: [{ bearerAuth: [] }], responses: { 200: { description: '{ analyticsPatConfigured: false }' }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/quickbooks/connect': {
+      get: { tags: ['QuickBooks'], summary: "Get the Intuit OAuth URL to connect the organization's QuickBooks Online company (admin only)", description: 'One QuickBooks company per organization, shared by all its properties. Org-level route: no X-Property-Id needed.', security: [{ bearerAuth: [] }], responses: { 200: { description: '{ url }' }, 403: { description: 'Insufficient permissions' }, 503: { description: 'QBO_CLIENT_ID / QBO_CLIENT_SECRET / QBO_REDIRECT_URI not set on the server' } } },
+    },
+    '/api/quickbooks/status': {
+      get: { tags: ['QuickBooks'], summary: 'Whether the organization has a QuickBooks company connected', description: 'Tokens are never returned.', security: [{ bearerAuth: [] }], responses: { 200: { description: '{ configured, connected, realmId, connectedAt, environment }' } } },
+    },
+    '/api/quickbooks/disconnect': {
+      post: { tags: ['QuickBooks'], summary: "Revoke and clear the organization's QuickBooks connection (admin only)", security: [{ bearerAuth: [] }], responses: { 200: { description: '{ connected: false }' }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/quickbooks/profit-and-loss': {
+      get: { tags: ['QuickBooks'], summary: 'Costs (rent, utilities, COGS, ...) and income from the QuickBooks Profit and Loss report (admin only)', security: [{ bearerAuth: [] }], parameters: [{ name: 'from', in: 'query', required: true, schema: { type: 'string', format: 'date' } }, { name: 'to', in: 'query', required: true, schema: { type: 'string', format: 'date' }, description: 'Exclusive' }, { name: 'location', in: 'query', schema: { type: 'string' }, description: 'QuickBooks Location (department) id, e.g. to scope to the spa' }, { name: 'class', in: 'query', schema: { type: 'string' }, description: 'QuickBooks Class id' }], responses: { 200: { description: 'Summary', content: { 'application/json': { schema: { type: 'object', properties: { from: { type: 'string', format: 'date' }, to: { type: 'string', format: 'date' }, currency: { type: 'string', nullable: true }, income: { type: 'number' }, total_costs: { type: 'number' }, net_income: { type: 'number' }, costs: { type: 'array', items: { type: 'object', properties: { group: { type: 'string', enum: ['COGS', 'Expenses', 'OtherExpenses'] }, account: { type: 'string' }, account_id: { type: 'string', nullable: true }, amount: { type: 'number' } } } } } } } } }, 400: { description: 'Invalid from/to' }, 403: { description: 'Insufficient permissions' }, 409: { description: 'Not connected, or the connection expired (reconnect)' }, 502: { description: 'QuickBooks API error' } } },
     },
     '/api/property/stripe/status': {
       get: { tags: ['Property'], summary: "Whether the current property has a Stripe secret key configured", description: 'The key itself is never returned -- only a configured boolean.', security: [{ bearerAuth: [] }], responses: { 200: { description: '{ stripeKeyConfigured: boolean }' } } },
