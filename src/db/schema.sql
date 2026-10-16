@@ -918,7 +918,10 @@ CREATE TABLE IF NOT EXISTS equipment (
   quantity       INT           NOT NULL,
   price_per_day  NUMERIC(10,2),
   price_per_hour NUMERIC(10,2),
-  status         VARCHAR(20)   DEFAULT 'active'
+  status         VARCHAR(20)   DEFAULT 'active',
+  open_time      TIME,
+  close_time     TIME,
+  slot_interval_minutes INT    NOT NULL DEFAULT 60
 );
 
 CREATE TABLE IF NOT EXISTS equipment_hire (
