@@ -68,7 +68,29 @@ const app = require('../src/app');
   };
 
   try {
-    // ---- HTTP checks ----
+    // ---- Task 2: equipment validation and hours ----
+    let kayak;
+    await check('create equipment: validation', async () => {
+      const base = { name: 'Kayak', type: 'kayak', quantity: 1, price_per_hour: 15 };
+      for (const bad of [{ quantity: 0 }, { quantity: 3e9 }, { price_per_day: -1 }, { price_per_day: 1e9 },
+                         { open_time: '09:00' }, { open_time: '19:00', close_time: '09:00' },
+                         { open_time: '25:00', close_time: '26:00' }, { slot_interval_minutes: 2 }]) {
+        assert.equal((await api('POST', '/api/equipment', { ...base, ...bad })).status, 400, JSON.stringify(bad));
+      }
+      const r = await api('POST', '/api/equipment', { ...base, open_time: '09:00', close_time: '19:00', slot_interval_minutes: 30 });
+      assert.equal(r.status, 201, r.text); kayak = r.body;
+      assert.equal(kayak.open_time, '09:00:00'); assert.equal(kayak.slot_interval_minutes, 30);
+    });
+    await check('update equipment: clear hours with null; half-set rejected; absent keeps', async () => {
+      assert.equal((await api('PUT', `/api/equipment/${kayak.id}`, { close_time: '08:00' })).status, 400);
+      assert.equal((await api('PUT', `/api/equipment/${kayak.id}`, { name: 'Kayak 2' })).body.open_time, '09:00:00');
+      const r = await api('PUT', `/api/equipment/${kayak.id}`, { open_time: null, close_time: null });
+      assert.equal(r.status, 200, r.text); assert.equal(r.body.open_time, null); assert.equal(r.body.close_time, null);
+      assert.equal((await api('PUT', `/api/equipment/${kayak.id}`, { open_time: '09:00', close_time: '19:00' })).status, 200);
+    });
+    await check('update equipment: non-UUID id is 404', async () => {
+      assert.equal((await api('PUT', '/api/equipment/abc', { name: 'x' })).status, 404);
+    });
   } finally {
     const props = [P];
     await pool.query('DELETE FROM equipment_hire WHERE property_id = ANY($1)', [props]);

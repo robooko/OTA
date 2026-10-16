@@ -1,5 +1,6 @@
 const pool = require('../db');
-const { isValidDate } = require('../middleware/validate');
+const { isValidDate, isValidUuid, isValidTime } = require('../middleware/validate');
+const { toMinutes, fmt, hireWindow, peakUse, fitsHours, startTimes } = require('../lib/equipmentWindows');
 
 // ── Equipment ─────────────────────────────────────────────────────────────────
 
@@ -17,39 +18,85 @@ async function listEquipment(req, res, next) {
   } catch (err) { next(err); }
 }
 
+const MAX_INT = 2147483647;
+const MAX_MONEY = 99999999.99;
+const isPrice = (v) => v == null || (typeof v === 'number' && v >= 0 && v <= MAX_MONEY);
+const isHour = (v) => typeof v === 'string' && isValidTime(v.slice(0, 5));
+
+// Validates a full equipment row (body for create, body merged over the
+// stored row for update). Returns an error message or null.
+function equipmentError(e) {
+  if (!e.name || !e.type) return 'name, type, and quantity are required';
+  if (!Number.isInteger(e.quantity) || e.quantity < 1 || e.quantity > MAX_INT) return 'quantity must be a positive integer';
+  if (!isPrice(e.price_per_day) || !isPrice(e.price_per_hour)) return 'Prices must be non-negative numbers';
+  if ((e.open_time == null) !== (e.close_time == null)) return 'open_time and close_time must both be set or both be null';
+  if (e.open_time != null) {
+    if (!isHour(e.open_time) || !isHour(e.close_time)) return 'open_time and close_time must be HH:MM';
+    if (toMinutes(e.close_time) <= toMinutes(e.open_time)) return 'close_time must be after open_time';
+  }
+  if (!Number.isInteger(e.slot_interval_minutes) || e.slot_interval_minutes < 5 || e.slot_interval_minutes > 240) {
+    return 'slot_interval_minutes must be an integer from 5 to 240';
+  }
+  return null;
+}
+
+const EQUIPMENT_FIELDS = ['name', 'type', 'description', 'quantity', 'price_per_day', 'price_per_hour', 'status', 'open_time', 'close_time', 'slot_interval_minutes'];
+const NUMERIC_FIELDS = new Set(['quantity', 'price_per_day', 'price_per_hour', 'slot_interval_minutes']);
+// Form posts send numbers as strings; the old SQL-side cast accepted them.
+const fieldValue = (f, v) => (NUMERIC_FIELDS.has(f) && typeof v === 'string' && v.trim() !== '' ? Number(v) : v);
+
 async function createEquipment(req, res, next) {
   try {
-    const { name, type, description, quantity, price_per_day, price_per_hour } = req.body;
-    if (!name || !type || !quantity) {
-      return res.status(400).json({ error: 'name, type, and quantity are required' });
-    }
+    const e = { status: 'active', slot_interval_minutes: 60 };
+    for (const f of EQUIPMENT_FIELDS) if (req.body[f] != null) e[f] = fieldValue(f, req.body[f]);
+    const error = equipmentError(e);
+    if (error) return res.status(400).json({ error });
     const { rows } = await pool.query(
-      `INSERT INTO equipment (property_id, name, type, description, quantity, price_per_day, price_per_hour)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.property_id, name, type, description ?? null, quantity, price_per_day ?? null, price_per_hour ?? null]
+      `INSERT INTO equipment (property_id, name, type, description, quantity, price_per_day, price_per_hour, open_time, close_time, slot_interval_minutes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [req.property_id, e.name, e.type, e.description ?? null, e.quantity, e.price_per_day ?? null, e.price_per_hour ?? null,
+       e.open_time ?? null, e.close_time ?? null, e.slot_interval_minutes]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
 }
 
+// Locks the row, merges the body over it, validates the result, writes it.
+// An explicit null clears open_time / close_time; other fields keep their
+// stored value when null or absent.
 async function updateEquipment(req, res, next) {
+  if (!isValidUuid(req.params.id)) return res.status(404).json({ error: 'Equipment not found' });
+  const client = await pool.connect();
   try {
-    const { name, type, description, quantity, price_per_day, price_per_hour, status } = req.body;
-    const { rows } = await pool.query(
-      `UPDATE equipment SET
-         name           = COALESCE($1, name),
-         type           = COALESCE($2, type),
-         description    = COALESCE($3, description),
-         quantity       = COALESCE($4, quantity),
-         price_per_day  = COALESCE($5, price_per_day),
-         price_per_hour = COALESCE($6, price_per_hour),
-         status         = COALESCE($7, status)
-       WHERE id = $8 AND property_id = $9 RETURNING *`,
-      [name, type, description, quantity, price_per_day, price_per_hour, status, req.params.id, req.property_id]
+    await client.query('BEGIN');
+    const { rows: [row] } = await client.query(
+      'SELECT * FROM equipment WHERE id = $1 AND property_id = $2 FOR UPDATE', [req.params.id, req.property_id]);
+    if (!row) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Equipment not found' }); }
+
+    const e = { ...row, price_per_day: row.price_per_day == null ? null : Number(row.price_per_day),
+                price_per_hour: row.price_per_hour == null ? null : Number(row.price_per_hour) };
+    for (const f of EQUIPMENT_FIELDS) {
+      if (f === 'open_time' || f === 'close_time') { if (f in req.body) e[f] = req.body[f]; }
+      else if (req.body[f] != null) e[f] = fieldValue(f, req.body[f]);
+    }
+    const error = equipmentError(e);
+    if (error) { await client.query('ROLLBACK'); return res.status(400).json({ error }); }
+
+    const { rows } = await client.query(
+      `UPDATE equipment SET name = $1, type = $2, description = $3, quantity = $4, price_per_day = $5,
+         price_per_hour = $6, status = $7, open_time = $8, close_time = $9, slot_interval_minutes = $10
+       WHERE id = $11 RETURNING *`,
+      [e.name, e.type, e.description, e.quantity, e.price_per_day, e.price_per_hour, e.status,
+       e.open_time, e.close_time, e.slot_interval_minutes, row.id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Equipment not found' });
+    await client.query('COMMIT');
     res.json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
 }
 
 // ── Search availability ───────────────────────────────────────────────────────
