@@ -91,6 +91,85 @@ const app = require('../src/app');
     await check('update equipment: non-UUID id is 404', async () => {
       assert.equal((await api('PUT', '/api/equipment/abc', { name: 'x' })).status, 404);
     });
+
+    // ---- Task 3: window-aware hires ----
+    const item = async (body) => (await api('POST', '/api/equipment', { type: 'kayak', price_per_hour: 10, price_per_day: 50, ...body })).body;
+    const single = await item({ name: 'Single', quantity: 1 });
+    const two = await item({ name: 'Two', quantity: 2, open_time: '09:00', close_time: '19:00' });
+    const D = '2030-07-01';
+    const hire = (eq, start, dur, extra = {}) => api('POST', '/api/equipment/hires', {
+      equipment_id: eq.id, contact_name: 'Ana', hire_date: D, quantity: 1, rate_type: 'per_hour', start_time: start, duration: dur, ...extra,
+    });
+    await check('quantity 1: back-to-back ok, overlap 409', async () => {
+      assert.equal((await hire(single, '10:00', 1)).status, 201);
+      assert.equal((await hire(single, '11:00', 1)).status, 201);
+      const r = await hire(single, '10:30', 1);
+      assert.equal(r.status, 409); assert.equal(r.body.error, 'Only 0 available from 10:30 to 11:30');
+    });
+    await check('quantity 2: 10-11 + 11-12 then 10-12 fits (peak 2); another 10-12 is 409', async () => {
+      for (const [s, d] of [['10:00', 1], ['11:00', 1], ['10:00', 2]]) assert.equal((await hire(two, s, d)).status, 201, `${s} ${d}`);
+      assert.equal((await hire(two, '10:00', 2)).status, 409);
+    });
+    await check('per-day blocks timed and vice versa', async () => {
+      const a = await item({ name: 'DayFirst', quantity: 1 });
+      assert.equal((await hire(a, null, 1, { rate_type: 'per_day' })).status, 201);
+      const r = await hire(a, '10:00', 1);
+      assert.equal(r.status, 409); assert.equal(r.body.error, 'Only 0 available from 10:00 to 11:00');
+      const b = await item({ name: 'TimedFirst', quantity: 1 });
+      assert.equal((await hire(b, '10:00', 1)).status, 201);
+      const r2 = await hire(b, null, 1, { rate_type: 'per_day' });
+      assert.equal(r2.status, 409); assert.equal(r2.body.error, 'Only 0 available on this date');
+    });
+    await check('hours and midnight', async () => {
+      const r = await hire(two, '08:00', 1, { hire_date: '2030-07-02' });
+      assert.equal(r.status, 400); assert.equal(r.body.error, 'Hire must be between 09:00 and 19:00');
+      assert.equal((await hire(two, '18:30', 1, { hire_date: '2030-07-02' })).status, 400);
+      assert.equal((await hire(single, '23:00', 2, { hire_date: '2030-07-02' })).status, 400);
+    });
+    await check('validation and bad ids are 400', async () => {
+      for (const bad of [{ quantity: 0 }, { quantity: 1.5 }, { duration: -1 }, { duration: 0.7 }, { start_time: '25:00' },
+                         { rate_type: 'per_week' }, { equipment_id: 'abc' }, { rate_type: 'per_day', start_time: null, duration: 1000 }]) {
+        assert.equal((await hire(single, '10:00', 1, { hire_date: '2030-07-03', ...bad })).status, 400, JSON.stringify(bad));
+      }
+    });
+    await check('cancel frees the window; reinstating into a full window is 409', async () => {
+      const a = (await hire(single, '14:00', 1, { hire_date: '2030-07-04' })).body;
+      assert.equal((await api('PUT', `/api/equipment/hires/${a.id}`, { status: 'cancelled' })).status, 200);
+      assert.equal((await hire(single, '14:00', 1, { hire_date: '2030-07-04' })).status, 201);
+      const r = await api('PUT', `/api/equipment/hires/${a.id}`, { status: 'confirmed' });
+      assert.equal(r.status, 409); assert.equal(r.body.error, 'Only 0 available from 14:00 to 15:00');
+      assert.equal((await api('PUT', '/api/equipment/hires/abc', { status: 'confirmed' })).status, 404);
+    });
+    await check('reinstating a hire on an inactive item is 409', async () => {
+      const eq = await item({ name: 'Retired', quantity: 1 });
+      const a = (await hire(eq, '10:00', 1)).body;
+      await api('PUT', `/api/equipment/hires/${a.id}`, { status: 'cancelled' });
+      await api('PUT', `/api/equipment/${eq.id}`, { status: 'inactive' });
+      const r = await api('PUT', `/api/equipment/hires/${a.id}`, { status: 'confirmed' });
+      assert.equal(r.status, 409); assert.equal(r.body.error, 'Equipment not available');
+    });
+    await check('a hire waits for the item lock and sees the hire committed under it (409)', async () => {
+      // Plays the first of two racing hires by hand: lock the item, take the
+      // last unit, and commit only after the API hire has started.
+      const c = await pool.connect();
+      try {
+        await c.query('BEGIN');
+        await c.query('SELECT 1 FROM equipment WHERE id = $1 FOR UPDATE', [single.id]);
+        await c.query(`INSERT INTO equipment_hire (property_id, equipment_id, contact_name, hire_date, quantity, rate_type, start_time, duration)
+                       VALUES ($1, $2, 'Racer', '2030-07-05', 1, 'per_hour', '16:00', 1)`, [P, single.id]);
+        const pending = hire(single, '16:00', 1, { hire_date: '2030-07-05' });
+        await new Promise((r) => setTimeout(r, 300));
+        await c.query('COMMIT');
+        assert.equal((await pending).status, 409);
+      } finally { c.release(); }
+    });
+    await check('a timed hire today that has started is 400', async () => {
+      const { today, mins } = await one(`SELECT to_char(now() AT TIME ZONE timezone, 'YYYY-MM-DD') AS today,
+        extract(hour FROM now() AT TIME ZONE timezone)*60 + extract(minute FROM now() AT TIME ZONE timezone) AS mins FROM property WHERE id = $1`, [P]);
+      if (Number(mins) === 0) return; // ponytail: skips in the first minute after local midnight
+      const r = await hire(single, '00:00', 0.5, { hire_date: today });
+      assert.equal(r.status, 400); assert.equal(r.body.error, 'That time has passed');
+    });
   } finally {
     const props = [P];
     await pool.query('DELETE FROM equipment_hire WHERE property_id = ANY($1)', [props]);

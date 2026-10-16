@@ -149,36 +149,85 @@ async function listHires(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// "Today" and minutes past midnight now, in the property's timezone.
+async function propertyNow(db, propertyId) {
+  const { rows: [r] } = await db.query(
+    `SELECT to_char(now() AT TIME ZONE timezone, 'YYYY-MM-DD') AS today,
+            extract(hour FROM now() AT TIME ZONE timezone) * 60 + extract(minute FROM now() AT TIME ZONE timezone) AS now_minutes
+     FROM property WHERE id = $1`, [propertyId]);
+  return { today: r.today, nowMinutes: Number(r.now_minutes) };
+}
+
+// Non-cancelled hires on date for the given items, grouped by equipment_id.
+async function dayHires(db, propertyId, date, equipmentIds, excludeHireId = null) {
+  const { rows } = await db.query(
+    `SELECT equipment_id, rate_type, start_time, duration, quantity FROM equipment_hire
+     WHERE property_id = $1 AND hire_date = $2 AND equipment_id = ANY($3) AND status != 'cancelled'
+       AND ($4::uuid IS NULL OR id != $4)`,
+    [propertyId, date, equipmentIds, excludeHireId]);
+  const byItem = new Map(equipmentIds.map((id) => [id, []]));
+  for (const r of rows) byItem.get(r.equipment_id).push(r);
+  return byItem;
+}
+
+// 409 message when quantity doesn't fit in window, else null.
+function shortfall(item, hires, window, quantity) {
+  const available = item.quantity - peakUse(hires, window);
+  if (quantity <= available) return null;
+  return window.start === 0 && window.end === 1440
+    ? `Only ${available} available on this date`
+    : `Only ${available} available from ${fmt(window.start)} to ${fmt(window.end)}`;
+}
+
+function hoursError(item) {
+  return item.open_time && item.close_time
+    ? `Hire must be between ${item.open_time.slice(0, 5)} and ${item.close_time.slice(0, 5)}`
+    : 'Hire must end by 24:00';
+}
+
 async function createHire(req, res, next) {
-  const { equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, start_time, quantity, notes, golf_booking_id, rate_type = 'per_day', duration = 1 } = req.body;
-  if (!equipment_id || !contact_name || !hire_date || !quantity) {
+  const { equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, start_time, notes, golf_booking_id, rate_type = 'per_day' } = req.body;
+  if (!equipment_id || !contact_name || !hire_date || req.body.quantity == null) {
     return res.status(400).json({ error: 'equipment_id, contact_name, hire_date, and quantity are required' });
   }
   if (!isValidDate(hire_date)) return res.status(400).json({ error: 'Invalid date format' });
+  for (const id of [equipment_id, guest_id, golf_booking_id]) {
+    if (id != null && !isValidUuid(id)) return res.status(400).json({ error: 'Invalid id' });
+  }
+  const quantity = Number(req.body.quantity);
+  const duration = Number(req.body.duration ?? 1);
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > MAX_INT) return res.status(400).json({ error: 'quantity must be a positive integer' });
+  if (!['per_day', 'per_hour'].includes(rate_type)) return res.status(400).json({ error: 'rate_type must be per_day or per_hour' });
+  if (!(duration > 0 && duration < 1000)) return res.status(400).json({ error: 'duration must be a positive number below 1000' });
+  if (rate_type === 'per_hour' && !Number.isInteger(duration * 2)) return res.status(400).json({ error: 'Hourly duration must be a multiple of 0.5' });
+  if (start_time != null && !isValidTime(start_time)) return res.status(400).json({ error: 'start_time must be HH:MM' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    const eqRes = await client.query('SELECT * FROM equipment WHERE id = $1 AND property_id = $2', [equipment_id, req.property_id]);
-    if (!eqRes.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Equipment not found' }); }
-    if (eqRes.rows[0].status !== 'active') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Equipment not available' }); }
+    // The row lock serialises hires on one item, so two can't both take the last unit.
+    const { rows: [eq] } = await client.query(
+      'SELECT * FROM equipment WHERE id = $1 AND property_id = $2 FOR UPDATE', [equipment_id, req.property_id]);
+    if (!eq) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Equipment not found' }); }
+    if (eq.status !== 'active') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Equipment not available' }); }
 
-    const hiredRes = await client.query(
-      `SELECT COALESCE(SUM(quantity), 0) AS hired FROM equipment_hire
-       WHERE equipment_id = $1 AND hire_date = $2 AND status != 'cancelled' AND property_id = $3`,
-      [equipment_id, hire_date, req.property_id]
-    );
-    const hired = parseInt(hiredRes.rows[0].hired, 10);
-    const available = eqRes.rows[0].quantity - hired;
-    if (quantity > available) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: `Only ${available} available on this date` });
+    const window = hireWindow({ rate_type, start_time, duration });
+    if (rate_type === 'per_hour' && start_time) {
+      if (!fitsHours(eq, window)) { await client.query('ROLLBACK'); return res.status(400).json({ error: hoursError(eq) }); }
+      const { today, nowMinutes } = await propertyNow(client, req.property_id);
+      if (hire_date === today && window.start < nowMinutes) {
+        await client.query('ROLLBACK'); return res.status(400).json({ error: 'That time has passed' });
+      }
     }
 
-    const eq = eqRes.rows[0];
+    const hires = (await dayHires(client, req.property_id, hire_date, [eq.id])).get(eq.id);
+    const error = shortfall(eq, hires, window, quantity);
+    if (error) { await client.query('ROLLBACK'); return res.status(409).json({ error }); }
+
     const rate = rate_type === 'per_hour' ? parseFloat(eq.price_per_hour || 0) : parseFloat(eq.price_per_day || 0);
     const total_price = (rate * quantity * duration).toFixed(2);
+    if (Number(total_price) > MAX_MONEY) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Total price too large' }); }
 
     const { rows } = await client.query(
       `INSERT INTO equipment_hire (property_id, equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, start_time, quantity, rate_type, duration, notes, golf_booking_id, total_price)
@@ -196,19 +245,41 @@ async function createHire(req, res, next) {
   }
 }
 
+// Reinstating a cancelled hire re-runs the availability check under the
+// same equipment row lock as createHire.
 async function updateHire(req, res, next) {
+  if (!isValidUuid(req.params.id)) return res.status(404).json({ error: 'Hire not found' });
+  const { status, notes } = req.body;
+  const client = await pool.connect();
   try {
-    const { status, notes } = req.body;
-    const { rows } = await pool.query(
+    await client.query('BEGIN');
+    const { rows: [hire] } = await client.query(
+      'SELECT * FROM equipment_hire WHERE id = $1 AND property_id = $2 FOR UPDATE', [req.params.id, req.property_id]);
+    if (!hire) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Hire not found' }); }
+
+    if (hire.status === 'cancelled' && status != null && status !== 'cancelled') {
+      const { rows: [eq] } = await client.query('SELECT * FROM equipment WHERE id = $1 FOR UPDATE', [hire.equipment_id]);
+      if (eq.status !== 'active') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Equipment not available' }); }
+      const hires = (await dayHires(client, req.property_id, hire.hire_date, [eq.id], hire.id)).get(eq.id);
+      const error = shortfall(eq, hires, hireWindow(hire), hire.quantity);
+      if (error) { await client.query('ROLLBACK'); return res.status(409).json({ error }); }
+    }
+
+    const { rows } = await client.query(
       `UPDATE equipment_hire SET
          status = COALESCE($1, status),
          notes  = COALESCE($2, notes)
-       WHERE id = $3 AND property_id = $4 RETURNING *`,
-      [status, notes, req.params.id, req.property_id]
+       WHERE id = $3 RETURNING *`,
+      [status, notes, hire.id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Hire not found' });
+    await client.query('COMMIT');
     res.json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
 }
 
 module.exports = {
