@@ -1290,6 +1290,22 @@ function createTools(apiRequest) {
     run: ({ spa_id, email }) => apiRequest('POST', `/api/spa/${spa_id}/bills`, { body: { email } }),
   },
   {
+    name: 'get_profit_and_loss',
+    description: "Costs and income from the organization's connected QuickBooks Online company (Profit and Loss report): income, total_costs, net_income and costs[] lines (group COGS/Expenses/OtherExpenses, account e.g. 'Rent or Lease', 'Electric', amount in major units). Whole company unless location/class scope it, e.g. to the spa. Admin sign-in only -- not available over an API key. 409 if QuickBooks isn't connected or the connection expired.",
+    inputSchema: {
+      from: z.string().describe('YYYY-MM-DD'),
+      to: z.string().describe('YYYY-MM-DD, exclusive'),
+      location: z.string().optional().describe('QuickBooks Location (department) id'),
+      class: z.string().optional().describe('QuickBooks Class id'),
+    },
+    // An API-key connection reaches the org-level route with no bearer, so
+    // the 401 would otherwise surface as "API key is invalid".
+    run: (args) => apiRequest('GET', '/api/quickbooks/profit-and-loss', { query: args }).catch((err) => {
+      if (err.status === 401) throw new Error('get_profit_and_loss needs an admin sign-in (Clerk bearer), not an API key.');
+      throw err;
+    }),
+  },
+  {
     name: 'list_equipment',
     description: 'List equipment for hire, optionally filtered by type',
     inputSchema: { type: z.string().optional() },
