@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { isValidDate, isValidUuid, isValidTime } = require('../middleware/validate');
+const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { toMinutes, fmt, hireWindow, peakUse, fitsHours, startTimes } = require('../lib/equipmentWindows');
 
 // ── Equipment ─────────────────────────────────────────────────────────────────
@@ -21,7 +21,8 @@ async function listEquipment(req, res, next) {
 const MAX_INT = 2147483647;
 const MAX_MONEY = 99999999.99;
 const isPrice = (v) => v == null || (typeof v === 'number' && v >= 0 && v <= MAX_MONEY);
-const isHour = (v) => typeof v === 'string' && isValidTime(v.slice(0, 5));
+// HH:MM, or HH:MM:SS as pg returns TIME.
+const isHour = (v) => typeof v === 'string' && /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(v);
 
 // Validates a full equipment row (body for create, body merged over the
 // stored row for update). Returns an error message or null.
@@ -106,11 +107,12 @@ async function searchEquipment(req, res, next) {
     const { date, type, start_time } = req.query;
     if (!date) return res.status(400).json({ error: 'date is required' });
     if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
-    const quantity = req.query.quantity == null ? null : Number(req.query.quantity);
+    // Blank or 0 means no filter, as before.
+    const quantity = [undefined, '', '0'].includes(req.query.quantity) ? null : Number(req.query.quantity);
     const duration = Number(req.query.duration ?? 1);
     if (quantity != null && !(Number.isInteger(quantity) && quantity > 0)) return res.status(400).json({ error: 'quantity must be a positive integer' });
     if (!(duration > 0 && duration <= 24 && Number.isInteger(duration * 2))) return res.status(400).json({ error: 'duration must be hours, a multiple of 0.5 up to 24' });
-    if (start_time != null && !isValidTime(start_time)) return res.status(400).json({ error: 'start_time must be HH:MM' });
+    if (start_time != null && !isHour(start_time)) return res.status(400).json({ error: 'start_time must be HH:MM' });
 
     let query = "SELECT * FROM equipment WHERE status = 'active' AND property_id = $1";
     const params = [req.property_id];
@@ -139,7 +141,8 @@ async function searchEquipment(req, res, next) {
       }
       // Hourly kit is judged by its free slots, not the whole-day peak.
       const start_times = startTimes(e, dayOf, duration, quantity ?? 1, now);
-      if (quantity == null || start_times.length) out.push({ ...e, available_quantity, start_times });
+      const dayFits = e.price_per_day != null && available_quantity >= (quantity ?? 0);
+      if (quantity == null || start_times.length || dayFits) out.push({ ...e, available_quantity, start_times });
     }
     res.json(out);
   } catch (err) { next(err); }
@@ -207,7 +210,8 @@ function hoursError(item) {
 }
 
 async function createHire(req, res, next) {
-  const { equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, start_time, notes, golf_booking_id, rate_type = 'per_day' } = req.body;
+  const { equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, start_time, notes, golf_booking_id } = req.body;
+  const rate_type = req.body.rate_type ?? 'per_day';
   if (!equipment_id || !contact_name || !hire_date || req.body.quantity == null) {
     return res.status(400).json({ error: 'equipment_id, contact_name, hire_date, and quantity are required' });
   }
@@ -216,12 +220,13 @@ async function createHire(req, res, next) {
     if (id != null && !isValidUuid(id)) return res.status(400).json({ error: 'Invalid id' });
   }
   const quantity = Number(req.body.quantity);
-  const duration = Number(req.body.duration ?? 1);
+  // Rounded as NUMERIC(5,2) stores it, so the price matches the stored row.
+  const duration = Math.round(Number(req.body.duration ?? 1) * 100) / 100;
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > MAX_INT) return res.status(400).json({ error: 'quantity must be a positive integer' });
   if (!['per_day', 'per_hour'].includes(rate_type)) return res.status(400).json({ error: 'rate_type must be per_day or per_hour' });
-  if (!(duration > 0 && duration < 1000)) return res.status(400).json({ error: 'duration must be a positive number below 1000' });
+  if (!(duration > 0 && duration <= 999.99)) return res.status(400).json({ error: 'duration must be from 0.01 to 999.99' });
   if (rate_type === 'per_hour' && !Number.isInteger(duration * 2)) return res.status(400).json({ error: 'Hourly duration must be a multiple of 0.5' });
-  if (start_time != null && !isValidTime(start_time)) return res.status(400).json({ error: 'start_time must be HH:MM' });
+  if (start_time != null && !isHour(start_time)) return res.status(400).json({ error: 'start_time must be HH:MM' });
 
   const client = await pool.connect();
   try {

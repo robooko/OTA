@@ -198,6 +198,33 @@ const app = require('../src/app');
       }
     });
 
+    // ---- Final review fixes ----
+    await check('final: malformed opening hours are 400; HH:MM:SS accepted', async () => {
+      const base = { name: 'Hrs', type: 'kayak', quantity: 1 };
+      assert.equal((await api('POST', '/api/equipment', { ...base, open_time: '09:00junk', close_time: '17:00' })).status, 400);
+      assert.equal((await api('POST', '/api/equipment', { ...base, open_time: '09:00:99', close_time: '17:00' })).status, 400);
+      assert.equal((await api('POST', '/api/equipment', { ...base, open_time: '09:00:00', close_time: '17:00' })).status, 201);
+    });
+    await check('final: per-day duration that rounds out of NUMERIC(5,2) or to 0 is 400', async () => {
+      for (const duration of [999.996, 0.001]) {
+        assert.equal((await hire(single, null, duration, { rate_type: 'per_day', hire_date: '2030-09-01' })).status, 400, String(duration));
+      }
+    });
+    await check('final: rate_type null means per_day; HH:MM:SS start_time accepted', async () => {
+      const r = await hire(single, null, 1, { rate_type: null, hire_date: '2030-09-02' });
+      assert.equal(r.status, 201, r.text); assert.equal(r.body.rate_type, 'per_day');
+      assert.equal((await hire(single, '10:00:00', 1, { hire_date: '2030-09-03' })).status, 201);
+    });
+    await check('final: blank or zero quantity in search is ignored', async () => {
+      for (const q of ['', '0']) assert.equal((await api('GET', `/api/equipment/search?date=2030-08-01&quantity=${q}`)).status, 200, `quantity=${q}`);
+    });
+    await check('final: item with both prices stays in search when per-day fits but no start time does', async () => {
+      const both = await item({ name: 'Both', type: 'both', quantity: 1, open_time: '09:00', close_time: '10:00' });
+      const r = await api('GET', '/api/equipment/search?date=2030-08-01&type=both&duration=2&quantity=1');
+      const e = r.body.find((x) => x.id === both.id);
+      assert.ok(e, r.text); assert.deepEqual(e.start_times, []);
+    });
+
     // ---- Task 5: MCP tools ----
     await check('MCP tools carry the hours fields and search time window', async () => {
       process.env.PORT = String(server.address().port); // routes/mcp.js loops back to localhost:PORT
