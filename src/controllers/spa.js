@@ -793,6 +793,8 @@ function toLiveSpaBooking(row) {
     duration_minutes: row.duration_mins,
     price: row.price,
     status: row.status,
+    // The feed hides its invoice/bill actions once this is 'paid'.
+    payment_status: row.payment_status,
     created_at: row.created_at,
   };
 }
