@@ -107,4 +107,71 @@ async function confirmAppointmentPayment(req, res, next) {
   }
 }
 
-module.exports = { loadAppointmentForPayment, treatmentPriceCents, createAppointmentPaymentIntent, confirmAppointmentPayment };
+// Bills the appointment by Stripe invoice (emailed, hosted pay page) instead
+// of a tap. Nothing new is stored: the Stripe customer is found by email and
+// the invoice by its spa_appointment_id metadata, both via list endpoints
+// (strongly consistent, unlike search). Call again to re-check -- a paid
+// invoice settles the appointment, an open one is returned as-is.
+async function createAppointmentInvoice(req, res, next) {
+  try {
+    const appt = await loadAppointmentForPayment(req.params.id, req.params.spa_id, req.property_id);
+    if (!appt) return res.status(404).json({ error: 'Appointment not found' });
+    if (!appt.stripe_secret_key) return res.status(409).json({ error: 'No Stripe secret key configured for this property' });
+    if (appt.status === 'cancelled') return res.status(409).json({ error: 'Appointment is cancelled' });
+    if (appt.payment_status === 'paid') return res.status(409).json({ error: 'Appointment already paid' });
+    if (!appt.contact_email) return res.status(409).json({ error: 'Appointment has no contact email to invoice' });
+
+    const stripe = require('stripe')(appt.stripe_secret_key);
+    const amount = treatmentPriceCents(appt.price);
+    if (amount <= 0) return res.status(409).json({ error: 'Nothing to pay on this appointment' });
+
+    // Stripe matches email case-sensitively, so always store and look up lowercase.
+    const email = appt.contact_email.trim().toLowerCase();
+    const { data: customers } = await stripe.customers.list({ email, limit: 1 });
+    const customer = customers[0] ?? await stripe.customers.create({ email, name: appt.contact_name });
+
+    // ponytail: scans the customer's latest 100 invoices; a regular with more
+    // than that would need invoices.search or a stored stripe_invoice_id.
+    const { data: invoices } = await stripe.invoices.list({ customer: customer.id, limit: 100 });
+    const live = invoices.find(i => i.metadata?.spa_appointment_id === appt.id && ['draft', 'open', 'paid'].includes(i.status));
+
+    if (live?.status === 'paid') {
+      if (live.amount_paid !== amount) {
+        return res.status(409).json({ error: 'Invoice was paid for a different amount', invoice_id: live.id });
+      }
+      await pool.query(`UPDATE spa_appointment SET payment_status = 'paid', paid_at = now() WHERE id = $1`, [appt.id]);
+      return res.json({ already_paid: true, invoice_id: live.id });
+    }
+
+    let invoice = live;
+    if (!invoice) {
+      invoice = await stripe.invoices.create({
+        customer: customer.id,
+        collection_method: 'send_invoice',
+        days_until_due: 7,
+        currency: appt.currency.toLowerCase(),
+        metadata: { spa_appointment_id: appt.id, spa_id: req.params.spa_id },
+      });
+      await stripe.invoiceItems.create({
+        customer: customer.id,
+        invoice: invoice.id,
+        amount,
+        currency: appt.currency.toLowerCase(),
+        description: `Spa appointment ${appt.appointment_date} ${appt.start_time.slice(0, 5)}`,
+      });
+    }
+    // A draft left by a crash between create and send is picked up here too.
+    if (invoice.status === 'draft') {
+      invoice = await stripe.invoices.finalizeInvoice(invoice.id);
+      invoice = await stripe.invoices.sendInvoice(invoice.id);
+    }
+    res.json({ invoice_id: invoice.id, status: invoice.status, amount_due: invoice.amount_due, hosted_invoice_url: invoice.hosted_invoice_url });
+  } catch (err) {
+    if (err.type?.startsWith('Stripe')) {
+      return res.status(502).json({ error: `Stripe error: ${err.message}` });
+    }
+    next(err);
+  }
+}
+
+module.exports = { loadAppointmentForPayment, treatmentPriceCents, createAppointmentPaymentIntent, confirmAppointmentPayment, createAppointmentInvoice };

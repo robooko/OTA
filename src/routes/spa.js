@@ -60,5 +60,6 @@ router.put('/:spa_id/appointments/:id', authenticateOrApiKey, ctrl.updateAppoint
 // Tap to Pay (see 2026-08-30-spa-tap-to-pay-backend-requirements.md)
 router.post('/:spa_id/appointments/:id/payment-intent', authenticateOrApiKey, payments.createAppointmentPaymentIntent);
 router.post('/:spa_id/appointments/:id/confirm-payment', authenticateOrApiKey, payments.confirmAppointmentPayment);
+router.post('/:spa_id/appointments/:id/invoice', authenticateOrApiKey, payments.createAppointmentInvoice);
 
 module.exports = router;
