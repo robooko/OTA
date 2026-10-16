@@ -41,4 +41,10 @@ router.post('/', authenticateOrApiKey, async (req, res, next) => {
   }
 });
 
+// Stateless: no SSE stream or session to open/close. Spec says 405 here; a 404
+// makes MCP clients report the endpoint as missing.
+router.all('/', (req, res) => {
+  res.set('Allow', 'POST').status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
+});
+
 module.exports = router;
