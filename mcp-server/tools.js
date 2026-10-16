@@ -1266,6 +1266,12 @@ function createTools(apiRequest) {
     run: ({ spa_id, id, ...body }) => apiRequest('PUT', `/api/spa/${spa_id}/appointments/${id}`, { body }),
   },
   {
+    name: 'invoice_spa_appointment',
+    description: "Bill a spa appointment by Stripe invoice: emails the appointment's contact_email a payable invoice (due in 7 days) for the booked price and returns hosted_invoice_url. Safe to call again -- it returns the same open invoice rather than sending a second, and once the invoice is paid the call marks the appointment paid (already_paid: true). Call it again to check whether a sent invoice has been paid. 409 if the appointment is cancelled, already paid, or has no contact email.",
+    inputSchema: { spa_id: z.string(), id: z.string() },
+    run: ({ spa_id, id }) => apiRequest('POST', `/api/spa/${spa_id}/appointments/${id}/invoice`),
+  },
+  {
     name: 'list_equipment',
     description: 'List equipment for hire, optionally filtered by type',
     inputSchema: { type: z.string().optional() },
