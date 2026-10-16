@@ -107,11 +107,62 @@ async function confirmAppointmentPayment(req, res, next) {
   }
 }
 
+// Stripe matches email case-sensitively, so always store and look up lowercase.
+async function findCustomer(stripe, email) {
+  const { data } = await stripe.customers.list({ email: email.trim().toLowerCase(), limit: 1 });
+  return data[0] ?? null;
+}
+
+// Where an appointment stands in Stripe: a pending line on the guest's open
+// bill, and/or a live invoice carrying it -- either its own (invoice
+// metadata) or a bill it was swept into (item metadata).
+// ponytail: scans the customer's latest 100 items and invoices; a regular with
+// more than that would need invoices.search or a stored stripe_invoice_id.
+async function findAppointmentBilling(stripe, customerId, appointmentId) {
+  const [{ data: items }, { data: invoices }] = await Promise.all([
+    stripe.invoiceItems.list({ customer: customerId, limit: 100 }),
+    stripe.invoices.list({ customer: customerId, limit: 100 }),
+  ]);
+  const mine = items.filter(i => i.metadata?.spa_appointment_id === appointmentId);
+  const onInvoice = new Set(mine.map(i => i.invoice).filter(Boolean));
+  return {
+    pendingItem: mine.find(i => !i.invoice) ?? null,
+    invoice: invoices.find(i => ['draft', 'open', 'paid'].includes(i.status)
+      && (i.metadata?.spa_appointment_id === appointmentId || onInvoice.has(i.id))) ?? null,
+  };
+}
+
+// Marks the appointments on a paid invoice paid -- only where the line still
+// matches the appointment's price, the same guard a tap gets. Returns the ids
+// settled and the ids whose price no longer matches.
+async function settlePaidInvoice(stripe, invoice, propertyId) {
+  const lines = [];
+  for await (const item of stripe.invoiceItems.list({ invoice: invoice.id, limit: 100 })) {
+    // Single-appointment invoices sent before bills existed carry the id on the invoice, not the item.
+    const id = item.metadata?.spa_appointment_id ?? invoice.metadata?.spa_appointment_id;
+    if (id) lines.push({ id, amount: item.amount });
+  }
+  if (!lines.length) return { settled: [], mismatched: [] };
+  const { rows } = await pool.query(
+    `UPDATE spa_appointment sa SET payment_status = 'paid', paid_at = COALESCE(sa.paid_at, now())
+     FROM unnest($1::text[], $2::int[]) AS l(id, amount)
+     WHERE sa.id::text = l.id AND sa.property_id = $3 AND round(sa.price * 100) = l.amount
+     RETURNING sa.id::text AS id`,
+    [lines.map(l => l.id), lines.map(l => l.amount), propertyId]
+  );
+  const settled = rows.map(r => r.id);
+  return { settled, mismatched: lines.map(l => l.id).filter(id => !settled.includes(id)) };
+}
+
+function invoiceSummary(invoice) {
+  return { invoice_id: invoice.id, status: invoice.status, amount_due: invoice.amount_due, hosted_invoice_url: invoice.hosted_invoice_url };
+}
+
 // Bills the appointment by Stripe invoice (emailed, hosted pay page) instead
 // of a tap. Nothing new is stored: the Stripe customer is found by email and
-// the invoice by its spa_appointment_id metadata, both via list endpoints
-// (strongly consistent, unlike search). Call again to re-check -- a paid
-// invoice settles the appointment, an open one is returned as-is.
+// the invoice by metadata, both via list endpoints (strongly consistent,
+// unlike search). Call again to re-check -- a paid invoice settles the
+// appointment, an open one is returned as-is.
 async function createAppointmentInvoice(req, res, next) {
   try {
     const appt = await loadAppointmentForPayment(req.params.id, req.params.spa_id, req.property_id);
@@ -125,21 +176,18 @@ async function createAppointmentInvoice(req, res, next) {
     const amount = treatmentPriceCents(appt.price);
     if (amount <= 0) return res.status(409).json({ error: 'Nothing to pay on this appointment' });
 
-    // Stripe matches email case-sensitively, so always store and look up lowercase.
     const email = appt.contact_email.trim().toLowerCase();
-    const { data: customers } = await stripe.customers.list({ email, limit: 1 });
-    const customer = customers[0] ?? await stripe.customers.create({ email, name: appt.contact_name });
-
-    // ponytail: scans the customer's latest 100 invoices; a regular with more
-    // than that would need invoices.search or a stored stripe_invoice_id.
-    const { data: invoices } = await stripe.invoices.list({ customer: customer.id, limit: 100 });
-    const live = invoices.find(i => i.metadata?.spa_appointment_id === appt.id && ['draft', 'open', 'paid'].includes(i.status));
+    const customer = await findCustomer(stripe, email) ?? await stripe.customers.create({ email, name: appt.contact_name });
+    const { pendingItem, invoice: live } = await findAppointmentBilling(stripe, customer.id, appt.id);
+    if (pendingItem) {
+      return res.status(409).json({ error: "Appointment is on the guest's open bill -- invoice the bill instead", invoice_item_id: pendingItem.id });
+    }
 
     if (live?.status === 'paid') {
-      if (live.amount_paid !== amount) {
+      const { settled } = await settlePaidInvoice(stripe, live, req.property_id);
+      if (!settled.includes(String(appt.id))) {
         return res.status(409).json({ error: 'Invoice was paid for a different amount', invoice_id: live.id });
       }
-      await pool.query(`UPDATE spa_appointment SET payment_status = 'paid', paid_at = now() WHERE id = $1`, [appt.id]);
       return res.json({ already_paid: true, invoice_id: live.id });
     }
 
@@ -158,6 +206,7 @@ async function createAppointmentInvoice(req, res, next) {
         amount,
         currency: appt.currency.toLowerCase(),
         description: `Spa appointment ${appt.appointment_date} ${appt.start_time.slice(0, 5)}`,
+        metadata: { spa_appointment_id: appt.id, spa_id: req.params.spa_id },
       });
     }
     // A draft left by a crash between create and send is picked up here too.
@@ -165,7 +214,7 @@ async function createAppointmentInvoice(req, res, next) {
       invoice = await stripe.invoices.finalizeInvoice(invoice.id);
       invoice = await stripe.invoices.sendInvoice(invoice.id);
     }
-    res.json({ invoice_id: invoice.id, status: invoice.status, amount_due: invoice.amount_due, hosted_invoice_url: invoice.hosted_invoice_url });
+    res.json(invoiceSummary(invoice));
   } catch (err) {
     if (err.type?.startsWith('Stripe')) {
       return res.status(502).json({ error: `Stripe error: ${err.message}` });
@@ -174,4 +223,126 @@ async function createAppointmentInvoice(req, res, next) {
   }
 }
 
-module.exports = { loadAppointmentForPayment, treatmentPriceCents, createAppointmentPaymentIntent, confirmAppointmentPayment, createAppointmentInvoice };
+// Puts the appointment on the guest's open bill: a pending Stripe invoice
+// item on their customer, swept into one invoice by invoiceGuestBill.
+// Idempotent -- adding the same appointment twice returns the same line.
+async function addAppointmentToBill(req, res, next) {
+  try {
+    const appt = await loadAppointmentForPayment(req.params.id, req.params.spa_id, req.property_id);
+    if (!appt) return res.status(404).json({ error: 'Appointment not found' });
+    if (!appt.stripe_secret_key) return res.status(409).json({ error: 'No Stripe secret key configured for this property' });
+    if (appt.status === 'cancelled') return res.status(409).json({ error: 'Appointment is cancelled' });
+    if (appt.payment_status === 'paid') return res.status(409).json({ error: 'Appointment already paid' });
+    if (!appt.contact_email) return res.status(409).json({ error: 'Appointment has no contact email to bill' });
+
+    const stripe = require('stripe')(appt.stripe_secret_key);
+    const amount = treatmentPriceCents(appt.price);
+    if (amount <= 0) return res.status(409).json({ error: 'Nothing to pay on this appointment' });
+
+    const email = appt.contact_email.trim().toLowerCase();
+    const customer = await findCustomer(stripe, email) ?? await stripe.customers.create({ email, name: appt.contact_name });
+    const { pendingItem, invoice } = await findAppointmentBilling(stripe, customer.id, appt.id);
+    if (invoice) return res.status(409).json({ error: 'Appointment is already invoiced', invoice_id: invoice.id });
+
+    const item = pendingItem ?? await stripe.invoiceItems.create({
+      customer: customer.id,
+      amount,
+      currency: appt.currency.toLowerCase(),
+      description: `Spa appointment ${appt.appointment_date} ${appt.start_time.slice(0, 5)}`,
+      metadata: { spa_appointment_id: appt.id, spa_id: req.params.spa_id },
+    });
+    res.status(pendingItem ? 200 : 201).json({ invoice_item_id: item.id, amount: item.amount, email });
+  } catch (err) {
+    if (err.type?.startsWith('Stripe')) {
+      return res.status(502).json({ error: `Stripe error: ${err.message}` });
+    }
+    next(err);
+  }
+}
+
+// Invoices everything on a guest's open bill as one emailed Stripe invoice.
+// Lines whose appointment was since cancelled or paid by tap are dropped, and
+// repriced ones corrected, before sending. Call again to re-check: paid bills
+// settle their appointments, and a bill a crash left as a draft is finalized
+// and sent.
+async function invoiceGuestBill(req, res, next) {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    if (!email) return res.status(400).json({ error: 'email is required' });
+
+    const { rows: [spa] } = await pool.query(
+      `SELECT p.stripe_secret_key, p.currency FROM spa s JOIN property p ON p.id = s.property_id
+       WHERE s.id::text = $1 AND s.property_id = $2`,
+      [req.params.spa_id, req.property_id]
+    );
+    if (!spa) return res.status(404).json({ error: 'Spa not found' });
+    if (!spa.stripe_secret_key) return res.status(409).json({ error: 'No Stripe secret key configured for this property' });
+
+    const stripe = require('stripe')(spa.stripe_secret_key);
+    const customer = await findCustomer(stripe, email);
+    if (!customer) return res.status(404).json({ error: 'No bill for this email' });
+
+    // ponytail: latest 100 of each, same ceiling as findAppointmentBilling.
+    const [{ data: pending }, { data: invoices }] = await Promise.all([
+      stripe.invoiceItems.list({ customer: customer.id, pending: true, limit: 100 }),
+      stripe.invoices.list({ customer: customer.id, limit: 100 }),
+    ]);
+
+    // spa_settled marks a paid bill already reconciled, so re-checks stay cheap.
+    const settled = [];
+    for (const inv of invoices.filter(i => i.status === 'paid' && i.metadata?.spa_bill && !i.metadata.spa_settled)) {
+      const result = await settlePaidInvoice(stripe, inv, req.property_id);
+      settled.push(...result.settled);
+      if (!result.mismatched.length) await stripe.invoices.update(inv.id, { metadata: { spa_settled: 'true' } });
+    }
+
+    const lines = pending.filter(i => i.metadata?.spa_appointment_id);
+    const { rows: billable } = await pool.query(
+      `SELECT id::text AS id, round(price * 100)::int AS amount FROM spa_appointment
+       WHERE id::text = ANY($1::text[]) AND property_id = $2 AND status <> 'cancelled' AND payment_status <> 'paid'`,
+      [lines.map(i => i.metadata.spa_appointment_id), req.property_id]
+    );
+    const priceOf = new Map(billable.map(r => [r.id, r.amount]));
+    let toBill = 0;
+    for (const item of lines) {
+      const price = priceOf.get(item.metadata.spa_appointment_id);
+      if (price == null || price <= 0) {
+        await stripe.invoiceItems.del(item.id);
+        continue;
+      }
+      if (price !== item.amount) await stripe.invoiceItems.update(item.id, { amount: price });
+      toBill++;
+    }
+
+    let invoice = invoices.find(i => i.status === 'draft' && i.metadata?.spa_bill) ?? null;
+    if (!invoice && toBill) {
+      // ponytail: 'include' sweeps every pending item on the customer; fine while
+      // spa is the only module leaving pending items, filter here once another does.
+      invoice = await stripe.invoices.create({
+        customer: customer.id,
+        collection_method: 'send_invoice',
+        days_until_due: 7,
+        currency: spa.currency.toLowerCase(),
+        pending_invoice_items_behavior: 'include',
+        metadata: { spa_bill: 'true', spa_id: req.params.spa_id },
+      });
+    }
+    if (invoice?.status === 'draft') {
+      invoice = await stripe.invoices.finalizeInvoice(invoice.id);
+      invoice = await stripe.invoices.sendInvoice(invoice.id);
+    }
+
+    res.json({
+      invoice: invoice ? invoiceSummary(invoice) : null,
+      open_bills: invoices.filter(i => i.status === 'open' && i.metadata?.spa_bill && i.id !== invoice?.id).map(invoiceSummary),
+      settled_appointment_ids: settled,
+    });
+  } catch (err) {
+    if (err.type?.startsWith('Stripe')) {
+      return res.status(502).json({ error: `Stripe error: ${err.message}` });
+    }
+    next(err);
+  }
+}
+
+module.exports = { loadAppointmentForPayment, treatmentPriceCents, createAppointmentPaymentIntent, confirmAppointmentPayment, createAppointmentInvoice, addAppointmentToBill, invoiceGuestBill };

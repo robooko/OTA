@@ -61,5 +61,8 @@ router.put('/:spa_id/appointments/:id', authenticateOrApiKey, ctrl.updateAppoint
 router.post('/:spa_id/appointments/:id/payment-intent', authenticateOrApiKey, payments.createAppointmentPaymentIntent);
 router.post('/:spa_id/appointments/:id/confirm-payment', authenticateOrApiKey, payments.confirmAppointmentPayment);
 router.post('/:spa_id/appointments/:id/invoice', authenticateOrApiKey, payments.createAppointmentInvoice);
+// Guest bill: appointments queue as pending lines, then go out as one invoice per email.
+router.post('/:spa_id/appointments/:id/bill', authenticateOrApiKey, payments.addAppointmentToBill);
+router.post('/:spa_id/bills', authenticateOrApiKey, payments.invoiceGuestBill);
 
 module.exports = router;
