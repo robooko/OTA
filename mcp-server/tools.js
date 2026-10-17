@@ -912,9 +912,14 @@ function createTools(apiRequest) {
   },
   {
     name: 'list_marina_bookings',
-    description: "Berth bookings at the property's linked Sidon marina (read live from Sidon): berth, sailor, boat, arrival/departure dates, nights, status (pending/confirmed/cancelled...), amount. Every booking Sidon holds, newest first -- filter by date yourself. A pending booking past expires_at is a lapsed hold. Fails if no marina is linked or its API key isn't set.",
-    inputSchema: {},
-    run: () => apiRequest('GET', '/api/marina/sidon-bookings'),
+    description: 'Berth bookings across this property\'s marinas, paged ({ total, data }), ordered by arrival then berth. from = bookings departing after this date (open-ended always included), to = arriving before it. Guest checkouts in progress (holds) are never listed.',
+    inputSchema: {
+      from: z.string().optional().describe('YYYY-MM-DD'), to: z.string().optional().describe('YYYY-MM-DD'),
+      status: z.enum(['pending', 'confirmed', 'declined', 'cancelled']).optional(),
+      marina_id: z.string().optional(), berth_id: z.string().optional(),
+      limit: z.number().int().min(1).max(500).optional(), offset: z.number().int().min(0).optional(),
+    },
+    run: (query) => apiRequest('GET', '/api/marina/bookings', { query }),
   },
   {
     name: 'list_marinas',
