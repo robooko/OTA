@@ -244,4 +244,4 @@ async function handleVoiceWebhook(req, res, next) {
   }
 }
 
-module.exports = { handleVoiceWebhook };
+module.exports = { handleVoiceWebhook, PUBLIC_BASE_URL };

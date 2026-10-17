@@ -39,12 +39,17 @@ router.get('/ai-replies', authenticateOrApiKey, ctrl.getAiReplySettings);
 router.put('/ai-replies', authenticate, requireRole('admin'), ctrl.updateAiReplySettings);
 router.put('/ai-replies/instructions', authenticateOrApiKey, ctrl.updateAiReplyInstructions);
 
-// Phone receptionist: on/off and where to transfer -- bearer+admin, like ai-replies mode.
-// GET and the transfer-number-only PUT are on the API-key rail for the MCP
-// get_voice_settings / set_voice_transfer_number tools; staff still need admin.
+// Phone receptionist. All of it is on the API-key rail so an agent (MCP
+// voice tools) can set a venue up end to end: find and buy a number, switch
+// it on, set the transfer number. Calls are BUXS-charged, so on/off can't
+// overspend. Staff sessions still need admin.
 router.get('/voice', authenticateOrApiKey, ctrl.getVoiceSettings);
 router.put('/voice', authenticate, requireRole('admin'), ctrl.updateVoiceSettings);
+router.put('/voice/enabled', authenticateOrApiKey, requireRoleOrApiKey('admin'), ctrl.updateVoiceEnabled);
 router.put('/voice/transfer-number', authenticateOrApiKey, requireRoleOrApiKey('admin'), ctrl.updateVoiceTransferNumber);
+router.get('/voice/available-numbers', authenticateOrApiKey, requireRoleOrApiKey('admin'), ctrl.searchVoiceNumbers);
+router.post('/voice/number', authenticateOrApiKey, requireRoleOrApiKey('admin'), ctrl.provisionVoiceNumber);
+router.delete('/voice/number', authenticateOrApiKey, requireRoleOrApiKey('admin'), ctrl.releaseVoiceNumber);
 
 // On the API-key rail for the same reason as /me above -- logo, colour and
 // cancel link are the venue's own presentation settings, not something that

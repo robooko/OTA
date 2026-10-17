@@ -120,6 +120,63 @@ const toolUse = (name, input = {}) => ({ type: 'tool_use', id: `tu_${Math.random
       assert.match(r.text, /<Dial>\+447700900555<\/Dial>/);
     });
 
+    // Number management over the API-key rail, with Twilio stubbed.
+    const twilioLib = require('../src/lib/twilio');
+    const bought = [];
+    const released = [];
+    Object.assign(twilioLib, {
+      canManageNumbers: () => true,
+      searchNumbers: async () => ['+447700900200'],
+      buyNumber: async (n, url) => { bought.push([n, url]); return n; },
+      releaseNumber: async (n) => { released.push(n); },
+    });
+    const KEY = `check_${Math.random().toString(36).slice(2)}`;
+    const Q = (await one(`INSERT INTO property (name, timezone, api_key, api_key_enabled) VALUES ('Voice Check Two', 'Europe/London', $1, true) RETURNING id`, [KEY])).id;
+    const api = async (method, path, body) => {
+      const r = await fetch(base + path, { method, headers: { 'X-Api-Key': KEY, 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
+      return { status: r.status, json: await r.json() };
+    };
+    try {
+      await check('search lists numbers', async () => {
+        const r = await api('GET', '/api/property/voice/available-numbers?contains=7700');
+        assert.deepEqual(r.json.numbers, ['+447700900200']);
+      });
+      await check('provision buys, points at the webhook and switches on', async () => {
+        const r = await api('POST', '/api/property/voice/number', { phone_number: '+447700900200' });
+        assert.equal(r.status, 201);
+        assert.deepEqual(bought, [['+447700900200', 'https://ota.check/api/voice']]);
+        assert.equal(r.json.number, '+447700900200');
+        assert.equal(r.json.enabled, true);
+      });
+      await check('a second number is refused and nothing is bought', async () => {
+        const r = await api('POST', '/api/property/voice/number', { phone_number: '+447700900201' });
+        assert.equal(r.status, 409);
+        assert.equal(bought.length, 1);
+      });
+      await check('a non-UK number is refused', async () => {
+        assert.equal((await api('POST', '/api/property/voice/number', { phone_number: '+15005550006' })).status, 400);
+      });
+      await check('set_voice_enabled switches it off', async () => {
+        const r = await api('PUT', '/api/property/voice/enabled', { enabled: false });
+        assert.equal(r.json.enabled, false);
+        assert.equal((await api('PUT', '/api/property/voice/enabled', { enabled: 'yes' })).status, 400);
+      });
+      await check('release gives the number back and clears it', async () => {
+        const r = await api('DELETE', '/api/property/voice/number');
+        assert.deepEqual(released, ['+447700900200']);
+        assert.equal(r.json.number, null);
+        assert.equal((await api('DELETE', '/api/property/voice/number')).status, 404);
+      });
+      await check('list_event_inquiries filters by source', async () => {
+        await pool.query(`INSERT INTO event_inquiry (property_id, name, email, message, source) VALUES ($1, 'Web', 'w@example.org', 'Hi', 'web'), ($1, 'Call', NULL, 'Caller: hi', 'phone')`, [Q]);
+        const r = await api('GET', '/api/event-inquiries?source=phone');
+        assert.deepEqual(r.json.map((i) => i.name), ['Call']);
+      });
+    } finally {
+      await pool.query(`DELETE FROM event_inquiry WHERE property_id = $1`, [Q]);
+      await pool.query(`DELETE FROM property WHERE id = $1`, [Q]);
+    }
+
     await check('out of BUXS: greeting goes straight to staff', async () => {
       await pool.query(`UPDATE buxs_wallet SET balance = 0 WHERE owner = $1`, [`property:${P}`]);
       const r = await call('/api/voice', {});

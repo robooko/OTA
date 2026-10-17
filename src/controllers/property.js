@@ -4,6 +4,7 @@ const { keyMode } = require('../lib/marinaStripe');
 const { isValidCurrencyCode, isValidTimezone, isValidUrl, isValidDate, isValidUuid, validateBranding, validateCancelUrl, isValidSlug, SLUG_TAKEN, isSlugConflict } = require('../middleware/validate');
 const { isConfigured: aiConfigured, MODEL: AI_MODEL } = require('../lib/aiReplies');
 const twilio = require('../lib/twilio');
+const { PUBLIC_BASE_URL } = require('./voice');
 const googleAnalytics = require('../lib/googleAnalytics');
 
 // Toggleable sidebar modules/dashboard sections -- see
@@ -924,8 +925,7 @@ async function updateVoiceSettings(req, res, next) {
 }
 
 // Transfer-number-only write for the API-key rail (MCP set_voice_transfer_number):
-// where a caller asking for a person is put through. Switching the AI on stays
-// bearer+admin (updateVoiceSettings above).
+// where a caller asking for a person is put through.
 function updateVoiceTransferNumber(req, res, next) {
   const { transfer_number } = req.body ?? {};
   if (transfer_number === undefined) {
@@ -933,6 +933,91 @@ function updateVoiceTransferNumber(req, res, next) {
   }
   req.body = { transfer_number };
   return updateVoiceSettings(req, res, next);
+}
+
+// On/off for the API-key rail (MCP set_voice_enabled), so an agent can finish
+// a venue's setup. Every answered call is charged in BUXS, and an empty
+// wallet sends callers straight to staff, so switching it on can't overspend.
+function updateVoiceEnabled(req, res, next) {
+  const { enabled } = req.body ?? {};
+  if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false' });
+  req.body = { enabled };
+  return updateVoiceSettings(req, res, next);
+}
+
+const NOT_SET_UP = { error: 'Phone numbers are not set up on this server' };
+const twilioError = (err) => ({ error: `Twilio: ${err.message}` });
+
+async function searchVoiceNumbers(req, res, next) {
+  try {
+    if (!twilio.canManageNumbers()) return res.status(503).json(NOT_SET_UP);
+    const contains = String(req.query.contains ?? '').replace(/[^\d]/g, '').slice(0, 10);
+    res.json({ country: 'GB', type: 'mobile', numbers: await twilio.searchNumbers({ contains }) });
+  } catch (err) {
+    if (err.status) return res.status(502).json(twilioError(err));
+    next(err);
+  }
+}
+
+// Buys the number on our Twilio account, points it at the receptionist and
+// gives it to this property. voice_number stays unwritable any other way, so
+// a venue can only ever hold a number it was given here.
+// ponytail: one number per property; a release-and-rebuy loop would cost a
+// month's rent each time. Rate-limit per property if that ever happens.
+async function provisionVoiceNumber(req, res, next) {
+  try {
+    if (!twilio.canManageNumbers() || !process.env.TWILIO_AUTH_TOKEN) return res.status(503).json(NOT_SET_UP);
+    const phoneNumber = String(req.body?.phone_number ?? '').replace(/[\s()-]/g, '');
+    if (!/^\+44\d{9,10}$/.test(phoneNumber)) {
+      return res.status(400).json({ error: 'phone_number must be a UK number from search_voice_numbers, e.g. +447700900123' });
+    }
+    const { rows: [current] } = await pool.query('SELECT voice_number FROM property WHERE id = $1', [req.property_id]);
+    if (current.voice_number) {
+      return res.status(409).json({ error: `This property already has ${current.voice_number}; release it first` });
+    }
+
+    let bought;
+    try {
+      bought = await twilio.buyNumber(phoneNumber, `${PUBLIC_BASE_URL}/api/voice`);
+    } catch (err) {
+      return res.status(502).json(twilioError(err));
+    }
+    // Claim it only if nothing else did meanwhile; otherwise give it back.
+    const { rows } = await pool.query(
+      `UPDATE property SET voice_number = $1, voice_enabled = true
+       WHERE id = $2 AND voice_number IS NULL RETURNING ${VOICE_FIELDS}`,
+      [bought, req.property_id]
+    ).catch(async (err) => { await twilio.releaseNumber(bought).catch(() => {}); throw err; });
+    if (!rows[0]) {
+      await twilio.releaseNumber(bought).catch(() => {});
+      return res.status(409).json({ error: 'This property was given a number at the same time; nothing was bought' });
+    }
+    res.status(201).json(voiceSettingsResponse(rows[0]));
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Gives the number back to Twilio (its monthly charge stops) and switches the
+// receptionist off. The number can't be got back once released.
+async function releaseVoiceNumber(req, res, next) {
+  try {
+    const { rows: [current] } = await pool.query('SELECT voice_number FROM property WHERE id = $1', [req.property_id]);
+    if (!current.voice_number) return res.status(404).json({ error: 'This property has no phone number' });
+    if (!twilio.canManageNumbers()) return res.status(503).json(NOT_SET_UP);
+    try {
+      await twilio.releaseNumber(current.voice_number);
+    } catch (err) {
+      return res.status(502).json(twilioError(err));
+    }
+    const { rows } = await pool.query(
+      `UPDATE property SET voice_number = NULL, voice_enabled = false WHERE id = $1 RETURNING ${VOICE_FIELDS}`,
+      [req.property_id]
+    );
+    res.json(voiceSettingsResponse(rows[0]));
+  } catch (err) {
+    next(err);
+  }
 }
 
 // Instructions-only write for the API-key rail (MCP set_ai_reply_instructions):
@@ -966,7 +1051,8 @@ module.exports = {
   getEmailBranding, updateEmailBranding,
   mergeAgenticCommerce, getAgenticCommerce, updateAgenticCommerce,
   getReminderSettings, updateReminderSettings,
-  getVoiceSettings, updateVoiceSettings, updateVoiceTransferNumber,
+  getVoiceSettings, updateVoiceSettings, updateVoiceTransferNumber, updateVoiceEnabled,
+  searchVoiceNumbers, provisionVoiceNumber, releaseVoiceNumber,
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics, getGoogleAnalyticsSetup,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,

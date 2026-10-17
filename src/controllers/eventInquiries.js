@@ -34,10 +34,12 @@ async function listInquiries(req, res, next) {
     // no way to know who actually sent those.
     // pending_ai_draft_id lets the feed badge rows with an AI draft awaiting
     // approval without a second request; null when nothing is waiting.
-    const { spa_id } = req.query;
+    const { spa_id, source } = req.query;
     const params = [req.property_id];
     let spaFilter = '';
     if (spa_id) { params.push(spa_id); spaFilter = ` AND ei.spa_id = $${params.length}`; }
+    // 'phone' lists the receptionist's calls; each message is the transcript.
+    if (source === 'web' || source === 'phone') { params.push(source); spaFilter += ` AND ei.source = $${params.length}`; }
 
     const { rows } = await pool.query(
       `SELECT ei.*, r.name AS restaurant_name, s.name AS spa_name, mr.name AS marina_name, lrm.direction AS last_reply_direction,

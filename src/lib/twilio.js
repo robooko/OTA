@@ -40,4 +40,58 @@ function validateWebhook(signature, url, params) {
   return !!token && !!signature && Twilio.validateRequest(token, signature, url, params);
 }
 
-module.exports = { isConfigured, sendSms, validateWebhook };
+// ── Receptionist numbers (MCP search/provision/release_voice_number) ──────
+// The auth token first: the receptionist can't run without it (webhook
+// signatures), so it's always there when numbers matter, and the API key
+// has been seen revoked locally. Not tied to TWILIO_FROM_NUMBER either.
+function numbersClient() {
+  const sid = process.env.TWILIO_ACCOUNT_SID;
+  if (!sid) return null;
+  if (process.env.TWILIO_AUTH_TOKEN) return Twilio(sid, process.env.TWILIO_AUTH_TOKEN);
+  if (process.env.TWILIO_APIKEY_SID && process.env.TWILIO_APIKEY_SECRET) {
+    return Twilio(process.env.TWILIO_APIKEY_SID, process.env.TWILIO_APIKEY_SECRET, { accountSid: sid });
+  }
+  return null;
+}
+
+function canManageNumbers() {
+  return numbersClient() !== null;
+}
+
+// ponytail: UK mobiles only. They take calls and texts, need no address, and
+// the account's approved UK mobile bundle covers them. Another country means
+// its own number type and bundle.
+async function searchNumbers({ contains } = {}) {
+  const found = await numbersClient().availablePhoneNumbers('GB').mobile.list({
+    voiceEnabled: true,
+    ...(contains && { contains }),
+    limit: 5,
+  });
+  return found.map((n) => n.phoneNumber);
+}
+
+// UK numbers must be bought under a Twilio-approved regulatory bundle.
+async function buyNumber(phoneNumber, voiceUrl) {
+  const client = numbersClient();
+  const bundleSid = process.env.TWILIO_BUNDLE_SID
+    || (await client.numbers.v2.regulatoryCompliance.bundles.list({ status: 'twilio-approved', limit: 1 }))[0]?.sid;
+  const bought = await client.incomingPhoneNumbers.create({
+    phoneNumber,
+    voiceUrl,
+    voiceMethod: 'POST',
+    ...(bundleSid && { bundleSid }),
+  });
+  return bought.phoneNumber;
+}
+
+// Stops the monthly charge. A number already gone from the account is fine.
+async function releaseNumber(phoneNumber) {
+  const client = numbersClient();
+  const [owned] = await client.incomingPhoneNumbers.list({ phoneNumber, limit: 1 });
+  if (owned) await client.incomingPhoneNumbers(owned.sid).remove();
+}
+
+module.exports = {
+  isConfigured, sendSms, validateWebhook,
+  canManageNumbers, searchNumbers, buyNumber, releaseNumber,
+};

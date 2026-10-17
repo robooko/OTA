@@ -790,9 +790,9 @@ function createTools(apiRequest) {
   },
   {
     name: 'list_event_inquiries',
-    description: 'List event inquiries for this property',
-    inputSchema: {},
-    run: () => apiRequest('GET', '/api/event-inquiries'),
+    description: "List event inquiries for this property, newest first. source 'phone' lists only the AI receptionist's calls; each one's message is the call transcript.",
+    inputSchema: { source: z.enum(['web', 'phone']).optional() },
+    run: ({ source }) => apiRequest('GET', `/api/event-inquiries${source ? `?source=${source}` : ''}`),
   },
   {
     name: 'create_event_inquiry',
@@ -1108,9 +1108,33 @@ function createTools(apiRequest) {
   },
   {
     name: 'get_voice_settings',
-    description: "The property's AI phone receptionist: enabled, its Twilio number, the transfer number, and whether the feature is configured on this server. Calls are filed as event inquiries with source 'phone'. Switching it on is dashboard-admin only.",
+    description: "The property's AI phone receptionist: enabled, its phone number, the transfer number, and whether the feature is configured on this server. Calls are filed as event inquiries with source 'phone' (list_event_inquiries). To set one up: search_voice_numbers, provision_voice_number, set_voice_transfer_number, then make sure set_ai_reply_instructions holds the venue's facts, since the receptionist answers from them. Each answered call costs BUXS.",
     inputSchema: {},
     run: () => apiRequest('GET', '/api/property/voice'),
+  },
+  {
+    name: 'search_voice_numbers',
+    description: 'UK mobile numbers available to buy for the AI phone receptionist (up to 5). contains narrows by digits, e.g. "7700". Read-only; nothing is bought.',
+    inputSchema: { contains: z.string().optional() },
+    run: ({ contains }) => apiRequest('GET', `/api/property/voice/available-numbers${contains ? `?contains=${encodeURIComponent(contains)}` : ''}`),
+  },
+  {
+    name: 'provision_voice_number',
+    description: "Buy a number from search_voice_numbers for this property and switch the AI receptionist on; calls to it are answered straight away. It carries a monthly charge, so confirm with the user first. One number per property (409 if it already has one).",
+    inputSchema: { phone_number: z.string() },
+    run: ({ phone_number }) => apiRequest('POST', '/api/property/voice/number', { body: { phone_number } }),
+  },
+  {
+    name: 'release_voice_number',
+    description: "Give the property's receptionist number back and switch the receptionist off. The number can't be recovered and callers will no longer reach it, so confirm with the user first.",
+    inputSchema: {},
+    run: () => apiRequest('DELETE', '/api/property/voice/number'),
+  },
+  {
+    name: 'set_voice_enabled',
+    description: 'Switch the AI phone receptionist on or off. Off, calls to the number hear that it is not taking calls.',
+    inputSchema: { enabled: z.boolean() },
+    run: ({ enabled }) => apiRequest('PUT', '/api/property/voice/enabled', { body: { enabled } }),
   },
   {
     name: 'set_voice_transfer_number',
