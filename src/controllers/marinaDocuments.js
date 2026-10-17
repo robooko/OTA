@@ -7,13 +7,12 @@ const q = require('../lib/marinaQueries');
 const kc = require('../lib/marinaContracts');
 const { nightsBetween } = require('../lib/marinaPricing');
 
-// Guest upload (raw body, booking token). Accepted from the hold onwards so
-// the guest can attach documents while booking; extraction (paid) waits
-// until the hold reaches pending -- see afterChange.
+// Guest upload (raw body, booking token). Only while pending/confirmed, so
+// a card-free hold can't trigger paid extraction.
 async function uploadDocument(req, res, next) {
   try {
     const b = req.booking;
-    if (!['hold', 'pending', 'confirmed'].includes(b.status)) return res.status(409).json({ error: `Booking is ${b.status}` });
+    if (!['pending', 'confirmed'].includes(b.status)) return res.status(409).json({ error: 'Documents can be uploaded once the booking request is with the marina' });
     const buf = req.body;
     if (!Buffer.isBuffer(buf) || !buf.length) return res.status(400).json({ error: 'Send the file as the request body' });
     const type = docs.sniffType(buf);
@@ -36,7 +35,7 @@ async function uploadDocument(req, res, next) {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id, requirement_id, type, file_name, content_type, size_bytes, status, submitted_at`,
       [b.property_id, b.marina_id, b.id, requirement?.id ?? null, requirement?.type ?? null, pathname, fileName, type, buf.length]);
-    if (b.status !== 'hold') docs.extractDocument(d.id);
+    docs.extractDocument(d.id);
     // Staff tables and an open detail dialog update live (doc_count).
     await life.republish(b.id);
     res.status(201).json(d);
