@@ -392,6 +392,14 @@ const { bookingToken } = require('../src/lib/marinaToken');
       } finally { await driveOn(); }
     });
 
+    await check('final review I3: the purge never counts or deletes Drive-backed rows', async () => {
+      const { execFileSync } = require('child_process');
+      const out = execFileSync(process.execPath, ['-r', 'dotenv/config', 'scripts/purge-marina-document-files.js'], { encoding: 'utf8', env: { ...process.env, BLOB_READ_WRITE_TOKEN: '' } });
+      const rows = Number(/rows: (\d+)/.exec(out)[1]);
+      const legacy = (await one('SELECT count(*)::int AS n FROM marina_document WHERE drive_file_id IS NULL')).n;
+      assert.ok((await one('SELECT count(*)::int AS n FROM marina_document WHERE drive_file_id IS NOT NULL')).n > 0, 'fixture has Drive rows');
+      assert.equal(rows, legacy);
+    });
     n = nBeforeStorage;
     // ---- Task 11 ----
     await check('auto-confirm: off by default; on with no requirements confirms at pending', async () => {

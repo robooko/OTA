@@ -10,6 +10,7 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
 const integ = require('../src/lib/integrations');
 const pool = require('../src/db');
 
+const realFetchSeam = integ.fetch;
 // Fake Google: a queue of responses per call, every request recorded.
 let calls = [];
 let replies = [];
@@ -220,6 +221,44 @@ async function seedIntegration(fields = {}) {
     await check('upload 500 → 502 IntegrationError, Google Drive named', async () => {
       reply({ status: 500, body: { error: { message: 'boom' } } });
       await assert.rejects(drive.uploadMarinaDocument(ORG, doc()), (e) => e.status === 502 && e.message === 'Google Drive upload failed');
+    });
+    await check('final review I1: upload lands trashed (parent in Drive trash) → folder recreated, retried', async () => {
+      // upload says trashed → probe OTA ok, Seaview trashed → recreate Seaview/Porto/booking → upload
+      reply({ body: { id: 'dT', webViewLink: 'x', trashed: true } }, { body: { id: 'f1', trashed: false } }, { body: { id: 'f7', trashed: true } }, folder('g1'), folder('g2'), folder('g3'), file('d6'));
+      const r = await drive.uploadMarinaDocument(ORG, doc());
+      assert.equal(r.id, 'd6');
+      assert.match(calls[0].url, /fields=id,webViewLink,trashed/);
+      assert.deepEqual(folderCreates().map((c) => JSON.parse(c.opts.body).parents), [['f1'], ['g1'], ['g2']]);
+    });
+    await check('final review I1: still trashed after the retry → 502', async () => {
+      reply({ body: { id: 'dT', trashed: true } }, { body: { id: 'f1', trashed: false } }, { body: { id: 'g1', trashed: false } }, { body: { id: 'g2', trashed: false } }, { body: { id: 'g3', trashed: false } }, { body: { id: 'dT2', trashed: true } });
+      await assert.rejects(drive.uploadMarinaDocument(ORG, doc()), (e) => e.status === 502);
+    });
+    await check('final review I2: two concurrent uploads on a new path create each folder once and keep every cache key', async () => {
+      await live();
+      let n = 0;
+      const created = [];
+      const saved = integ.fetch;
+      integ.fetch = async (url, opts = {}) => {
+        await new Promise((ok) => setTimeout(ok, 20)); // let the two uploads interleave
+        if (/upload\/drive/.test(url)) return new Response(JSON.stringify({ id: `u${++n}`, webViewLink: 'x', trashed: false }), { status: 200 });
+        created.push(JSON.parse(opts.body).name);
+        return new Response(JSON.stringify({ id: `c${++n}` }), { status: 200 });
+      };
+      try {
+        await Promise.all([drive.uploadMarinaDocument(ORG, doc('B1')), drive.uploadMarinaDocument(ORG, doc('B2'))]);
+      } finally { integ.fetch = saved; }
+      assert.deepEqual(created.filter((x) => x === 'OTA').length, 1, `created: ${created}`);
+      assert.deepEqual(created.sort(), ['B1', 'B2', 'OTA', 'Porto', 'Seaview']);
+      const { settings } = await one('SELECT settings FROM org_integration WHERE clerk_org_id = $1', [ORG]);
+      assert.ok(settings.folders['OTA/Seaview/Porto/B1'] && settings.folders['OTA/Seaview/Porto/B2']);
+    });
+    await check('final review I4: the fetch seam puts a timeout on every Google call', async () => {
+      const realFetch = global.fetch;
+      let seen;
+      global.fetch = async (url, opts) => { seen = opts; return new Response('{}'); };
+      try { await realFetchSeam('https://example.test', { method: 'POST' }); } finally { global.fetch = realFetch; }
+      assert.ok(seen.signal instanceof AbortSignal); assert.equal(seen.method, 'POST');
     });
     await check('folder names drop slashes and control chars', async () => {
       assert.equal(drive.folderName('A/B\n'), 'AB');

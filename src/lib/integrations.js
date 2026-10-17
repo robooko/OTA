@@ -78,11 +78,16 @@ function verifyState(state, maxAgeMs = STATE_MAX_AGE_MS) {
 }
 
 async function tokenRequest(provider, params) {
-  const res = await module.exports.fetch(PROVIDERS[provider].tokenUrl, {
-    method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ client_id: envOf(provider, 'clientId'), client_secret: envOf(provider, 'clientSecret'), ...params }),
-  });
+  let res;
+  try {
+    res = await module.exports.fetch(PROVIDERS[provider].tokenUrl, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: envOf(provider, 'clientId'), client_secret: envOf(provider, 'clientSecret'), ...params }),
+    });
+  } catch (err) {
+    throw new IntegrationError(502, `${PROVIDERS[provider].label} token request failed`, { details: err.name === 'TimeoutError' ? 'timed out' : err.message });
+  }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     if (body.error === 'invalid_grant') throw new IntegrationError(409, `${PROVIDERS[provider].label} access was revoked -- reconnect from Settings`, { code: 'invalid_grant' });
@@ -142,13 +147,10 @@ async function getIntegration(orgId, provider) {
   return row || null;
 }
 
-async function setSettings(orgId, provider, settings) {
-  await pool.query('UPDATE org_integration SET settings = $1 WHERE clerk_org_id = $2 AND provider = $3', [settings, orgId, provider]);
-}
-
 module.exports = {
   PROVIDERS, IntegrationError, missingEnv, encrypt, decrypt, signState, verifyState,
-  tokenRequest, getAccessToken, getIntegration, setSettings,
-  // Seam: checks swap this for a fake Google.
-  fetch: (...a) => fetch(...a),
+  tokenRequest, getAccessToken, getIntegration,
+  // Seam: checks swap this for a fake Google. Every call is bounded: the
+  // token refresh holds a row lock while it waits.
+  fetch: (url, opts = {}) => fetch(url, { signal: AbortSignal.timeout(30_000), ...opts }),
 };
