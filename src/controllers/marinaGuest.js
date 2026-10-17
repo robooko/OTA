@@ -5,6 +5,7 @@ const q = require('../lib/marinaQueries');
 const { priceStay, addDays, nightsBetween } = require('../lib/marinaPricing');
 const kc = require('../lib/marinaContracts');
 const guard = require('../lib/marinaGuard');
+const sd = require('../lib/sailorDocuments');
 const { berthFitError } = guard;
 const life = require('../lib/marinaLifecycle');
 const { bookingToken, bookingTokenMatches } = require('../lib/marinaToken');
@@ -148,9 +149,21 @@ async function createGuestBooking(req, res, next) {
     // No secret, no booking_token: the guest could never reach the booking
     // again, so refuse before a hold takes the berth.
     if (!process.env.MARINA_BOOKING_TOKEN_SECRET) return res.status(503).json({ error: 'Online booking is not configured' });
-    const parsed = guard.validateGuestBooking(req.body, today);
+    // Signed in: the booking's email is the sailor's verified one, whatever
+    // the body says -- the only link that lets staff see their documents.
+    const parsed = guard.validateGuestBooking(req.sailor ? { ...req.body, contact_email: req.sailor.email } : req.body, today);
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
     const v = parsed.value;
+
+    // Required documents (marinas switched to shared sailor documents): a
+    // signed-in sailor whose current documents meet every mandatory
+    // requirement for this stay. Re-checked here whatever the site showed.
+    if (req.marina.sailor_documents) {
+      const statuses = await sd.requirementStatus(pool, { marinaId: req.marina.id, email: req.sailor?.email, arrival: v.arrival, departure: v.departure });
+      if (statuses.length && !req.sailor) return res.status(401).json({ error: 'Sign in required' });
+      const missing = sd.missingMandatory(statuses);
+      if (missing.length) return res.status(409).json({ error: 'Required documents missing', missing });
+    }
 
     await client.query('BEGIN');
     const { rows: [berth] } = await client.query("SELECT * FROM marina_berth WHERE marina_id = $1 AND label = $2 AND status = 'active'", [req.marina.id, v.berth_label]);
@@ -169,12 +182,12 @@ async function createGuestBooking(req, res, next) {
     const { rows: [row] } = await client.query(
       `INSERT INTO marina_booking (property_id, marina_id, berth_id, contact_name, contact_email, contact_phone, contact_email_key,
          boat_name, boat_length_m, boat_beam_m, arrival, departure, status, source, locale, total_price, currency,
-         hold_expires_at, confirm_token_hash, client_ip, user_agent, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'hold','guest',$13,$14,$15, now() + make_interval(mins => $16), $17, $18, $19, $20)
+         hold_expires_at, confirm_token_hash, client_ip, user_agent, notes, email_verified)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'hold','guest',$13,$14,$15, now() + make_interval(mins => $16), $17, $18, $19, $20, $21)
        RETURNING id`,
       [req.property_id, req.marina.id, berth.id, v.contact_name, v.contact_email, v.contact_phone, cap.key,
         v.boat_name, v.boat_length_m, v.boat_beam_m, v.arrival, v.departure, v.locale, price.total_price, prop.currency,
-        guard.HOLD_MINUTES, confirmToken && hashToken(confirmToken), guard.clientIp(req), req.get('User-Agent')?.slice(0, 500) ?? null, v.notes]);
+        guard.HOLD_MINUTES, confirmToken && hashToken(confirmToken), guard.clientIp(req), req.get('User-Agent')?.slice(0, 500) ?? null, v.notes, !!req.sailor]);
     await client.query('COMMIT');
     committed = row.id;
 
@@ -203,6 +216,26 @@ async function createGuestBooking(req, res, next) {
     if (err.code === '23P01') return res.status(409).json({ error: 'That berth is no longer available for those dates' });
     next(err);
   } finally { client.release(); }
+}
+
+// What a booking site shows before Book: does this marina need a sign-in,
+// and which requirements does the signed-in sailor meet for these dates.
+async function requirementsStatus(req, res, next) {
+  try {
+    const { arrival, departure } = req.query;
+    if (!req.sailor) {
+      const { rows } = await pool.query("SELECT id, type, name, mandatory FROM marina_doc_requirement WHERE marina_id = $1 AND status = 'active' ORDER BY sort_order, name", [req.marina.id]);
+      return res.json({ sign_in_required: req.marina.sailor_documents && rows.length > 0, requirements: rows.map((r) => ({ ...r, met: false })) });
+    }
+    if (!isValidDate(arrival) || (departure !== undefined && !isValidDate(departure)) || (departure && departure <= arrival)) {
+      return res.status(400).json({ error: 'arrival and departure must be YYYY-MM-DD with departure after arrival' });
+    }
+    const statuses = await sd.requirementStatus(pool, { marinaId: req.marina.id, email: req.sailor.email, arrival, departure: departure ?? null });
+    res.json({
+      sign_in_required: req.marina.sailor_documents && statuses.length > 0,
+      requirements: statuses.map(({ requirement, document }) => ({ ...requirement, met: !!document, document })),
+    });
+  } catch (err) { next(err); }
 }
 
 async function getGuestBooking(req, res, next) {
@@ -353,6 +386,7 @@ async function createEnquiry(req, res, next) {
 }
 
 module.exports = {
+  requirementsStatus,
   resolveMarina, getMarinaMap, getAvailability, getDocRequirements, quote,
   requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink, ablyToken, confirmPayment, contractPreview, agreeContract, createEnquiry,
 };

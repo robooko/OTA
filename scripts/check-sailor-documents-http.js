@@ -124,6 +124,98 @@ const app = require('../src/app');
       assert.equal((await upload(ANN, `document_id=${annDoc.id}`)).status, 404, 'no versions on a deleted document');
     });
 
+    // ---- Task 4: guest rail ----
+    const key = { 'X-Api-Key': KEY };
+    const guestApi = (method, path, o = {}) => api(method, path, { ...o, headers: { ...key, ...(o.headers || {}) } });
+    const mk = async (slug, extra = {}) => {
+      const m = (await guestApi('POST', '/api/marina/marinas', { body: { name: slug, slug, response_window_hours: 24, ...extra } })).body;
+      assert.equal((await guestApi('POST', `/api/marina/marinas/${m.id}/berths`, { body: { label: 'H1', length_m: 15, beam_m: 5, price_per_night: 4, price_mode: 'per_metre' } })).status, 201);
+      return m;
+    };
+    const REQ = await mk(`sd-req-${RUN}`, { sailor_documents: true });
+    const FREE = await mk(`sd-free-${RUN}`);
+    // Requirements but not opted in: the legacy per-booking flow, untouched.
+    const LEGACY = await mk(`sd-legacy-${RUN}`);
+    for (const m of [REQ, LEGACY]) {
+      await pool.query(`INSERT INTO marina_doc_requirement (property_id, marina_id, type, name, mandatory, sort_order) VALUES
+        ($1, $2, 'insurance', 'Insurance', true, 0), ($1, $2, 'registration', 'Registration', false, 1)`, [P, m.id]);
+    }
+    const day = (d) => new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
+    let slot = 0;
+    const stay = () => { const a = 40 + 5 * slot++; return { arrival: day(a), departure: day(a + 2) }; };
+    const bookingBody = (o = {}) => ({ berth_label: 'H1', ...stay(), contact_name: 'Cat', contact_email: 'typed@example.com', boat_name: 'Wave', boat_length_m: 10, ...o });
+    const status = (m, qs, headers = {}) => guestApi('GET', `/api/marina/guest/${m.slug}/requirements-status?${qs}`, { headers });
+    const CAT = mail('cat');
+    const s0 = stay();
+    const qs0 = `arrival=${s0.arrival}&departure=${s0.departure}`;
+
+    await check('status without requirements says no sign-in', async () => {
+      const r = await status(FREE, qs0);
+      assert.equal(r.status, 200); assert.deepEqual(r.body, { sign_in_required: false, requirements: [] });
+    });
+    await check('status with requirements and no token says sign-in required', async () => {
+      const r = await status(REQ, qs0);
+      assert.equal(r.status, 200); assert.equal(r.body.sign_in_required, true);
+      assert.deepEqual(r.body.requirements.map((x) => [x.type, x.mandatory, x.met]), [['insurance', true, false], ['registration', false, false]]);
+    });
+    await check('status reports met/unmet per requirement for the sailor', async () => {
+      const d = (await upload(CAT, `type=registration`)).body;
+      const r = await status(REQ, qs0, as(CAT));
+      assert.equal(r.status, 200); assert.equal(r.body.sign_in_required, true);
+      const [ins, reg] = r.body.requirements;
+      assert.equal(ins.met, false); assert.equal(ins.document, null);
+      assert.equal(reg.met, true); assert.equal(reg.document.id, d.id);
+      assert.equal((await status(REQ, 'arrival=nope', as(CAT))).status, 400);
+    });
+    await check('create without token at a marina with requirements → 401', async () => {
+      const r = await guestApi('POST', `/api/marina/guest/${REQ.slug}/bookings`, { body: bookingBody() });
+      assert.equal(r.status, 401); assert.equal(r.body.error, 'Sign in required');
+    });
+    await check('create with mandatory unmet → 409 listing it', async () => {
+      const r = await guestApi('POST', `/api/marina/guest/${REQ.slug}/bookings`, { body: bookingBody(), headers: as(CAT) });
+      assert.equal(r.status, 409); assert.equal(r.body.error, 'Required documents missing');
+      assert.deepEqual(r.body.missing.map((x) => x.type), ['insurance']);
+    });
+    let catIns;
+    await check('create when met → 201, contact_email = token email, email_verified true', async () => {
+      catIns = (await upload(CAT, 'type=insurance&expiry_date=2030-01-01')).body;
+      const r = await guestApi('POST', `/api/marina/guest/${REQ.slug}/bookings`, { body: bookingBody(), headers: as(CAT) });
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      const row = await one('SELECT contact_email, email_verified FROM marina_booking WHERE id = $1', [r.body.booking.id]);
+      assert.deepEqual(row, { contact_email: CAT, email_verified: true });
+    });
+    await check('document deleted after status check → create 409', async () => {
+      const s = stay();
+      const before = await status(REQ, `arrival=${s.arrival}&departure=${s.departure}`, as(CAT));
+      assert.equal(before.body.requirements[0].met, true);
+      assert.equal((await api('DELETE', `${S}/${catIns.id}`, { headers: as(CAT) })).status, 204);
+      const r = await guestApi('POST', `/api/marina/guest/${REQ.slug}/bookings`, { body: bookingBody(s), headers: as(CAT) });
+      assert.equal(r.status, 409); assert.deepEqual(r.body.missing.map((x) => x.type), ['insurance']);
+    });
+    await check('marina without requirements books as before (unverified email)', async () => {
+      const r = await guestApi('POST', `/api/marina/guest/${FREE.slug}/bookings`, { body: bookingBody() });
+      assert.equal(r.status, 201);
+      const row = await one('SELECT contact_email, email_verified FROM marina_booking WHERE id = $1', [r.body.booking.id]);
+      assert.deepEqual(row, { contact_email: 'typed@example.com', email_verified: false });
+    });
+    await check('signed-in guest at a marina without requirements gets a verified email', async () => {
+      const r = await guestApi('POST', `/api/marina/guest/${FREE.slug}/bookings`, { body: bookingBody(), headers: as(CAT) });
+      assert.equal(r.status, 201);
+      const row = await one('SELECT contact_email, email_verified FROM marina_booking WHERE id = $1', [r.body.booking.id]);
+      assert.deepEqual(row, { contact_email: CAT, email_verified: true });
+    });
+    await check('requirements without sailor_documents: no sign-in, books without a token', async () => {
+      assert.equal(REQ.sailor_documents, true); assert.equal(LEGACY.sailor_documents, false);
+      const st = await status(LEGACY, qs0);
+      assert.equal(st.body.sign_in_required, false);
+      const r = await guestApi('POST', `/api/marina/guest/${LEGACY.slug}/bookings`, { body: bookingBody() });
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+    });
+    await check('invalid sailor token on create → 401 even without requirements', async () => {
+      const r = await guestApi('POST', `/api/marina/guest/${FREE.slug}/bookings`, { body: bookingBody(), headers: { 'X-Sailor-Token': 'junk' } });
+      assert.equal(r.status, 401);
+    });
+
     // (later tasks append here)
   } finally {
     server.close();

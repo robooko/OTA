@@ -16,6 +16,7 @@ const rawDocSafe = (req, res, next) => rawDoc(req, res, (err) => (err?.status ==
 const rawImage = express.raw({ type: ['image/jpeg', 'image/png'], limit: '4mb' });
 const rawImageSafe = (req, res, next) => rawImage(req, res, (err) => (err?.status === 413 ? res.status(413).json({ error: 'Images are limited to 4 MB' }) : next(err)));
 const { authenticate, authenticateOrApiKey, requireRole } = require('../middleware/auth');
+const { optionalSailor } = require('../middleware/sailorAuth');
 
 // Literal segments before '/:id' throughout (see eventInquiries.js).
 
@@ -42,6 +43,8 @@ const G = '/guest/:marina';
 router.get(G, authenticateOrApiKey, guest.resolveMarina, guest.getMarinaMap);
 router.get(`${G}/availability`, authenticateOrApiKey, guest.resolveMarina, guest.getAvailability);
 router.get(`${G}/doc-requirements`, authenticateOrApiKey, guest.resolveMarina, guest.getDocRequirements);
+// X-Sailor-Token (Clerk) optional: shared sailor documents.
+router.get(`${G}/requirements-status`, authenticateOrApiKey, guest.resolveMarina, optionalSailor, guest.requirementsStatus);
 router.post(`${G}/quote`, authenticateOrApiKey, guest.resolveMarina, guest.quote);
 
 // Unauthenticated: the emailed confirm link (spa pattern).
@@ -59,7 +62,7 @@ router.get('/bookings/:id', authenticateOrApiKey, bookings.getBooking);
 router.put('/bookings/:id', authenticateOrApiKey, bookings.updateBooking);
 router.post('/bookings/:id/send-guest-link', authenticateOrApiKey, bookings.sendGuestLink);
 
-router.post(`${G}/bookings`, authenticateOrApiKey, bookingLimiter, guest.resolveMarina, guest.createGuestBooking);
+router.post(`${G}/bookings`, authenticateOrApiKey, bookingLimiter, guest.resolveMarina, optionalSailor, guest.createGuestBooking);
 router.get(`${G}/bookings/:id`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.getGuestBooking);
 router.post(`${G}/bookings/:id/cancel`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.cancelGuestBooking);
 router.get(`${G}/bookings/:id/ably-token`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.ablyToken);

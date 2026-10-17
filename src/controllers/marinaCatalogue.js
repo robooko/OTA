@@ -60,6 +60,7 @@ const MARINA_COLS = {
   layout_svg: v.longText, layout_sw_lat: v.num, layout_sw_lng: v.num, layout_ne_lat: v.num, layout_ne_lng: v.num, layout_rotation: v.num,
   response_window_hours: (x) => (Number.isInteger(x) && x >= 1 && x <= 144 ? x : fail('must be a whole number of hours, 1-144')),
   auto_confirm: v.bool,
+  sailor_documents: v.bool,
   booking_url: (x) => (x == null || x === '' ? null : isValidUrl(x) && x.includes('{id}') && x.includes('{token}') ? x : fail('must be an http(s) URL containing {id} and {token}')),
   status: STATUS,
 };

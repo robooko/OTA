@@ -41,3 +41,7 @@ CREATE TABLE IF NOT EXISTS sailor_document_approval (
 -- true only when contact_email came from a sailor's Clerk token: the one
 -- link that lets staff see that sailor's documents.
 ALTER TABLE marina_booking ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false;
+
+-- Per-marina switch-on: requirements are enforced through shared sailor
+-- documents only once the marina's booking site sends X-Sailor-Token.
+ALTER TABLE marina ADD COLUMN IF NOT EXISTS sailor_documents BOOLEAN NOT NULL DEFAULT false;
