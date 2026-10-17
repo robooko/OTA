@@ -6,6 +6,7 @@ const { pickTemplate } = require('./marinaContracts');
 const { nightsBetween } = require('./marinaPricing');
 const { publishMarinaBooking, publishMarinaGuestUpdate } = require('./ably');
 const { sendGuestEmail } = require('./marinaEmails');
+const sd = require('./sailorDocuments');
 
 // Every marina booking status change goes through here: row lock, re-check
 // the expected status (and, for guest holds, that the hold hasn't lapsed),
@@ -298,21 +299,33 @@ async function retryReleases() {
 
 // Opt-in per marina. Runs when a booking reaches pending, after a document
 // is verified, and after the contract is agreed. Confirms only when every
-// mandatory requirement has a verified document, the applicable contract
+// mandatory requirement has a verified document (a legacy per-booking one,
+// or -- verified-email bookings -- this marina's approval on any version of
+// the sailor's current shared document), the applicable contract
 // (if any) is agreed, and -- only if there's a PaymentIntent -- the card is
 // held. Extracted document data plays no part.
 async function maybeAutoConfirm(id) {
   const { rows: [b] } = await pool.query(
-    `SELECT mb.id, mb.status, mb.arrival, mb.departure, mb.marina_id, mb.stripe_payment_intent_id, mb.payment_status, m.auto_confirm
+    `SELECT mb.id, mb.status, mb.arrival, mb.departure, mb.marina_id, mb.stripe_payment_intent_id, mb.payment_status, mb.contact_email, mb.email_verified, m.auto_confirm
      FROM marina_booking mb JOIN marina m ON m.id = mb.marina_id WHERE mb.id = $1`, [id]);
   if (!b || !b.auto_confirm || b.status !== 'pending') return null;
   if (b.stripe_payment_intent_id && b.payment_status !== 'held') return null;
-  const { rows: [{ missing }] } = await pool.query(
-    `SELECT count(*)::int AS missing FROM marina_doc_requirement r
+  const { rows: unmet } = await pool.query(
+    `SELECT r.id FROM marina_doc_requirement r
      WHERE r.marina_id = $1 AND r.status = 'active' AND r.mandatory
        AND NOT EXISTS (SELECT 1 FROM marina_document d WHERE d.booking_id = $2 AND d.requirement_id = r.id AND d.status = 'verified')`,
     [b.marina_id, id]);
-  if (missing) return null;
+  if (unmet.length) {
+    if (!b.email_verified) return null;
+    const statuses = await sd.requirementStatus(pool, { marinaId: b.marina_id, email: b.contact_email, arrival: b.arrival, departure: b.departure });
+    const docIds = statuses.filter((s) => s.document).map((s) => s.document.id);
+    const { rows: approved } = await pool.query(
+      `SELECT DISTINCT v.document_id FROM sailor_document_approval a JOIN sailor_document_version v ON v.id = a.version_id
+       WHERE a.marina_id = $1 AND a.status = 'approved' AND v.document_id = ANY($2)`, [b.marina_id, docIds]);
+    const ok = new Set(approved.map((r) => r.document_id));
+    const byReq = new Map(statuses.map((s) => [s.requirement.id, s.document]));
+    if (!unmet.every((r) => ok.has(byReq.get(r.id)?.id))) return null;
+  }
   if (b.departure) {
     const { rows: templates } = await pool.query("SELECT id, min_nights FROM marina_contract_template WHERE marina_id = $1 AND status = 'active'", [b.marina_id]);
     const t = pickTemplate(templates, nightsBetween(b.arrival, b.departure));

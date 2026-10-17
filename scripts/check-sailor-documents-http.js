@@ -216,6 +216,108 @@ const app = require('../src/app');
       assert.equal(r.status, 401);
     });
 
+    // ---- Task 5: staff panel, file, approvals, auto-confirm ----
+    const docCtrl = require('../src/controllers/marinaDocuments');
+    const life = require('../src/lib/marinaLifecycle');
+    // Bearer-only controllers driven directly (see check-marina-http.js).
+    const call = async (fn, req) => {
+      const res = { statusCode: 200, body: undefined, headers: {}, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; },
+        set(h) { Object.assign(this.headers, h); return this; }, chunks: [], write(c) { this.chunks.push(c); return true; }, end(c) { if (c) this.chunks.push(c); this.ended = true; },
+        on() { return this; }, once() { return this; }, emit() { return true; }, removeListener() { return this; } };
+      let error;
+      await fn({ params: {}, query: {}, body: {}, user: { id: 'staff_1' }, auth_method: 'bearer', ...req }, res, (e) => { error = e; });
+      if (error) throw error;
+      return res;
+    };
+    const AUTO = await mk(`sd-auto-${RUN}`, { sailor_documents: true, auto_confirm: true });
+    await pool.query(`INSERT INTO marina_doc_requirement (property_id, marina_id, type, name, mandatory) VALUES ($1, $2, 'insurance', 'Insurance', true)`, [P, AUTO.id]);
+    const DAN = mail('dan');
+    const danIns = (await upload(DAN, 'type=insurance&expiry_date=2030-01-01')).body;
+    // Own client IP per booking (10/hour/IP limiter); cancelled unless the
+    // check needs it live (3 upcoming per email) -- staff visibility counts
+    // any status.
+    let ip = 0;
+    const book = async (m, email, headers = as(email), { live = false } = {}) => {
+      const r = await guestApi('POST', `/api/marina/guest/${m.slug}/bookings`, { body: bookingBody(), headers: { ...headers, 'X-Client-Ip': `203.0.113.${++ip}` } });
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      if (!live) await pool.query("UPDATE marina_booking SET status = 'cancelled' WHERE id = $1", [r.body.booking.id]);
+      return r.body.booking.id;
+    };
+    const panel = (id) => call(docCtrl.getBookingVerification, { params: { id }, property_id: P });
+    const decide = (id, versionId, body, property_id = P) => call(docCtrl.decideSailorVersion, { params: { id, versionId }, body, property_id });
+    const waitStatus = async (id, want) => {
+      for (let i = 0; i < 40; i++) {
+        if ((await one('SELECT status FROM marina_booking WHERE id = $1', [id])).status === want) return;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.fail(`booking never reached ${want}`);
+    };
+
+    await check('panel has sailor block only for verified bookings', async () => {
+      const verified = await book(REQ, DAN);
+      const p = (await panel(verified)).body;
+      assert.equal(p.sailor.email, DAN);
+      const ins = p.sailor.requirements.find((x) => x.document?.type === 'insurance');
+      assert.equal(ins.document.id, danIns.id); assert.equal(ins.document.versions[0].my_verdict, null);
+      const legacy = await book(LEGACY, DAN, {});
+      assert.equal((await panel(legacy)).body.sailor, null);
+    });
+    await check('staff approve records verdict on the version and shows as my_verdict; re-deciding overwrites', async () => {
+      const id = await book(REQ, DAN);
+      const vid = danIns.versions[0].id;
+      const r = await decide(id, vid, { status: 'rejected', notes: 'blurry' });
+      assert.equal(r.statusCode, 200, JSON.stringify(r.body));
+      await decide(id, vid, { status: 'approved' });
+      const rows = (await pool.query('SELECT status, notes, staff_user FROM sailor_document_approval WHERE version_id = $1 AND marina_id = $2', [vid, REQ.id])).rows;
+      assert.deepEqual(rows, [{ status: 'approved', notes: null, staff_user: 'staff_1' }]);
+      const v = (await panel(id)).body.sailor.requirements.find((x) => x.document?.type === 'insurance').document.versions[0];
+      assert.equal(v.my_verdict.status, 'approved');
+      assert.equal((await decide(id, vid, { status: 'maybe' })).statusCode, 400);
+    });
+    await check("approval of another email's version → 404", async () => {
+      const id = await book(REQ, DAN);
+      const eve = (await upload(mail('eve'), 'type=insurance&expiry_date=2030-01-01')).body;
+      assert.equal((await decide(id, eve.versions[0].id, { status: 'approved' })).statusCode, 404);
+    });
+    await check('approval on an unverified booking → 409', async () => {
+      const id = await book(LEGACY, DAN, {});
+      assert.equal((await decide(id, danIns.versions[0].id, { status: 'approved' })).statusCode, 409);
+    });
+    await check('staff can correct expiry while approving', async () => {
+      const id = await book(REQ, DAN);
+      await decide(id, danIns.versions[0].id, { status: 'approved', expiry_date: '2031-03-01' });
+      assert.equal((await one('SELECT expiry_date FROM sailor_document WHERE id = $1', [danIns.id])).expiry_date, '2031-03-01');
+    });
+    await check('staff file: streams with a verified booking at the property; 404 without one', async () => {
+      const vid = danIns.versions[0].id;
+      const ok = await call(docCtrl.streamSailorVersion, { params: { id: vid }, property_id: P });
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(ok.statusCode, 200); assert.equal(ok.headers['Cache-Control'], 'private, no-store');
+      const P2 = (await one(`INSERT INTO property (name, timezone, currency) VALUES ('Sailor Docs Other', 'Europe/Rome', 'eur') RETURNING id`)).id;
+      try {
+        assert.equal((await call(docCtrl.streamSailorVersion, { params: { id: vid }, property_id: P2 })).statusCode, 404);
+      } finally { await pool.query('DELETE FROM property WHERE id = $1', [P2]); }
+      const fay = (await upload(mail('fay'), 'type=insurance&expiry_date=2030-01-01')).body;
+      assert.equal((await call(docCtrl.streamSailorVersion, { params: { id: fay.versions[0].id }, property_id: P })).statusCode, 404);
+    });
+    await check("another marina's approval does not satisfy auto-confirm", async () => {
+      const gus = mail('gus');
+      const g = (await upload(gus, 'type=insurance&expiry_date=2030-01-01')).body;
+      const id = await book(AUTO, gus, as(gus), { live: true });
+      await pool.query("UPDATE marina_booking SET status = 'pending' WHERE id = $1", [id]);
+      await pool.query("INSERT INTO sailor_document_approval (version_id, marina_id, property_id, status) VALUES ($1, $2, $3, 'approved')", [g.versions[0].id, REQ.id, P]);
+      assert.equal(await life.maybeAutoConfirm(id), null);
+    });
+    await check('auto-confirm fires once every mandatory requirement has this marina’s approval', async () => {
+      const hal = mail('hal');
+      const h = (await upload(hal, 'type=insurance&expiry_date=2030-01-01')).body;
+      const id = await book(AUTO, hal, as(hal), { live: true });
+      await pool.query("UPDATE marina_booking SET status = 'pending' WHERE id = $1", [id]);
+      assert.equal(await life.maybeAutoConfirm(id), null);
+      await decide(id, h.versions[0].id, { status: 'approved' });
+      await waitStatus(id, 'confirmed');
+    });
+
     // (later tasks append here)
   } finally {
     server.close();

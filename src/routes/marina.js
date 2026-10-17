@@ -55,6 +55,9 @@ router.get('/bookings/:id/documents', authenticate, docCtrl.listBookingDocuments
 router.get('/bookings/:id/verification', authenticate, docCtrl.getBookingVerification);
 router.get('/documents/:id/file', authenticate, docCtrl.streamDocumentFile);
 router.put('/documents/:id', authenticate, docCtrl.updateDocument);
+// Shared sailor documents (bearer only, like the per-booking ones).
+router.get('/sailor-versions/:id/file', authenticate, docCtrl.streamSailorVersion);
+router.put('/bookings/:id/sailor-versions/:versionId', authenticate, docCtrl.decideSailorVersion);
 
 router.get('/bookings', authenticateOrApiKey, bookings.listBookings);
 router.post('/bookings', authenticateOrApiKey, bookings.createBooking);

@@ -1,11 +1,13 @@
 const { Readable } = require('stream');
 const pool = require('../db');
-const { isValidUuid } = require('../middleware/validate');
+const { isValidUuid, isValidDate } = require('../middleware/validate');
 const docs = require('../lib/marinaDocuments');
 const life = require('../lib/marinaLifecycle');
 const q = require('../lib/marinaQueries');
 const kc = require('../lib/marinaContracts');
 const { nightsBetween } = require('../lib/marinaPricing');
+const sd = require('../lib/sailorDocuments');
+const { streamVersion } = require('./sailorDocuments');
 
 // Guest upload (raw body, booking token). Only while pending/confirmed, so
 // a card-free hold can't trigger paid extraction.
@@ -82,7 +84,68 @@ async function getBookingVerification(req, res, next) {
       const t = kc.pickTemplate(templates.rows, nightsBetween(b.arrival, b.departure));
       if (t) contract = { name: t.name, signed: false, rendered_body: kc.renderContract(t.body_markdown, kc.contractContext(b, await q.propertyToday(pool, b.property_id))) };
     }
-    res.json({ requirements: reqs.rows, documents: documents.rows, contract });
+    res.json({ requirements: reqs.rows, documents: documents.rows, contract, sailor: await sailorBlock(b) });
+  } catch (err) { next(err); }
+}
+
+// Shared sailor documents on the panel: only for a booking whose email came
+// from the sailor's token. Each version carries this marina's own verdict.
+async function sailorBlock(b) {
+  if (!b.email_verified) return null;
+  const statuses = await sd.requirementStatus(pool, { marinaId: b.marina_id, email: b.contact_email, arrival: b.arrival, departure: b.departure });
+  const versionIds = statuses.flatMap((s) => s.document?.versions.map((v) => v.id) ?? []);
+  const { rows } = await pool.query('SELECT version_id, status, notes, decided_at FROM sailor_document_approval WHERE marina_id = $1 AND version_id = ANY($2)', [b.marina_id, versionIds]);
+  const mine = new Map(rows.map(({ version_id, ...v }) => [version_id, v]));
+  return {
+    email: sd.normalEmail(b.contact_email),
+    requirements: statuses.map(({ requirement, document }) => ({
+      requirement_id: requirement.id,
+      document: document && { ...document, versions: document.versions.map((v) => ({ ...v, my_verdict: mine.get(v.id) ?? null })) },
+    })),
+  };
+}
+
+const marinaIdsOf = async (propertyId) => (await pool.query('SELECT id FROM marina WHERE property_id = $1', [propertyId])).rows.map((r) => r.id);
+
+// A sailor's file for staff: 404 unless one of this property's marinas has a
+// verified-email booking for that sailor (sd.canStaffSee).
+async function streamSailorVersion(req, res, next) {
+  try {
+    if (!isValidUuid(req.params.id)) return res.status(404).json({ error: 'Document not found' });
+    const { rows: [v] } = await pool.query(
+      `SELECT v.blob_pathname, v.content_type, v.file_deleted_at, d.email FROM sailor_document_version v
+       JOIN sailor_document d ON d.id = v.document_id WHERE v.id = $1`, [req.params.id]);
+    if (!v || !(await sd.canStaffSee(pool, { marinaIds: await marinaIdsOf(req.property_id), email: v.email }))) return res.status(404).json({ error: 'Document not found' });
+    await streamVersion(res, next, v);
+  } catch (err) { next(err); }
+}
+
+// This marina's verdict on one version of the booking sailor's document;
+// re-deciding overwrites. expiry_date (optional) corrects the document.
+async function decideSailorVersion(req, res, next) {
+  try {
+    const { id, versionId } = req.params;
+    if (!isValidUuid(id) || !isValidUuid(versionId)) return res.status(404).json({ error: 'Not found' });
+    const { status, notes, expiry_date } = req.body || {};
+    if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: 'status must be approved or rejected' });
+    if (expiry_date !== undefined && expiry_date !== null && !isValidDate(expiry_date)) return res.status(400).json({ error: 'expiry_date must be YYYY-MM-DD or null' });
+    const { rows: [b] } = await pool.query('SELECT id, marina_id, property_id, contact_email, email_verified FROM marina_booking WHERE id = $1 AND property_id = $2', [id, req.property_id]);
+    if (!b) return res.status(404).json({ error: 'Booking not found' });
+    if (!b.email_verified) return res.status(409).json({ error: 'The booking email is not verified, so it has no shared documents' });
+    const { rows: [v] } = await pool.query(
+      `SELECT v.id, v.document_id FROM sailor_document_version v JOIN sailor_document d ON d.id = v.document_id
+       WHERE v.id = $1 AND d.deleted_at IS NULL AND d.email = $2`, [versionId, sd.normalEmail(b.contact_email)]);
+    if (!v) return res.status(404).json({ error: 'Document not found' });
+    const { rows: [verdict] } = await pool.query(
+      `INSERT INTO sailor_document_approval (version_id, marina_id, property_id, status, notes, staff_user)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (version_id, marina_id) DO UPDATE SET status = EXCLUDED.status, notes = EXCLUDED.notes, staff_user = EXCLUDED.staff_user, decided_at = now()
+       RETURNING version_id, status, notes, staff_user, decided_at`,
+      [v.id, b.marina_id, b.property_id, status, notes ?? null, req.user?.id ?? null]);
+    if (expiry_date !== undefined) await pool.query('UPDATE sailor_document SET expiry_date = $1 WHERE id = $2', [expiry_date, v.document_id]);
+    await life.republish(b.id);
+    if (status === 'approved') life.maybeAutoConfirm(b.id).catch((err) => console.error('Marina auto-confirm failed:', err.message));
+    res.json(verdict);
   } catch (err) { next(err); }
 }
 
@@ -120,4 +183,4 @@ async function updateDocument(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { uploadDocument, listBookingDocuments, getBookingVerification, streamDocumentFile, updateDocument };
+module.exports = { uploadDocument, listBookingDocuments, getBookingVerification, streamDocumentFile, updateDocument, streamSailorVersion, decideSailorVersion };
