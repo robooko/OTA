@@ -128,8 +128,9 @@ async function listMarinas(req, res, next) {
 // Unauthenticated, every property: map pins for Sidon. Public fields only.
 async function listPublicMarinas(req, res, next) {
   try {
-    const { rows } = await pool.query(`SELECT id, name, description, website, lat, lng FROM marina
-      WHERE status = 'active' AND lat IS NOT NULL AND lng IS NOT NULL ORDER BY name`);
+    const { rows } = await pool.query(`SELECT id, name, description, website, lat, lng,
+      (SELECT url FROM marina_image i WHERE i.marina_id = marina.id AND i.status = 'active' ORDER BY sort_order LIMIT 1) AS image_url
+      FROM marina WHERE status = 'active' AND lat IS NOT NULL AND lng IS NOT NULL ORDER BY name`);
     res.set('Cache-Control', 'public, max-age=300').json(rows);
   } catch (err) { next(err); }
 }
