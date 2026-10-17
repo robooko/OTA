@@ -318,6 +318,16 @@ const app = require('../src/app');
       await waitStatus(id, 'confirmed');
     });
 
+    // ---- Task 6: requirement types ----
+    await check('requirement with unknown type → 400; known type → 201', async () => {
+      const r = await guestApi('POST', `/api/marina/marinas/${FREE.id}/doc-requirements`, { body: { type: 'licence', name: 'Licence' } });
+      assert.equal(r.status, 400);
+      assert.equal(r.body.error, 'type must be one of insurance, acord25, registration, uscg_cod, passport, safety');
+      const ok = await guestApi('POST', `/api/marina/marinas/${FREE.id}/doc-requirements`, { body: { type: 'passport', name: 'Passport', status: 'inactive' } });
+      assert.equal(ok.status, 201);
+      assert.equal((await guestApi('PUT', `/api/marina/marinas/${FREE.id}/doc-requirements/${ok.body.id}`, { body: { type: 'visa' } })).status, 400);
+    });
+
     // (later tasks append here)
   } finally {
     server.close();

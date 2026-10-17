@@ -26,8 +26,10 @@ const MARINA_FIELDS = {
   booking_url: z.string().nullable().optional().describe('http(s) guest booking page URL containing {id} and {token}'),
   status: z.enum(['active', 'inactive']).optional(),
 };
+// The shared sailor document vocabulary (src/lib/sailorDocTypes.js).
+const DOC_TYPE = z.enum(['insurance', 'acord25', 'registration', 'uscg_cod', 'passport', 'safety']);
 const DOC_REQUIREMENT_FIELDS = {
-  type: z.string().max(30).optional(), name: z.string().max(100).optional(), description: z.string().nullable().optional(),
+  type: DOC_TYPE.optional(), name: z.string().max(100).optional(), description: z.string().nullable().optional(),
   fields: z.array(z.any()).optional().describe('What to extract from the upload, e.g. ["passport_number", "nationality"]'),
   mandatory: z.boolean().optional(), sort_order: z.number().int().optional(), status: z.enum(['active', 'inactive']).optional(),
 };
@@ -988,7 +990,7 @@ function createTools(apiRequest) {
   {
     name: 'create_marina_doc_requirement',
     description: "Add a document a marina asks sailors to upload. type (e.g. passport, insurance) and name are required. fields lists what to extract from the upload; mandatory ones must be verified before an auto-confirm marina confirms.",
-    inputSchema: { marina_id: z.string(), ...DOC_REQUIREMENT_FIELDS, type: z.string().max(30), name: z.string().max(100) },
+    inputSchema: { marina_id: z.string(), ...DOC_REQUIREMENT_FIELDS, type: DOC_TYPE, name: z.string().max(100) },
     run: ({ marina_id, ...body }) => apiRequest('POST', `/api/marina/marinas/${marina_id}/doc-requirements`, { body }),
   },
   {

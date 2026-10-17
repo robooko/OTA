@@ -2,6 +2,7 @@ const pool = require('../db');
 const { isValidUuid, isValidUrl } = require('../middleware/validate');
 const { sniffType, putPublic } = require('../lib/marinaDocuments');
 const { unknownPlaceholders } = require('../lib/marinaContracts');
+const { TYPE_NAMES } = require('../lib/sailorDocTypes');
 
 // Staff CRUD for marinas and their catalogue tables. Every child table is
 // property-scoped and soft-deletes through status, so one table-driven
@@ -45,7 +46,7 @@ const TABLES = {
     valid_from: v.date, valid_to: v.date, max_length_m: v.nonNeg, max_beam_m: v.nonNeg, price_per_night: v.nonNeg,
     price_per_month: v.nonNeg, price_per_year: v.nonNeg, status: STATUS }, required: ['valid_from', 'valid_to', 'max_length_m', 'price_per_night'] },
   'doc-requirements': { table: 'marina_doc_requirement', order: 'sort_order, name', cols: {
-    type: v.required(30), name: v.required(100), description: v.longText, fields: v.json, mandatory: v.bool, sort_order: v.int, status: STATUS }, required: ['type', 'name'] },
+    type: v.oneOf(...TYPE_NAMES), name: v.required(100), description: v.longText, fields: v.json, mandatory: v.bool, sort_order: v.int, status: STATUS }, required: ['type', 'name'] },
   'contract-templates': { table: 'marina_contract_template', order: 'min_nights, name', cols: {
     name: v.required(100), body_markdown: v.required(200000), min_nights: v.int, status: STATUS }, required: ['name', 'body_markdown'] },
   pois: { table: 'marina_poi', order: 'label', cols: {
