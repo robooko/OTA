@@ -64,6 +64,12 @@ async function extractDocument(docId) {
   }
 }
 
+// Documents uploaded during the hold, extracted once it reaches pending.
+async function extractBookingDocuments(bookingId) {
+  const { rows } = await pool.query('SELECT id FROM marina_document WHERE booking_id = $1 AND extracted_data IS NULL', [bookingId]);
+  for (const r of rows) await module.exports.extractDocument(r.id);
+}
+
 // Daily: delete files 90 days after departure / cancellation (open-ended:
 // after it has been ended), keep the rows; purge the import's archive.
 async function retentionOnce() {
@@ -98,4 +104,4 @@ function startMarinaRetentionJob() {
   setInterval(run, 24 * 60 * 60 * 1000).unref();
 }
 
-module.exports = { MAX_BYTES, MAX_PER_BOOKING, sniffType, store, putPublic, docPath, extractDocument, retentionOnce, startMarinaRetentionJob };
+module.exports = { MAX_BYTES, MAX_PER_BOOKING, sniffType, store, putPublic, docPath, extractDocument, extractBookingDocuments, retentionOnce, startMarinaRetentionJob };

@@ -6,6 +6,7 @@ const { pickTemplate } = require('./marinaContracts');
 const { nightsBetween } = require('./marinaPricing');
 const { publishMarinaBooking, publishMarinaGuestUpdate } = require('./ably');
 const { sendGuestEmail } = require('./marinaEmails');
+const docs = require('./marinaDocuments');
 
 // Every marina booking status change goes through here: row lock, re-check
 // the expected status (and, for guest holds, that the hold hasn't lapsed),
@@ -206,6 +207,9 @@ function afterChange(before, after) {
   if (visible) {
     publishMarinaBooking(after.property_id, isNew ? 'new-booking' : 'booking-status-changed', after)
       .catch((err) => console.error('Ably publish failed:', err.message));
+  }
+  if (before?.status === 'hold' && after.status === 'pending') {
+    docs.extractBookingDocuments(after.id).catch((err) => console.error('Marina extraction failed:', err.message));
   }
   if (before && before.status !== after.status) {
     publishMarinaGuestUpdate(after.id, after.status).catch((err) => console.error('Ably publish failed:', err.message));
