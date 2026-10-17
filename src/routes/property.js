@@ -40,7 +40,8 @@ router.put('/ai-replies', authenticate, requireRole('admin'), ctrl.updateAiReply
 router.put('/ai-replies/instructions', authenticateOrApiKey, ctrl.updateAiReplyInstructions);
 
 // Phone receptionist: on/off and where to transfer -- bearer+admin, like ai-replies mode.
-router.get('/voice', authenticate, ctrl.getVoiceSettings);
+// GET is on the API-key rail for the MCP get_voice_settings tool.
+router.get('/voice', authenticateOrApiKey, ctrl.getVoiceSettings);
 router.put('/voice', authenticate, requireRole('admin'), ctrl.updateVoiceSettings);
 
 // On the API-key rail for the same reason as /me above -- logo, colour and

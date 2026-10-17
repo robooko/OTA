@@ -1107,6 +1107,12 @@ function createTools(apiRequest) {
     run: ({ instructions }) => apiRequest('PUT', '/api/property/ai-replies/instructions', { body: { instructions } }),
   },
   {
+    name: 'get_voice_settings',
+    description: "The property's AI phone receptionist: enabled, its Twilio number, the transfer number, and whether the feature is configured on this server. Calls are filed as event inquiries with source 'phone'. Switching it on or changing the transfer number is dashboard-admin only.",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/property/voice'),
+  },
+  {
     name: 'list_spas',
     description: 'List spas for this property',
     inputSchema: {},
