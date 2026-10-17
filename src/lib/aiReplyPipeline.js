@@ -325,6 +325,8 @@ async function runAiReply({ inquiryId, triggerType, triggerMessageId = null }) {
   // A closed inquiry is a settled conversation -- a late guest email is for
   // a human to notice, not for the model to reopen.
   if (inquiry.status === 'closed') return null;
+  // A phone enquiry may have no email: nothing a draft could be sent to.
+  if (!inquiry.email) return null;
 
   let draft;
   try {
@@ -372,6 +374,6 @@ async function runAiReply({ inquiryId, triggerType, triggerMessageId = null }) {
 }
 
 module.exports = {
-  runAiReply, generateDraft, sendDraft, supersedePendingDrafts, loadMarinaContext,
+  runAiReply, generateDraft, sendDraft, supersedePendingDrafts, loadSpaContext, loadMarinaContext,
   DraftNotPendingError, ProposedBookingError, InsufficientTokensError, MAX_AUTO_SENT_PER_INQUIRY,
 };

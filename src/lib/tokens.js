@@ -18,6 +18,7 @@ const TOKEN_COSTS = {
   reply_send: 2500, // one outbound reply email (Resend call) -- charged whether
                     // the body was hand-typed or an approved AI draft, since
                     // sending costs the same either way.
+  voice_call: 5000, // one AI receptionist call (Twilio minutes + up to 20 model turns)
 };
 
 // Granted once per owner (idem_key 'starter:<owner>'), so the paid features

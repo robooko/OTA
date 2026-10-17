@@ -76,6 +76,12 @@ CREATE TABLE IF NOT EXISTS property (
   -- never returned by any GET, like stripe_secret_key.
   sidon_marina_id  VARCHAR(100),
   sidon_marina_key TEXT,
+  -- AI phone receptionist -- see migrate-2026-10-17-phone-receptionist.sql.
+  -- voice_number is set by us (never a property admin) when the Twilio
+  -- number is bought; calls route to the property by the dialled number.
+  voice_enabled         BOOLEAN NOT NULL DEFAULT false,
+  voice_number          VARCHAR(20) UNIQUE,
+  voice_transfer_number VARCHAR(20),
   created_at       TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT property_ai_reply_mode_check CHECK (ai_reply_mode IN ('off', 'draft', 'auto')),
   CONSTRAINT property_ai_reply_auto_send_min_score_check CHECK (ai_reply_auto_send_min_score BETWEEN 0 AND 100),
@@ -1146,8 +1152,9 @@ CREATE TABLE IF NOT EXISTS event_inquiry (
   restaurant_id UUID         REFERENCES restaurant(id),
   spa_id        UUID         REFERENCES spa(id), -- mirrors restaurant_id: optional, which module (if any) this enquiry is about
   name          VARCHAR(100) NOT NULL,
-  email         VARCHAR(255) NOT NULL,
+  email         VARCHAR(255), -- nullable since migrate-2026-10-17-phone-receptionist.sql: phone callers may give none
   phone         VARCHAR(30),
+  source        VARCHAR(10)  NOT NULL DEFAULT 'web' CHECK (source IN ('web', 'phone')),
   event_date    DATE, -- nullable since migrate-2026-08-30-event-inquiry-optional-date.sql: general enquiries need no date
   event_time    TIME, -- see migrate-2026-08-18-event-inquiry-time.sql
   guests        INT,

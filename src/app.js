@@ -40,6 +40,7 @@ const app = express();
 
 const { handleResendInboundWebhook } = require('./controllers/eventInquiries');
 const { handleStripeWebhook } = require('./controllers/billing');
+const { handleVoiceWebhook } = require('./controllers/voice');
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
@@ -57,6 +58,9 @@ app.post(
   express.raw({ type: 'application/json' }),
   handleStripeWebhook
 );
+
+// Twilio posts form-encoded; it verifies X-Twilio-Signature itself.
+app.post('/api/voice', express.urlencoded({ extended: false }), handleVoiceWebhook);
 
 // Marina layouts, pontoon SVGs and berths/bulk exceed the 100 kB default.
 // express.json() below then skips these requests (body already parsed).

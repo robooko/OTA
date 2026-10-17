@@ -873,6 +873,56 @@ async function updateReminderSettings(req, res, next) {
   }
 }
 
+// ── Phone receptionist ───────────────────────────────────────────────────
+// The AI receptionist (controllers/voice.js). voice_number is never written
+// here: we set it when the Twilio number is bought, so a property admin
+// can't claim another venue's line.
+
+const VOICE_FIELDS = 'voice_enabled, voice_number, voice_transfer_number';
+
+function voiceSettingsResponse(row) {
+  return {
+    enabled: row.voice_enabled,
+    number: row.voice_number,
+    transfer_number: row.voice_transfer_number,
+    configured: !!process.env.TWILIO_AUTH_TOKEN && !!process.env.ANTHROPIC_API_KEY,
+  };
+}
+
+async function getVoiceSettings(req, res, next) {
+  try {
+    const { rows } = await pool.query(`SELECT ${VOICE_FIELDS} FROM property WHERE id = $1`, [req.property_id]);
+    res.json(voiceSettingsResponse(rows[0]));
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateVoiceSettings(req, res, next) {
+  try {
+    const { enabled, transfer_number } = req.body ?? {};
+    if (enabled !== undefined && typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
+    // Twilio's <Dial> needs E.164; '' or null clears it.
+    const transfer = transfer_number === undefined ? undefined : String(transfer_number ?? '').replace(/[\s()-]/g, '') || null;
+    if (transfer && !/^\+\d{7,15}$/.test(transfer)) {
+      return res.status(400).json({ error: 'transfer_number must be in international format, e.g. +441234567890' });
+    }
+    const { rows } = await pool.query(
+      `UPDATE property SET
+         voice_enabled         = COALESCE($1, voice_enabled),
+         voice_transfer_number = CASE WHEN $2::boolean THEN $3::text ELSE voice_transfer_number END
+       WHERE id = $4
+       RETURNING ${VOICE_FIELDS}`,
+      [enabled ?? null, transfer !== undefined, transfer ?? null, req.property_id]
+    );
+    res.json(voiceSettingsResponse(rows[0]));
+  } catch (err) {
+    next(err);
+  }
+}
+
 // Instructions-only write for the API-key rail (MCP set_ai_reply_instructions):
 // venue automation may tune what the AI is told about the venue, but mode and
 // the auto-send threshold -- the knobs that decide whether emails leave
@@ -904,6 +954,7 @@ module.exports = {
   getEmailBranding, updateEmailBranding,
   mergeAgenticCommerce, getAgenticCommerce, updateAgenticCommerce,
   getReminderSettings, updateReminderSettings,
+  getVoiceSettings, updateVoiceSettings,
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics, getGoogleAnalyticsSetup,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,

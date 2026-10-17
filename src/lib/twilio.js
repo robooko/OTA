@@ -31,4 +31,13 @@ async function sendSms(to, body) {
   return message.sid;
 }
 
-module.exports = { isConfigured, sendSms };
+// Twilio signs webhooks with the account's auth token (an API key can't do
+// it), so the phone receptionist needs TWILIO_AUTH_TOKEN as well. Unset ->
+// every webhook is rejected. `url` must be the public URL Twilio was
+// configured with, not what Express sees behind Render's proxy.
+function validateWebhook(signature, url, params) {
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  return !!token && !!signature && Twilio.validateRequest(token, signature, url, params);
+}
+
+module.exports = { isConfigured, sendSms, validateWebhook };

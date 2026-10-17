@@ -39,6 +39,10 @@ router.get('/ai-replies', authenticateOrApiKey, ctrl.getAiReplySettings);
 router.put('/ai-replies', authenticate, requireRole('admin'), ctrl.updateAiReplySettings);
 router.put('/ai-replies/instructions', authenticateOrApiKey, ctrl.updateAiReplyInstructions);
 
+// Phone receptionist: on/off and where to transfer -- bearer+admin, like ai-replies mode.
+router.get('/voice', authenticate, ctrl.getVoiceSettings);
+router.put('/voice', authenticate, requireRole('admin'), ctrl.updateVoiceSettings);
+
 // On the API-key rail for the same reason as /me above -- logo, colour and
 // cancel link are the venue's own presentation settings, not something that
 // changes what runs unsupervised -- so the MCP get/update_email_branding

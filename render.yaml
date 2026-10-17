@@ -19,5 +19,7 @@ services:
         value: team_IcqvHykk4CZRv090ChuNAzyT
       - key: ANTHROPIC_API_KEY
         sync: false # set manually in the Render dashboard -- enables Claude-drafted event-inquiry replies; unset = feature reports configured:false and generation is skipped
+      - key: TWILIO_AUTH_TOKEN
+        sync: false # set manually in the Render dashboard -- verifies the phone receptionist's Twilio webhook (POST /api/voice); unset = every call is rejected
       - key: ANTHROPIC_MODEL
         value: claude-opus-5 # Claude model used for inquiry drafts; override here to pin a different one

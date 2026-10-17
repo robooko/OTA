@@ -427,6 +427,7 @@ async function generateAiDraft(req, res, next) {
 
     const inquiry = await loadInquiryWithProperty(req.params.id, req.property_id);
     if (!inquiry) return res.status(404).json({ error: 'Inquiry not found' });
+    if (!inquiry.email) return res.status(400).json({ error: 'This enquiry has no email address. Add one to reply.' });
 
     const draft = await generateDraft({ inquiry, triggerType: 'manual' });
     res.status(201).json(draft);

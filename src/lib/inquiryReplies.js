@@ -41,6 +41,10 @@ async function sendOutboundReply({ inquiry, body, sender = null, aiDraftId = nul
   // -- every caller (createReply, sendDraft) already propagates via
   // next(err)/its own catch, and the 402 is what tells the dashboard to
   // fall back to the guest's own email client instead of Resend.
+  // Phone enquiries may have no email; checked before the charge.
+  if (!inquiry.email) {
+    throw Object.assign(new Error('This enquiry has no email address. Add one to reply.'), { status: 400 });
+  }
   const spent = await tokens.spend(inquiry.property_id, 'reply_send', inquiry.id);
   if (!spent.ok) throw new InsufficientTokensError(spent.balance, spent.cost);
 
