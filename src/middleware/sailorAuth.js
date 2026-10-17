@@ -16,6 +16,12 @@ module.exports._clerk = {
   },
 };
 
+// The Clerk user's primary email, only once verified; else null.
+module.exports.verifiedPrimaryEmail = (user) => {
+  const primary = user?.emailAddresses?.find((e) => e.id === user.primaryEmailAddressId);
+  return primary?.verification?.status === 'verified' ? normalEmail(primary.emailAddress) : null;
+};
+
 // -> { email } or null. Never throws.
 module.exports.resolveSailor = async (token) => {
   const keys = String(process.env.SAILOR_CLERK_SECRET_KEYS || '').split(',').map((k) => k.trim()).filter(Boolean);
@@ -23,9 +29,8 @@ module.exports.resolveSailor = async (token) => {
     let claims;
     try { claims = await module.exports._clerk.verifyToken(token, key); } catch { continue; }
     try {
-      const user = await module.exports._clerk.getUser(key, claims.sub);
-      const primary = user?.emailAddresses?.find((e) => e.id === user.primaryEmailAddressId);
-      return primary?.verification?.status === 'verified' ? { email: normalEmail(primary.emailAddress) } : null;
+      const email = module.exports.verifiedPrimaryEmail(await module.exports._clerk.getUser(key, claims.sub));
+      return email ? { email } : null;
     } catch (err) {
       console.error('Sailor lookup failed:', err.message);
       return null;

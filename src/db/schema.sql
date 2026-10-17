@@ -1559,3 +1559,6 @@ ALTER TABLE marina_booking ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT N
 -- Per-marina switch-on: requirements are enforced through shared sailor
 -- documents only once the marina's booking site sends X-Sailor-Token.
 ALTER TABLE marina ADD COLUMN IF NOT EXISTS sailor_documents BOOLEAN NOT NULL DEFAULT false;
+
+-- Import provenance ('sidon:<id>' from sidon-ai's wallet): re-runs skip it.
+ALTER TABLE sailor_document ADD COLUMN IF NOT EXISTS source_ref VARCHAR(50) UNIQUE;
