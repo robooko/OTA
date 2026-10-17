@@ -106,6 +106,21 @@ CREATE TABLE IF NOT EXISTS organization (
   qbo_connected_at             TIMESTAMPTZ
 );
 
+-- Per-org integrations (Google Drive, ...) -- see migrate-2026-10-17-org-integrations.sql.
+-- refresh_token / access_token hold ciphertext only (src/lib/integrations.js).
+CREATE TABLE IF NOT EXISTS org_integration (
+  clerk_org_id            VARCHAR(255) NOT NULL REFERENCES organization(clerk_org_id) ON DELETE CASCADE,
+  provider                VARCHAR(30) NOT NULL,
+  account_email           VARCHAR(255),
+  refresh_token           TEXT,
+  access_token            TEXT,
+  access_token_expires_at TIMESTAMPTZ,
+  settings                JSONB NOT NULL DEFAULT '{}',
+  reconnect_required      BOOLEAN NOT NULL DEFAULT false,
+  connected_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (clerk_org_id, provider)
+);
+
 -- Every token_balance change, as a receipt -- see migrate-2026-09-01-property-token-billing.sql.
 CREATE TABLE IF NOT EXISTS property_token_ledger (
   id                         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1441,8 +1456,8 @@ CREATE TABLE IF NOT EXISTS marina_doc_requirement (
 );
 CREATE INDEX IF NOT EXISTS idx_marina_doc_requirement_property ON marina_doc_requirement (property_id);
 
--- blob_pathname is a private-store path, never a URL: files are only ever
--- streamed through the bearer-only GET /api/marina/documents/:id/file.
+-- The file lives in the org's own Google Drive (drive_file_id / drive_web_link);
+-- OTA keeps the record only. See migrate-2026-10-17-org-integrations.sql.
 CREATE TABLE IF NOT EXISTS marina_document (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id     UUID NOT NULL REFERENCES property(id),
@@ -1450,7 +1465,9 @@ CREATE TABLE IF NOT EXISTS marina_document (
   booking_id      UUID NOT NULL REFERENCES marina_booking(id) ON DELETE CASCADE,
   requirement_id  UUID REFERENCES marina_doc_requirement(id) ON DELETE SET NULL,
   type            VARCHAR(30),
-  blob_pathname   TEXT NOT NULL,
+  blob_pathname   TEXT, -- legacy; dropped by migration B
+  drive_file_id   TEXT,
+  drive_web_link  TEXT,
   file_name       VARCHAR(255),
   content_type    VARCHAR(50) NOT NULL,
   size_bytes      INT NOT NULL,
