@@ -12,8 +12,9 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
 
 // Each messages.create() pops the next scripted response.
 const script = [];
+const sent = []; // every request the receptionist made to the model
 class FakeAnthropic {
-  constructor() { this.messages = { create: async () => script.shift() ?? { content: [{ type: 'text', text: 'Anything else?' }] } }; }
+  constructor() { this.messages = { create: async (req) => { sent.push(structuredClone(req)); return script.shift() ?? { content: [{ type: 'text', text: 'Anything else?' }] }; } }; }
 }
 require.cache[require.resolve('@anthropic-ai/sdk')] = { exports: FakeAnthropic };
 
@@ -175,6 +176,49 @@ const toolUse = (name, input = {}) => ({ type: 'tool_use', id: `tu_${Math.random
     } finally {
       await pool.query(`DELETE FROM event_inquiry WHERE property_id = $1`, [Q]);
       await pool.query(`DELETE FROM property WHERE id = $1`, [Q]);
+    }
+
+    // Booking on the call, against a spa open every day 09:00-17:00.
+    const spaId = (await one(`INSERT INTO spa (property_id, name) VALUES ($1, 'Check Spa') RETURNING id`, [P])).id;
+    await one(`INSERT INTO spa_treatment (property_id, spa_id, name, duration_mins, price) VALUES ($1, $2, 'Haircut', 30, 20) RETURNING id`, [P, spaId]);
+    const barber = (await one(`INSERT INTO spa_therapist (property_id, spa_id, name) VALUES ($1, $2, 'Alex') RETURNING id`, [P, spaId])).id;
+    for (let d = 1; d <= 7; d++) {
+      await pool.query(`INSERT INTO spa_therapist_hours (property_id, therapist_id, day_of_week, start_time, end_time) VALUES ($1, $2, $3, '09:00', '17:00')`, [P, barber, d]);
+    }
+    const tomorrow = new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+    try {
+      await check('with a spa, it is told to book and offered the tools', async () => {
+        sent.length = 0;
+        script.push({ content: [toolUse('check_availability', { date_from: tomorrow, date_to: tomorrow, treatment_name: 'haircut' })] }, { content: [{ type: 'text', text: 'Ten or eleven tomorrow?' }] });
+        const r = await call(action, { SpeechResult: 'Can I book a haircut tomorrow?' });
+        assert.match(r.text, /Ten or eleven/);
+        assert.deepEqual(sent[0].tools.map((t) => t.name), ['take_enquiry', 'check_availability', 'book_appointment', 'transfer_call']);
+        assert.match(sent[0].system, /book_appointment/);
+        const result = JSON.parse(sent[1].messages.at(-1).content[0].content);
+        assert.equal(result.treatment, 'Haircut');
+        assert.ok(result.slots[0].slots.some((s) => s.time === '10:00'));
+      });
+      await check('book_appointment holds the time for the caller', async () => {
+        sent.length = 0;
+        script.push({ content: [toolUse('book_appointment', { treatment_name: 'Haircut', date: tomorrow, time: '10:00', name: 'Sam Jones', email: 'sam@example.org' })] }, { content: [{ type: 'text', text: 'Booked.' }] });
+        await call(action, { SpeechResult: 'Ten please, sam at example dot org, yes that is right' });
+        const result = JSON.parse(sent[1].messages.at(-1).content[0].content);
+        assert.equal(result.booked, true);
+        const appt = await one(`SELECT contact_name, contact_email, contact_phone, status, start_time::text FROM spa_appointment WHERE property_id = $1`, [P]);
+        assert.deepEqual(appt, { contact_name: 'Sam Jones', contact_email: 'sam@example.org', contact_phone: CALLER, status: 'pending', start_time: '10:00:00' });
+      });
+      await check('a taken time is refused in words', async () => {
+        sent.length = 0;
+        script.push({ content: [toolUse('book_appointment', { treatment_name: 'Haircut', date: tomorrow, time: '10:00', name: 'Alex Other', email: 'alex@example.org' })] }, { content: [{ type: 'text', text: 'Sorry.' }] });
+        await call(action, { SpeechResult: 'Ten please' });
+        assert.deepEqual(JSON.parse(sent[1].messages.at(-1).content[0].content), { booked: false, reason: 'That time has just gone.' });
+      });
+    } finally {
+      await pool.query(`DELETE FROM spa_appointment WHERE property_id = $1`, [P]);
+      await pool.query(`DELETE FROM spa_therapist_hours WHERE property_id = $1`, [P]);
+      await pool.query(`DELETE FROM spa_therapist WHERE property_id = $1`, [P]);
+      await pool.query(`DELETE FROM spa_treatment WHERE property_id = $1`, [P]);
+      await pool.query(`DELETE FROM spa WHERE property_id = $1`, [P]);
     }
 
     await check('out of BUXS: greeting goes straight to staff', async () => {
