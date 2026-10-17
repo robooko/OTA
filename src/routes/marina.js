@@ -24,6 +24,7 @@ const { optionalSailor } = require('../middleware/sailorAuth');
 router.put('/key', authenticate, requireRole('admin'), ctrl.setSidonMarinaKey);
 router.post('/key/clear', authenticate, requireRole('admin'), ctrl.clearSidonMarinaKey);
 
+router.get('/public', cat.listPublicMarinas);
 router.get('/marinas', authenticateOrApiKey, cat.listMarinas);
 router.post('/marinas', authenticateOrApiKey, cat.createMarina);
 router.get('/marinas/:id', authenticateOrApiKey, cat.getMarina);

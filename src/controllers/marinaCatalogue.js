@@ -125,6 +125,15 @@ async function listMarinas(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Unauthenticated, every property: map pins for Sidon. Public fields only.
+async function listPublicMarinas(req, res, next) {
+  try {
+    const { rows } = await pool.query(`SELECT id, name, description, website, lat, lng FROM marina
+      WHERE status = 'active' AND lat IS NOT NULL AND lng IS NOT NULL ORDER BY name`);
+    res.set('Cache-Control', 'public, max-age=300').json(rows);
+  } catch (err) { next(err); }
+}
+
 async function getMarina(req, res, next) {
   try {
     req.params.marina_id = req.params.id;
@@ -281,4 +290,4 @@ async function uploadImage(req, res, next) {
 }
 
 module.exports = {
-  uploadImage, listMarinas, getMarina, createMarina, updateMarina, childHandlers, bulkBerths, renameBerthInSvg, TABLES };
+  uploadImage, listMarinas, listPublicMarinas, getMarina, createMarina, updateMarina, childHandlers, bulkBerths, renameBerthInSvg, TABLES };
