@@ -94,10 +94,85 @@ async function seedIntegration(fields = {}) {
       await pool.query('DELETE FROM org_integration WHERE clerk_org_id = $1', [ORG]);
       await assert.rejects(integ.getAccessToken(ORG, 'google_drive'), (e) => e.code === 'not_connected' && e.status === 409);
     });
+
+    // ---- Task 3 ----
+    const ctrl = require('../src/controllers/integrations');
+    const call = async (fn, req) => {
+      const res = {
+        statusCode: 200, body: undefined,
+        status(c) { this.statusCode = c; return this; },
+        json(b) { this.body = b; return this; },
+        send(b) { this.body = b; return this; },
+      };
+      let error;
+      await fn({ params: { provider: 'google_drive' }, query: {}, body: {}, clerk_org_id: ORG, ...req }, res, (e) => { error = e; });
+      if (error) throw error;
+      return res;
+    };
+    process.env.GOOGLE_CLIENT_ID = 'cid'; process.env.GOOGLE_CLIENT_SECRET = 'csecret'; process.env.GOOGLE_REDIRECT_URI = 'http://localhost/cb';
+
+    await check('unknown provider → 404 through the app', async () => {
+      const server = require('../src/app').listen(0);
+      try {
+        const r = await fetch(`http://127.0.0.1:${server.address().port}/api/integrations/nope/callback`);
+        assert.equal(r.status, 404); assert.equal((await r.json()).error, 'Unknown integration');
+      } finally { server.close(); }
+    });
+    await check('connect: 503 naming a missing env var; otherwise a Google URL with drive.file + offline', async () => {
+      delete process.env.GOOGLE_REDIRECT_URI;
+      const r = await call(ctrl.getConnectUrl, {});
+      assert.equal(r.statusCode, 503); assert.equal(r.body.error, 'Google Drive is not configured on this server'); assert.match(r.body.details, /GOOGLE_REDIRECT_URI/);
+      process.env.GOOGLE_REDIRECT_URI = 'http://localhost/cb';
+      const ok = await call(ctrl.getConnectUrl, {});
+      const u = new URL(ok.body.url);
+      assert.equal(u.origin + u.pathname, 'https://accounts.google.com/o/oauth2/v2/auth');
+      assert.equal(u.searchParams.get('scope'), 'https://www.googleapis.com/auth/drive.file');
+      assert.equal(u.searchParams.get('access_type'), 'offline'); assert.equal(u.searchParams.get('prompt'), 'consent');
+      assert.deepEqual(integ.verifyState(u.searchParams.get('state')), { orgId: ORG, provider: 'google_drive' });
+    });
+    await check('callback: forged state or other-provider path → 400', async () => {
+      reply();
+      assert.equal((await call(ctrl.connectCallback, { query: { code: 'c', state: 'x.google_drive.1.y' } })).statusCode, 400);
+      integ.PROVIDERS.other = { ...integ.PROVIDERS.google_drive, label: 'Other' }; // a second provider, as later ones will be
+      try {
+        assert.equal((await call(ctrl.connectCallback, { params: { provider: 'other' }, query: { code: 'c', state: integ.signState(ORG, 'google_drive') } })).statusCode, 400);
+      } finally { delete integ.PROVIDERS.other; }
+      assert.equal(calls.length, 0);
+    });
+    await check('callback: stores encrypted tokens + account email, resets settings', async () => {
+      await pool.query('DELETE FROM org_integration WHERE clerk_org_id = $1', [ORG]);
+      await pool.query('DELETE FROM organization WHERE clerk_org_id = $1', [ORG]); // the callback creates it
+      reply({ body: { access_token: 'acc', refresh_token: 'ref', expires_in: 3600 } }, { body: { user: { emailAddress: 'marina@example.com' } } });
+      const r = await call(ctrl.connectCallback, { query: { code: 'c', state: integ.signState(ORG, 'google_drive') } });
+      assert.equal(r.statusCode, 200); assert.match(r.body, /Google Drive connected/);
+      assert.match(calls[1].url, /drive\/v3\/about/); assert.equal(calls[1].opts.headers.Authorization, 'Bearer acc');
+      const row = await one('SELECT * FROM org_integration WHERE clerk_org_id = $1', [ORG]);
+      assert.notEqual(row.access_token, 'acc'); assert.equal(integ.decrypt(row.access_token), 'acc'); assert.equal(integ.decrypt(row.refresh_token), 'ref');
+      assert.equal(row.account_email, 'marina@example.com'); assert.deepEqual(row.settings, {}); assert.equal(row.reconnect_required, false);
+    });
+    await check('status: connected, no token fields', async () => {
+      const r = await call(ctrl.getStatus, {});
+      assert.equal(r.body.connected, true); assert.equal(r.body.configured, true); assert.equal(r.body.account_email, 'marina@example.com');
+      assert.equal(r.body.reconnect_required, false);
+      assert.ok(!/token/i.test(JSON.stringify(r.body)));
+    });
+    await check('disconnect: revokes, deletes row; a failing revoke still disconnects', async () => {
+      reply({ body: {} });
+      const r = await call(ctrl.disconnect, {});
+      assert.deepEqual(r.body, { connected: false }); assert.match(calls[0].url, /oauth2\.googleapis\.com\/revoke\?token=ref/);
+      assert.equal(await one('SELECT 1 FROM org_integration WHERE clerk_org_id = $1', [ORG]), undefined);
+      await seedIntegration();
+      reply(new Error('network down'));
+      assert.deepEqual((await call(ctrl.disconnect, {})).body, { connected: false });
+      assert.equal(await one('SELECT 1 FROM org_integration WHERE clerk_org_id = $1', [ORG]), undefined);
+      assert.equal((await call(ctrl.getStatus, {})).body.connected, false);
+    });
+  } catch (err) {
+    failed++; console.log(`FAIL setup\n     ${err.stack}`);
   } finally {
     await pool.query('DELETE FROM organization WHERE clerk_org_id = $1', [ORG]).catch(() => {});
     await pool.end();
-    console.log(failed ? `\n${failed} failed` : '\nall passed');
-    process.exit(failed ? 1 : 0);
   }
-})();
+  console.log(failed ? `\n${failed} FAILED` : '\nall passed');
+  process.exitCode = failed ? 1 : 0;
+})().catch((err) => { console.error(err); process.exitCode = 1; });

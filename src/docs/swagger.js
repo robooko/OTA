@@ -42,6 +42,7 @@ const swaggerSpec = {
     { name: 'Billing' },
     { name: 'Marina' },
     { name: 'QuickBooks' },
+    { name: 'Integrations' },
   ],
   components: {
     securitySchemes: {
@@ -247,6 +248,18 @@ const swaggerSpec = {
     },
     '/api/property/vercel/pat/clear': {
       post: { tags: ['Property'], summary: "Clear the current property's Vercel Personal Access Token (admin only)", security: [{ bearerAuth: [] }], responses: { 200: { description: '{ analyticsPatConfigured: false }' }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/integrations/{provider}/connect': {
+      get: { tags: ['Integrations'], summary: "Get the provider's OAuth consent URL to connect it to the organization (admin only)", description: 'One connection per organization per provider, shared by all its properties. Google Drive asks only for drive.file (files OTA creates).', security: [{ bearerAuth: [] }], parameters: [{ name: 'provider', in: 'path', required: true, schema: { type: 'string', enum: ['google_drive'] } }], responses: { 200: { description: '{ url }' }, 403: { description: 'Insufficient permissions' }, 404: { description: 'Unknown integration' }, 503: { description: '{ error, details: "Missing: ..." } -- not configured on this server' } } },
+    },
+    '/api/integrations/{provider}/callback': {
+      get: { tags: ['Integrations'], summary: 'OAuth callback hit by the provider (signed state, valid 1 hour); returns a small HTML page', parameters: [{ name: 'provider', in: 'path', required: true, schema: { type: 'string', enum: ['google_drive'] } }], responses: { 200: { description: 'Connected' }, 400: { description: 'Cancelled or invalid/expired link' }, 502: { description: 'Token exchange failed' } } },
+    },
+    '/api/integrations/{provider}/status': {
+      get: { tags: ['Integrations'], summary: "The organization's connection to the provider", description: 'Tokens are never returned.', security: [{ bearerAuth: [] }], parameters: [{ name: 'provider', in: 'path', required: true, schema: { type: 'string', enum: ['google_drive'] } }], responses: { 200: { description: '{ configured, connected, account_email, reconnect_required, connected_at }' } } },
+    },
+    '/api/integrations/{provider}/disconnect': {
+      post: { tags: ['Integrations'], summary: 'Revoke (best effort) and remove the connection (admin only). Files already in the provider stay there.', security: [{ bearerAuth: [] }], parameters: [{ name: 'provider', in: 'path', required: true, schema: { type: 'string', enum: ['google_drive'] } }], responses: { 200: { description: '{ connected: false }' }, 403: { description: 'Insufficient permissions' } } },
     },
     '/api/quickbooks/connect': {
       get: { tags: ['QuickBooks'], summary: "Get the Intuit OAuth URL to connect the organization's QuickBooks Online company (admin only)", description: 'One QuickBooks company per organization, shared by all its properties. Org-level route: no X-Property-Id needed.', security: [{ bearerAuth: [] }], responses: { 200: { description: '{ url }' }, 403: { description: 'Insufficient permissions' }, 503: { description: 'QBO_CLIENT_ID / QBO_CLIENT_SECRET / QBO_REDIRECT_URI not set on the server' } } },

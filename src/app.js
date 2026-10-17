@@ -35,6 +35,7 @@ const marinaRoutes = require('./routes/marina');
 const sailorDocumentRoutes = require('./routes/sailorDocuments');
 const buxsRoutes = require('./routes/buxs');
 const quickbooksRoutes = require('./routes/quickbooks');
+const integrationsRoutes = require('./routes/integrations');
 
 const app = express();
 
@@ -101,6 +102,7 @@ app.use('/api/review-requests', reviewRequestRoutes);
 app.use('/api/marina', marinaRoutes);
 app.use('/api/sailor/documents', sailorDocumentRoutes);
 app.use('/api/quickbooks', quickbooksRoutes);
+app.use('/api/integrations', integrationsRoutes);
 
 app.use(errorHandler);
 
