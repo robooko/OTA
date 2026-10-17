@@ -100,6 +100,56 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
     await db.query('ROLLBACK');
     await db.end();
   }
+
+  // ---- Task 2: sailor auth (no DB; Clerk stubbed through the _clerk seam) ----
+  const plain = async (name, fn) => {
+    try { await fn(); console.log(`ok   ${name}`); }
+    catch (err) { failed++; console.log(`FAIL ${name}\n     ${err.stack}`); }
+  };
+  const sa = require('../src/middleware/sailorAuth');
+  process.env.SAILOR_CLERK_SECRET_KEYS = 'sk_one, sk_two';
+  const users = {
+    u_ok: { primaryEmailAddressId: 'e1', emailAddresses: [{ id: 'e1', emailAddress: 'Ann@Example.com', verification: { status: 'verified' } }] },
+    u_unverified: { primaryEmailAddressId: 'e1', emailAddresses: [{ id: 'e1', emailAddress: 'bob@example.com', verification: { status: 'unverified' } }] },
+    u_secondary: { primaryEmailAddressId: 'e1', emailAddresses: [
+      { id: 'e1', emailAddress: 'cat@example.com', verification: { status: 'unverified' } },
+      { id: 'e2', emailAddress: 'cat2@example.com', verification: { status: 'verified' } }] },
+  };
+  // Tokens look like '<secret>:<sub>': only verify under the matching secret.
+  sa._clerk = {
+    verifyToken: async (token, secretKey) => { const [k, sub] = token.split(':'); if (k !== secretKey) throw new Error('bad'); return { sub }; },
+    getUser: async (secretKey, sub) => users[sub],
+  };
+  const run = async (mw, token) => {
+    const req = { headers: token ? { 'x-sailor-token': token } : {}, get(h) { return this.headers[h.toLowerCase()]; } };
+    const res = { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+    let nexted = false;
+    await mw(req, res, () => { nexted = true; });
+    return { req, res, nexted };
+  };
+  await plain('no header → 401', async () => {
+    const r = await run(sa.authenticateSailor, null);
+    assert.equal(r.res.statusCode, 401); assert.equal(r.nexted, false);
+    assert.deepEqual(r.res.body, { error: 'Sign in required' });
+  });
+  await plain('verified primary → req.sailor.email lower-cased (second trusted instance)', async () => {
+    const r = await run(sa.authenticateSailor, 'sk_two:u_ok');
+    assert.equal(r.nexted, true); assert.deepEqual(r.req.sailor, { email: 'ann@example.com' });
+  });
+  await plain('unverified primary email → 401', async () => {
+    assert.equal((await run(sa.authenticateSailor, 'sk_one:u_unverified')).res.statusCode, 401);
+  });
+  await plain('secondary verified but primary unverified → 401', async () => {
+    assert.equal((await run(sa.authenticateSailor, 'sk_one:u_secondary')).res.statusCode, 401);
+  });
+  await plain('token from an untrusted instance → 401', async () => {
+    assert.equal((await run(sa.authenticateSailor, 'sk_other:u_ok')).res.statusCode, 401);
+  });
+  await plain('optionalSailor passes through with no header; invalid token still 401', async () => {
+    const r = await run(sa.optionalSailor, null);
+    assert.equal(r.nexted, true); assert.equal(r.req.sailor, undefined);
+    assert.equal((await run(sa.optionalSailor, 'sk_one:u_unverified')).res.statusCode, 401);
+  });
   console.log(failed ? `\n${failed} failed` : '\nall passed');
   process.exit(failed ? 1 : 0);
 })();
