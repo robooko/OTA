@@ -38,8 +38,11 @@ async function accountEmail(accessToken) {
   const r = await integ.fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)', {
     headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
   });
-  if (!r.ok) return null;
-  return (await r.json().catch(() => ({})))?.user?.emailAddress ?? null;
+  const body = await r.json().catch(() => ({}));
+  // Not fatal (the grant is good), but a failure here usually means the
+  // Drive API isn't enabled in the Google Cloud project -- uploads would fail too.
+  if (!r.ok) console.error(`Google Drive about failed: HTTP ${r.status} ${body?.error?.message ?? ''}`);
+  return body?.user?.emailAddress ?? null;
 }
 
 async function connectCallback(req, res, next) {
