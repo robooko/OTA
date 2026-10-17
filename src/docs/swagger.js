@@ -57,6 +57,12 @@ const swaggerSpec = {
         name: 'X-Api-Key',
         description: 'A per-property key (prop_...) selects its own property. An organization key (org_...) selects among the org\'s properties with X-Property-Id, X-Property-Slug or X-Site-Host (that precedence); optional when the org has one property.',
       },
+      sailorAuth: {
+        type: 'apiKey',
+        in: 'header',
+        name: 'X-Sailor-Token',
+        description: "A sailor's Clerk session token (getToken()) from sidon-ai or a booking site. OTA keys the sailor's shared documents by the user's primary, verified email. Trusted instances: SAILOR_CLERK_SECRET_KEYS.",
+      },
     },
     schemas: {
       Error: {
@@ -802,6 +808,17 @@ const swaggerSpec = {
     },
     '/api/marina/guest/{marina}/bookings/{id}/confirm-payment': {
       post: { tags: ['Marina'], summary: "Confirm the card hold: hold to pending", security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'marina', in: 'path', required: true, schema: { type: 'string' }, description: "Marina slug" }, { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'X-Booking-Token', in: 'header', required: true, schema: { type: 'string' }, description: "Booking token from the create response or guest email; wrong or missing gives 404" }], responses: { 200: { description: "Booking" }, 404: { description: "Not found or wrong token" }, 409: { description: "Card not authorised yet" }, 410: { description: "Hold expired" } } },
+    },
+    '/api/sailor/documents': {
+      get: { tags: ['Sailor documents'], summary: "The signed-in sailor's documents, newest first, each with versions and approval_count (marinas that approved any version)", security: [{ sailorAuth: [] }], responses: { 200: { description: '[{ id, type, expiry_date, extracted_data, approval_count, created_at, versions: [{ id, file_name, content_type, size_bytes, uploaded_at }] }]' }, 401: { description: 'Sign in required' } } },
+      post: { tags: ['Sailor documents'], summary: "Upload (raw PDF/JPEG/PNG body, X-File-Name, max 4 MB). document_id adds a version (max 10); otherwise type starts a new document (max 50). Response carries extracted_data.expiry_date as a suggestion only -- confirm it with PUT", security: [{ sailorAuth: [] }], parameters: [{ name: 'type', in: 'query', schema: { type: 'string', enum: ['insurance', 'acord25', 'registration', 'uscg_cod', 'passport', 'safety'] } }, { name: 'document_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'expiry_date', in: 'query', schema: { type: 'string', format: 'date' } }], responses: { 201: { description: 'The document' }, 400: { description: 'Unknown type, bad expiry_date or wrong file type' }, 404: { description: 'document_id not yours' }, 409: { description: 'Version or document cap reached' }, 413: { description: 'Over 4 MB' } } },
+    },
+    '/api/sailor/documents/{id}': {
+      put: { tags: ['Sailor documents'], summary: 'Set or clear (null) the expiry date', security: [{ sailorAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { expiry_date: { type: 'string', format: 'date', nullable: true } } } } } }, responses: { 200: { description: 'The document' }, 400: { description: 'Bad date' }, 404: { description: 'Not found' } } },
+      delete: { tags: ['Sailor documents'], summary: 'Delete a document and its files (approval history is kept without the files)', security: [{ sailorAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 204: { description: 'Deleted' }, 404: { description: 'Not found' } } },
+    },
+    '/api/sailor/documents/versions/{id}/file': {
+      get: { tags: ['Sailor documents'], summary: 'Stream one of your files', security: [{ sailorAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'The file' }, 404: { description: 'Not found' }, 410: { description: 'Deleted' } } },
     },
     '/api/marina/guest/{marina}/bookings/{id}/documents': {
       post: { tags: ['Marina'], summary: "Upload a document (raw PDF/JPEG/PNG body, X-File-Name header, max 4 MB, 10 per booking)", security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'marina', in: 'path', required: true, schema: { type: 'string' }, description: "Marina slug" }, { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'X-Booking-Token', in: 'header', required: true, schema: { type: 'string' }, description: "Booking token from the create response or guest email; wrong or missing gives 404" }, { name: 'requirement_id', in: 'query', schema: { type: 'string', format: 'uuid' } }], responses: { 201: { description: "Document metadata" }, 400: { description: "Wrong file type" }, 409: { description: "Booking not hold/pending/confirmed, or 10 documents already" }, 413: { description: "Over 4 MB" } } },

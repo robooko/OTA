@@ -32,6 +32,7 @@ const billingRoutes = require('./routes/billing');
 const reviewRoutes = require('./routes/reviews');
 const reviewRequestRoutes = require('./routes/reviewRequests');
 const marinaRoutes = require('./routes/marina');
+const sailorDocumentRoutes = require('./routes/sailorDocuments');
 const buxsRoutes = require('./routes/buxs');
 const quickbooksRoutes = require('./routes/quickbooks');
 
@@ -94,6 +95,7 @@ app.use('/api/buxs', buxsRoutes);
 app.use('/api/review-opt-out', reviewRoutes);
 app.use('/api/review-requests', reviewRequestRoutes);
 app.use('/api/marina', marinaRoutes);
+app.use('/api/sailor/documents', sailorDocumentRoutes);
 app.use('/api/quickbooks', quickbooksRoutes);
 
 app.use(errorHandler);
