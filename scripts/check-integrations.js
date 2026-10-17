@@ -167,6 +167,66 @@ async function seedIntegration(fields = {}) {
       assert.equal(await one('SELECT 1 FROM org_integration WHERE clerk_org_id = $1', [ORG]), undefined);
       assert.equal((await call(ctrl.getStatus, {})).body.connected, false);
     });
+
+    // ---- Task 4 ----
+    const drive = require('../src/lib/googleDrive');
+    const live = () => seedIntegration({ access: 'live', expires: new Date(Date.now() + 3600000) });
+    const folder = (id) => ({ body: { id } });
+    const file = (id) => ({ body: { id, webViewLink: `https://drive.google.com/file/d/${id}/view` } });
+    const doc = (booking = '2026-11-02 Ann Smith (1a2b3c4d)') => ({ path: ['OTA', 'Seaview', 'Porto', booking], fileName: 'passport.pdf', contentType: 'application/pdf', buf: Buffer.from('%PDF-1.4 x') });
+    const folderCreates = () => calls.filter((c) => /drive\/v3\/files\?/.test(c.url) && !/upload/.test(c.url) && c.opts.method === 'POST');
+
+    await check('first upload creates the folder chain, then uploads into the last folder', async () => {
+      await live();
+      reply(folder('f1'), folder('f2'), folder('f3'), folder('f4'), file('d1'));
+      const r = await drive.uploadMarinaDocument(ORG, doc());
+      assert.deepEqual(r, { id: 'd1', webViewLink: 'https://drive.google.com/file/d/d1/view' });
+      const made = folderCreates().map((c) => JSON.parse(c.opts.body));
+      assert.deepEqual(made.map((m) => m.name), ['OTA', 'Seaview', 'Porto', '2026-11-02 Ann Smith (1a2b3c4d)']);
+      assert.equal(made[0].parents, undefined);
+      assert.deepEqual(made.slice(1).map((m) => m.parents), [['f1'], ['f2'], ['f3']]);
+      assert.ok(made.every((m) => m.mimeType === 'application/vnd.google-apps.folder'));
+      const up = calls[4];
+      assert.match(up.url, /upload\/drive\/v3\/files\?uploadType=multipart/);
+      assert.equal(up.opts.headers.Authorization, 'Bearer live');
+      const body = Buffer.from(up.opts.body).toString('latin1');
+      assert.match(body, /"parents":\["f4"\]/); assert.match(body, /"name":"passport.pdf"/); assert.match(body, /%PDF-1.4 x/);
+    });
+    await check('same path reuses cached folders; a sibling booking creates one', async () => {
+      reply(file('d2'));
+      await drive.uploadMarinaDocument(ORG, doc());
+      assert.equal(folderCreates().length, 0);
+      reply(folder('f5'), file('d3'));
+      await drive.uploadMarinaDocument(ORG, doc('2026-12-01 Bob (99999999)'));
+      assert.deepEqual(folderCreates().map((c) => JSON.parse(c.opts.body).parents), [['f3']]);
+    });
+    await check('deleted booking folder in Drive: recreated once, upload succeeds', async () => {
+      // upload 404 → probe OTA ok, Seaview ok, Porto ok, booking folder 404 → recreate → upload
+      reply({ status: 404, body: {} }, { body: { id: 'f1', trashed: false } }, { body: { id: 'f2', trashed: false } }, { body: { id: 'f3', trashed: false } }, { status: 404, body: {} }, folder('f6'), file('d4'));
+      const r = await drive.uploadMarinaDocument(ORG, doc());
+      assert.equal(r.id, 'd4');
+      assert.deepEqual(folderCreates().map((c) => JSON.parse(c.opts.body).parents), [['f3']]);
+      const { settings } = await one('SELECT settings FROM org_integration WHERE clerk_org_id = $1', [ORG]);
+      assert.equal(settings.folders['OTA/Seaview/Porto/2026-11-02 Ann Smith (1a2b3c4d)'], 'f6');
+      assert.equal(settings.folders['OTA/Seaview/Porto/2026-12-01 Bob (99999999)'], 'f5');
+    });
+    await check('trashed parent folder: it and everything under it are recreated', async () => {
+      reply({ status: 404, body: {} }, { body: { id: 'f1', trashed: false } }, { body: { id: 'f2', trashed: true } }, folder('f7'), folder('f8'), folder('f9'), file('d5'));
+      await drive.uploadMarinaDocument(ORG, doc());
+      assert.deepEqual(folderCreates().map((c) => JSON.parse(c.opts.body).parents), [['f1'], ['f7'], ['f8']]);
+      const { settings } = await one('SELECT settings FROM org_integration WHERE clerk_org_id = $1', [ORG]);
+      assert.equal(settings.folders['OTA/Seaview/Porto/2026-12-01 Bob (99999999)'], undefined);
+    });
+    await check('upload 500 → 502 IntegrationError, Google Drive named', async () => {
+      reply({ status: 500, body: { error: { message: 'boom' } } });
+      await assert.rejects(drive.uploadMarinaDocument(ORG, doc()), (e) => e.status === 502 && e.message === 'Google Drive upload failed');
+    });
+    await check('folder names drop slashes and control chars', async () => {
+      assert.equal(drive.folderName('A/B\n'), 'AB');
+      assert.equal(drive.folderName('  x  '), 'x');
+      assert.equal(drive.folderName('y'.repeat(150)).length, 100);
+      assert.equal(drive.folderName('/'), 'Untitled');
+    });
   } catch (err) {
     failed++; console.log(`FAIL setup\n     ${err.stack}`);
   } finally {
