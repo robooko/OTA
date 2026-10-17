@@ -19,7 +19,19 @@ docs.store = {
   get: async (p) => (blobs.has(p) ? { stream: require('stream').Readable.toWeb(require('stream').Readable.from(blobs.get(p))), contentType: 'application/pdf' } : null),
   del: async (ps) => ps.forEach((p) => blobs.delete(p)),
 };
-docs.extractDocument = async () => {}; // no model calls in checks
+const extracted = [];
+docs.extractDocument = async (id, buf) => { extracted.push([id, buf]); }; // no model calls in checks
+// Marina documents go to the org's Google Drive; fake the Drive client.
+process.env.GOOGLE_CLIENT_ID ||= 'cid'; process.env.GOOGLE_CLIENT_SECRET ||= 'csecret'; process.env.GOOGLE_REDIRECT_URI ||= 'http://localhost/cb';
+process.env.INTEGRATIONS_ENCRYPTION_KEY ||= crypto.randomBytes(32).toString('base64');
+const drive = require('../src/lib/googleDrive');
+const driveCalls = [];
+let driveFail = null;
+drive.uploadMarinaDocument = async (orgId, d) => {
+  if (driveFail) throw driveFail;
+  driveCalls.push([orgId, d]);
+  return { id: `f${driveCalls.length}`, webViewLink: `https://drive.example/f${driveCalls.length}` };
+};
 
 const pool = require('../src/db');
 const app = require('../src/app');
@@ -30,7 +42,10 @@ const { bookingToken } = require('../src/lib/marinaToken');
   const base = `http://127.0.0.1:${server.address().port}`;
   const KEY = `check_${crypto.randomBytes(8).toString('hex')}`;
   const one = async (sql, p) => (await pool.query(sql, p)).rows[0];
-  const P = (await one(`INSERT INTO property (name, timezone, currency, api_key, api_key_enabled) VALUES ('Marina HTTP Check', 'Europe/Rome', 'eur', $1, true) RETURNING id`, [KEY])).id;
+  const ORG = `org_mhc_${crypto.randomBytes(6).toString('hex')}`;
+  await pool.query('INSERT INTO organization (clerk_org_id) VALUES ($1)', [ORG]);
+  await pool.query("INSERT INTO org_integration (clerk_org_id, provider, refresh_token) VALUES ($1, 'google_drive', 'x')", [ORG]);
+  const P = (await one(`INSERT INTO property (name, timezone, currency, api_key, api_key_enabled, clerk_org_id) VALUES ('Marina HTTP Check', 'Europe/Rome', 'eur', $1, true, $2) RETURNING id`, [KEY, ORG])).id;
   let failed = 0;
   const check = async (name, fn) => {
     try { await fn(); console.log(`ok   ${name}`); }
@@ -259,21 +274,125 @@ const { bookingToken } = require('../src/lib/marinaToken');
       const b = await pendingBooking();
       const d = (await upload(b, pdf)).body;
       assert.equal((await api('GET', `/api/marina/bookings/${b.booking.id}/documents`)).status, 401);
-      assert.equal((await api('GET', `/api/marina/documents/${d.id}/file`)).status, 401);
+      assert.equal((await api('GET', `/api/marina/documents/${d.id}/file`)).status, 404, 'file route removed: files live in Drive');
       assert.equal((await api('PUT', `/api/marina/documents/${d.id}`, { body: { status: 'verified' } })).status, 401);
     });
 
-    await check('retention deletes the file 90 days after cancellation, keeps the row', async () => {
-      const b = await pendingBooking();
-      const fresh = (await upload(b, pdf)).body;
-      await pool.query("UPDATE marina_booking SET status = 'cancelled', updated_at = now() - interval '91 days' WHERE id = $1", [b.booking.id]);
-      const d = await one('SELECT blob_pathname FROM marina_document WHERE id = $1', [fresh.id]);
-      assert.ok(blobs.has(d.blob_pathname));
-      await docs.retentionOnce();
-      const after = await one('SELECT file_deleted_at FROM marina_document WHERE id = $1', [fresh.id]);
-      assert.ok(after.file_deleted_at); assert.ok(!blobs.has(d.blob_pathname));
+    // ---- Per-org storage: marina documents in the org's Google Drive ----
+    let ipN = 0; const nextIp = () => `192.0.2.${200 + ipN++}`; // own IPs: the guest create limiter is per IP
+    const nBeforeStorage = n; n = 200; // own date range: don't shift later fixtures' rolling dates
+    const bearerCall = async (fn, req) => {
+      const res = { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+      let error;
+      await fn({ params: {}, query: {}, body: {}, property_id: P, auth_method: 'bearer', ...req }, res, (e) => { error = e; });
+      if (error) throw error;
+      return res;
+    };
+    const docCtrlT = require('../src/controllers/marinaDocuments');
+    const setDrive = (sql) => pool.query(`UPDATE org_integration SET ${sql} WHERE clerk_org_id = $1`, [ORG]);
+    const driveOff = () => setDrive("provider = 'google_drive_off'");
+    const driveOn = () => setDrive("provider = 'google_drive', reconnect_required = false");
+    const NO_UPLOADS = "This marina can't accept document uploads yet";
+    await check('upload goes to the org Drive: record only, path OTA/property/marina/booking, extraction gets the buffer', async () => {
+      const b = await pendingBooking(nextIp());
+      driveCalls.length = 0; extracted.length = 0;
+      const r = await upload(b, pdf);
+      assert.equal(r.status, 201);
+      const row = await one('SELECT drive_file_id, drive_web_link, blob_pathname FROM marina_document WHERE id = $1', [r.body.id]);
+      assert.deepEqual(row, { drive_file_id: 'f' + driveCalls.length, drive_web_link: 'https://drive.example/f' + driveCalls.length, blob_pathname: null });
+      const [orgId, d] = driveCalls[0];
+      assert.equal(orgId, ORG);
+      const bk = await one('SELECT arrival::text, contact_name FROM marina_booking WHERE id = $1', [b.booking.id]);
+      assert.deepEqual(d.path, ['OTA', 'Marina HTTP Check', 'Porto HTTP', `${bk.arrival} ${bk.contact_name} (${b.booking.id.slice(0, 8)})`]);
+      assert.equal(d.fileName, 'passport.pdf'); assert.equal(d.contentType, 'application/pdf'); assert.ok(d.buf.equals(pdf));
+      assert.equal(extracted.length, 1); assert.equal(extracted[0][0], r.body.id); assert.ok(extracted[0][1].equals(pdf));
+      assert.equal(blobs.size, 0, 'nothing in the OTA store');
+    });
+    await check('no Drive connected → 409, nothing stored, Drive not called', async () => {
+      const b = await pendingBooking(nextIp());
+      await driveOff();
+      try {
+        driveCalls.length = 0;
+        const r = await upload(b, pdf);
+        assert.equal(r.status, 409); assert.equal(r.body.error, NO_UPLOADS); assert.match(r.body.details, /not connected document storage/);
+        assert.equal(driveCalls.length, 0);
+        assert.equal((await one('SELECT count(*)::int AS n FROM marina_document WHERE booking_id = $1', [b.booking.id])).n, 0);
+      } finally { await driveOn(); }
+    });
+    await check('property without an org → same 409', async () => {
+      const b = await pendingBooking(nextIp());
+      await pool.query('UPDATE property SET clerk_org_id = NULL WHERE id = $1', [P]);
+      try {
+        const r = await upload(b, pdf);
+        assert.equal(r.status, 409); assert.equal(r.body.error, NO_UPLOADS);
+      } finally { await pool.query('UPDATE property SET clerk_org_id = $2 WHERE id = $1', [P, ORG]); }
+    });
+    await check('reconnect_required → 409 with reconnect details', async () => {
+      const b = await pendingBooking(nextIp());
+      await setDrive('reconnect_required = true');
+      try {
+        const r = await upload(b, pdf);
+        assert.equal(r.status, 409); assert.equal(r.body.error, NO_UPLOADS); assert.match(r.body.details, /reconnect/i);
+      } finally { await driveOn(); }
+    });
+    await check('Drive failure → 502, no row; revoked mid-upload → 409 reconnect', async () => {
+      const b = await pendingBooking(nextIp());
+      const { IntegrationError } = require('../src/lib/integrations');
+      driveFail = new IntegrationError(502, 'Google Drive upload failed', { details: 'boom' });
+      try {
+        const r = await upload(b, pdf);
+        assert.equal(r.status, 502); assert.equal(r.body.error, 'Google Drive upload failed');
+        driveFail = new IntegrationError(409, 'Google Drive access was revoked', { code: 'invalid_grant' });
+        const r2 = await upload(b, pdf);
+        assert.equal(r2.status, 409); assert.equal(r2.body.error, NO_UPLOADS); assert.match(r2.body.details, /reconnect/i);
+      } finally { driveFail = null; }
+      assert.equal((await one('SELECT count(*)::int AS n FROM marina_document WHERE booking_id = $1', [b.booking.id])).n, 0);
+    });
+    await check('server without Google config → 503 naming the env var', async () => {
+      const b = await pendingBooking(nextIp());
+      const saved = process.env.GOOGLE_CLIENT_ID; delete process.env.GOOGLE_CLIENT_ID;
+      try {
+        const r = await upload(b, pdf);
+        assert.equal(r.status, 503); assert.equal(r.body.error, 'Google Drive is not configured on this server'); assert.match(r.body.details, /GOOGLE_CLIENT_ID/);
+      } finally { process.env.GOOGLE_CLIENT_ID = saved; }
+    });
+    await check('staff list and verification carry drive_web_link; warning when uploads are off', async () => {
+      const b = await pendingBooking(nextIp());
+      const d = (await upload(b, pdf)).body;
+      const list = await bearerCall(docCtrlT.listBookingDocuments, { params: { id: b.booking.id } });
+      assert.equal(list.body[0].id, d.id);
+      assert.match(list.body[0].drive_web_link, /^https:\/\/drive\.example\//); assert.ok(!('file_deleted_at' in list.body[0]));
+      const req = await one(`INSERT INTO marina_doc_requirement (property_id, marina_id, type, name) VALUES ($1, $2, 'passport', 'Passport W') RETURNING id`, [P, m.id]);
+      try {
+        let v = await bearerCall(docCtrlT.getBookingVerification, { params: { id: b.booking.id } });
+        assert.deepEqual(v.body.document_uploads, { ok: true, reason: null }); assert.equal(v.body.warning, null);
+        assert.match(v.body.documents[0].drive_web_link, /drive\.example/);
+        await setDrive('reconnect_required = true');
+        v = await bearerCall(docCtrlT.getBookingVerification, { params: { id: b.booking.id } });
+        assert.deepEqual(v.body.document_uploads, { ok: false, reason: 'reconnect' });
+        assert.equal(v.body.warning, "Guests can't upload documents: reconnect Google Drive in Settings");
+        await driveOff();
+        v = await bearerCall(docCtrlT.getBookingVerification, { params: { id: b.booking.id } });
+        assert.equal(v.body.warning, "Guests can't upload documents: connect Google Drive in Settings");
+      } finally {
+        await driveOn();
+        await pool.query('DELETE FROM marina_doc_requirement WHERE id = $1', [req.id]);
+      }
+    });
+    await check('guest booking view and requirements-status report document_uploads', async () => {
+      const b = await pendingBooking(nextIp());
+      const view = () => api('GET', `${G}/bookings/${b.booking.id}`, { headers: { 'X-Booking-Token': b.booking_token } });
+      const rs = () => api('GET', `${G}/requirements-status`);
+      assert.equal((await view()).body.document_uploads, true);
+      assert.equal((await rs()).body.document_uploads, true);
+      await driveOff();
+      try {
+        assert.equal((await view()).body.document_uploads, false);
+        assert.equal((await rs()).body.document_uploads, false);
+      } finally { await driveOn(); }
     });
 
+    n = nBeforeStorage;
     // ---- Task 11 ----
     await check('auto-confirm: off by default; on with no requirements confirms at pending', async () => {
       const b = await pendingBooking();
@@ -286,7 +405,7 @@ const { bookingToken } = require('../src/lib/marinaToken');
       await one(`INSERT INTO marina_contract_template (property_id, marina_id, name, body_markdown) VALUES ($1, $2, 'T', 'Hi {{sailor_name}}') RETURNING id`, [P, m.id]);
       const b = await pendingBooking();
       assert.equal(await life.maybeAutoConfirm(b.booking.id), null);
-      const d = await one(`INSERT INTO marina_document (property_id, marina_id, booking_id, requirement_id, blob_pathname, content_type, size_bytes, status)
+      const d = await one(`INSERT INTO marina_document (property_id, marina_id, booking_id, requirement_id, drive_file_id, content_type, size_bytes, status)
         VALUES ($1, $2, $3, $4, 'x', 'application/pdf', 1, 'verified') RETURNING id`, [P, m.id, b.booking.id, req.id]);
       assert.equal(await life.maybeAutoConfirm(b.booking.id), null, 'contract still missing');
       const r = await api('POST', `${G}/bookings/${b.booking.id}/contract`, { headers: { 'X-Booking-Token': b.booking_token } });
@@ -394,12 +513,11 @@ const { bookingToken } = require('../src/lib/marinaToken');
       const b = await pendingBooking();
       const d = (await upload(b, pdf)).body;
       await pool.query("UPDATE marina_document SET extracted_data = '{\"number\":\"X9\"}' WHERE id = $1", [d.id]);
-      const { blob_pathname } = await one('SELECT blob_pathname FROM marina_document WHERE id = $1', [d.id]);
       const r = await view(b);
       assert.equal(r.status, 200);
       assert.deepEqual(r.body.documents, [{ id: d.id, requirement_id: null, file_name: 'passport.pdf', status: 'pending', submitted_at: d.submitted_at }]);
       const json = JSON.stringify(r.body);
-      assert.ok(!json.includes('X9')); assert.ok(!json.includes(blob_pathname));
+      assert.ok(!json.includes('X9')); assert.ok(!json.includes('drive_')); assert.ok(!json.includes('drive.example'));
     });
     await check('R20: booking.expired marks a lapsed hold, not a guest cancel', async () => {
       const a = (await api('POST', `${G}/bookings`, { body: guestBody(), headers: ipR20 })).body;
@@ -614,6 +732,7 @@ const { bookingToken } = require('../src/lib/marinaToken');
     await pool.query('DELETE FROM property_token_ledger WHERE property_id = $1', [P]);
     await pool.query('DELETE FROM marina WHERE property_id = $1', [P]);
     await pool.query('DELETE FROM property WHERE id = $1', [P]);
+    await pool.query('DELETE FROM organization WHERE clerk_org_id = $1', [ORG]);
     await pool.end();
   }
   console.log(failed ? `\n${failed} FAILED` : '\nall passed');

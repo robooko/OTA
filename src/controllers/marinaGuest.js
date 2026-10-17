@@ -13,6 +13,7 @@ const marinaStripe = require('../lib/marinaStripe');
 const { createInquiryCore } = require('./eventInquiries');
 const { toCents } = require('../lib/folio');
 const { createSubscribeTokenRequest } = require('../lib/ably');
+const storage = require('../lib/marinaStorage');
 
 // Guest routes: /api/marina/guest/:marina/... -- the only prefix a site's
 // forwarder passes through. A bearer (the dashboard's own forwarder) gets
@@ -225,7 +226,7 @@ async function requirementsStatus(req, res, next) {
     const { arrival, departure } = req.query;
     if (!req.sailor) {
       const { rows } = await pool.query("SELECT id, type, name, mandatory FROM marina_doc_requirement WHERE marina_id = $1 AND status = 'active' ORDER BY sort_order, name", [req.marina.id]);
-      return res.json({ sign_in_required: req.marina.sailor_documents && rows.length > 0, requirements: rows.map((r) => ({ ...r, met: false })) });
+      return res.json({ sign_in_required: req.marina.sailor_documents && rows.length > 0, requirements: rows.map((r) => ({ ...r, met: false })), document_uploads: (await storage.status(req.marina.property_id)).ok });
     }
     if (!isValidDate(arrival) || (departure !== undefined && !isValidDate(departure)) || (departure && departure <= arrival)) {
       return res.status(400).json({ error: 'arrival and departure must be YYYY-MM-DD with departure after arrival' });
@@ -234,6 +235,7 @@ async function requirementsStatus(req, res, next) {
     res.json({
       sign_in_required: req.marina.sailor_documents && statuses.length > 0,
       requirements: statuses.map(({ requirement, document }) => ({ ...requirement, met: !!document, document })),
+      document_uploads: (await storage.status(req.marina.property_id)).ok,
     });
   } catch (err) { next(err); }
 }
@@ -264,10 +266,10 @@ async function getGuestBooking(req, res, next) {
       const t = kc.pickTemplate(await activeTemplates(b.marina_id), nightsBetween(b.arrival, b.departure));
       if (t) contract = { template_id: t.id, rendered_body: kc.renderContract(t.body_markdown, kc.contractContext(b, await q.propertyToday(pool, b.property_id))), agreed_at: null };
     }
-    // Metadata only: extracted data and the private blob path never reach the key rail.
+    // Metadata only: extracted data and the Drive file never reach the key rail.
     const { rows: documents } = await pool.query(
       'SELECT id, requirement_id, file_name, status, submitted_at FROM marina_document WHERE booking_id = $1 ORDER BY submitted_at', [b.id]);
-    res.json({ booking: guestView(b), payment, contract, documents });
+    res.json({ booking: guestView(b), payment, contract, documents, document_uploads: (await storage.status(b.property_id)).ok });
   } catch (err) { next(err); }
 }
 

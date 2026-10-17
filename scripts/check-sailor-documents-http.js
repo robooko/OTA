@@ -151,7 +151,7 @@ const app = require('../src/app');
 
     await check('status without requirements says no sign-in', async () => {
       const r = await status(FREE, qs0);
-      assert.equal(r.status, 200); assert.deepEqual(r.body, { sign_in_required: false, requirements: [] });
+      assert.equal(r.status, 200); assert.deepEqual(r.body, { sign_in_required: false, requirements: [], document_uploads: false }); // no org Drive in this fixture
     });
     await check('status with requirements and no token says sign-in required', async () => {
       const r = await status(REQ, qs0);

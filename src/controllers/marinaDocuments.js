@@ -1,4 +1,3 @@
-const { Readable } = require('stream');
 const pool = require('../db');
 const { isValidUuid, isValidDate } = require('../middleware/validate');
 const docs = require('../lib/marinaDocuments');
@@ -8,9 +7,14 @@ const kc = require('../lib/marinaContracts');
 const { nightsBetween } = require('../lib/marinaPricing');
 const sd = require('../lib/sailorDocuments');
 const { streamVersion } = require('./sailorDocuments');
+const storage = require('../lib/marinaStorage');
+const drive = require('../lib/googleDrive');
+const { IntegrationError } = require('../lib/integrations');
 
 // Guest upload (raw body, booking token). Only while pending/confirmed, so
-// a card-free hold can't trigger paid extraction.
+// a card-free hold can't trigger paid extraction. The file goes to the
+// org's own Google Drive (marinaStorage) and nowhere else: OTA keeps the
+// record and the Drive pointer only.
 async function uploadDocument(req, res, next) {
   try {
     const b = req.booking;
@@ -29,15 +33,28 @@ async function uploadDocument(req, res, next) {
     const { rows: [{ n }] } = await pool.query('SELECT count(*)::int AS n FROM marina_document WHERE booking_id = $1', [b.id]);
     if (n >= docs.MAX_PER_BOOKING) return res.status(409).json({ error: `At most ${docs.MAX_PER_BOOKING} documents per booking` });
 
-    const pathname = docs.docPath(b.property_id, b.id, type);
-    await docs.store.put(pathname, buf, type);
+    const st = await storage.status(b.property_id);
+    if (!st.ok) { const r = storage.refusal(st); return res.status(r.status).json(r.json); }
     const fileName = String(req.get('X-File-Name') || '').replace(/[^\w.\- ]/g, '').slice(0, 255) || null;
+    const { rows: [p] } = await pool.query('SELECT name FROM property WHERE id = $1', [b.property_id]);
+    let file;
+    try {
+      file = await drive.uploadMarinaDocument(st.orgId, {
+        path: ['OTA', p.name, req.marina.name, `${b.arrival} ${b.contact_name} (${b.id.slice(0, 8)})`],
+        fileName: fileName || `document.${docs.EXT[type]}`, contentType: type, buf,
+      });
+    } catch (err) {
+      if (!(err instanceof IntegrationError)) throw err;
+      // Revoked between the status check and the upload: same refusal.
+      if (err.status === 409) { const r = storage.refusal({ reason: 'reconnect' }); return res.status(r.status).json(r.json); }
+      return res.status(err.status).json({ error: err.message, ...(err.details && { details: err.details }) });
+    }
     const { rows: [d] } = await pool.query(
-      `INSERT INTO marina_document (property_id, marina_id, booking_id, requirement_id, type, blob_pathname, file_name, content_type, size_bytes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO marina_document (property_id, marina_id, booking_id, requirement_id, type, drive_file_id, drive_web_link, file_name, content_type, size_bytes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING id, requirement_id, type, file_name, content_type, size_bytes, status, submitted_at`,
-      [b.property_id, b.marina_id, b.id, requirement?.id ?? null, requirement?.type ?? null, pathname, fileName, type, buf.length]);
-    docs.extractDocument(d.id);
+      [b.property_id, b.marina_id, b.id, requirement?.id ?? null, requirement?.type ?? null, file.id, file.webViewLink, fileName, type, buf.length]);
+    docs.extractDocument(d.id, buf);
     // Staff tables and an open detail dialog update live (doc_count).
     await life.republish(b.id);
     res.status(201).json(d);
@@ -49,7 +66,7 @@ async function listBookingDocuments(req, res, next) {
     if (!isValidUuid(req.params.id)) return res.status(404).json({ error: 'Booking not found' });
     const { rows } = await pool.query(
       `SELECT d.id, d.requirement_id, r.name AS requirement_name, d.type, d.file_name, d.content_type, d.size_bytes, d.extracted_data,
-              d.expiry_date, d.status, d.notes, d.submitted_at, d.verified_at, d.verified_by, d.file_deleted_at
+              d.expiry_date, d.status, d.notes, d.submitted_at, d.verified_at, d.verified_by, d.drive_web_link
        FROM marina_document d LEFT JOIN marina_doc_requirement r ON r.id = d.requirement_id
        WHERE d.booking_id = $1 AND d.property_id = $2 ORDER BY d.submitted_at`, [req.params.id, req.property_id]);
     res.json(rows);
@@ -69,7 +86,7 @@ async function getBookingVerification(req, res, next) {
       pool.query("SELECT id, type, name, mandatory FROM marina_doc_requirement WHERE marina_id = $1 AND status = 'active' ORDER BY sort_order, name", [b.marina_id]),
       pool.query(
         `SELECT d.id, d.requirement_id, r.name AS requirement_name, d.type, d.file_name, d.content_type, d.size_bytes, d.extracted_data,
-                d.expiry_date, d.status, d.notes, d.submitted_at, d.verified_at, d.file_deleted_at
+                d.expiry_date, d.status, d.notes, d.submitted_at, d.verified_at, d.drive_web_link
          FROM marina_document d LEFT JOIN marina_doc_requirement r ON r.id = d.requirement_id
          WHERE d.booking_id = $1 ORDER BY d.submitted_at`, [b.id]),
       pool.query(
@@ -84,7 +101,11 @@ async function getBookingVerification(req, res, next) {
       const t = kc.pickTemplate(templates.rows, nightsBetween(b.arrival, b.departure));
       if (t) contract = { name: t.name, signed: false, rendered_body: kc.renderContract(t.body_markdown, kc.contractContext(b, await q.propertyToday(pool, b.property_id))) };
     }
-    res.json({ requirements: reqs.rows, documents: documents.rows, contract, sailor: await sailorBlock(b) });
+    // No fallback store: say so when guests can't upload and something is still owed.
+    const st = await storage.status(b.property_id);
+    const warning = !st.ok && b.docs_required > b.docs_required_verified ? storage.staffWarning(st) : null;
+    res.json({ requirements: reqs.rows, documents: documents.rows, contract, sailor: await sailorBlock(b),
+      document_uploads: { ok: st.ok, reason: st.ok ? null : st.reason }, warning });
   } catch (err) { next(err); }
 }
 
@@ -151,18 +172,6 @@ async function decideSailorVersion(req, res, next) {
   } catch (err) { next(err); }
 }
 
-async function streamDocumentFile(req, res, next) {
-  try {
-    if (!isValidUuid(req.params.id)) return res.status(404).json({ error: 'Document not found' });
-    const { rows: [d] } = await pool.query('SELECT blob_pathname, content_type, file_deleted_at FROM marina_document WHERE id = $1 AND property_id = $2', [req.params.id, req.property_id]);
-    if (!d) return res.status(404).json({ error: 'Document not found' });
-    if (d.file_deleted_at) return res.status(410).json({ error: 'File deleted under the retention policy' });
-    const file = await docs.store.get(d.blob_pathname);
-    if (!file) return res.status(404).json({ error: 'File missing' });
-    res.set({ 'Content-Type': d.content_type, 'Content-Disposition': 'inline', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
-    Readable.fromWeb(file.stream).on('error', next).pipe(res);
-  } catch (err) { next(err); }
-}
 
 async function updateDocument(req, res, next) {
   try {
@@ -185,4 +194,4 @@ async function updateDocument(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { uploadDocument, listBookingDocuments, getBookingVerification, streamDocumentFile, updateDocument, streamSailorVersion, decideSailorVersion };
+module.exports = { uploadDocument, listBookingDocuments, getBookingVerification, updateDocument, streamSailorVersion, decideSailorVersion };

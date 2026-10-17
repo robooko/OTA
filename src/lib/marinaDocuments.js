@@ -2,9 +2,10 @@ const crypto = require('crypto');
 const pool = require('../db');
 const { TYPES } = require('./sailorDocTypes');
 
-// Guest documents (passports, insurance, ...) in a PRIVATE Vercel Blob
-// store, only ever streamed through the bearer-only file route. Marina
-// images go to a separate PUBLIC store (access is fixed per store).
+// Shared sailor documents in a PRIVATE Vercel Blob store, only ever
+// streamed through bearer-only routes. Marina per-booking documents are NOT
+// stored here: they go to the org's own Google Drive (marinaStorage +
+// googleDrive). Marina images go to a separate PUBLIC store.
 
 const MAX_BYTES = 4 * 1024 * 1024;
 const MAX_PER_BOOKING = 10;
@@ -31,7 +32,6 @@ async function putPublic(pathname, buf, contentType) {
   return r.url;
 }
 
-const docPath = (propertyId, bookingId, contentType) => `marina-docs/${propertyId}/${bookingId}/${crypto.randomUUID()}.${EXT[contentType]}`;
 // Sailor files: hashed email, so the path never carries the address.
 const sailorDocPath = (email, contentType) => `sailor-docs/${crypto.createHash('sha256').update(email).digest('hex')}/${crypto.randomUUID()}.${EXT[contentType]}`;
 
@@ -56,14 +56,16 @@ async function extractFields(buf, contentType, name, fields) {
 
 const readFile = async (pathname) => Buffer.from(await new Response((await module.exports.store.get(pathname)).stream).arrayBuffer());
 
-async function extractDocument(docId) {
+// Marina documents: read once, from the upload's in-memory buffer -- OTA
+// never reads the file back from Drive.
+async function extractDocument(docId, buf) {
   try {
     if (!process.env.ANTHROPIC_API_KEY) return;
     const { rows: [d] } = await pool.query(
       `SELECT d.*, r.fields, r.name AS requirement_name FROM marina_document d
        LEFT JOIN marina_doc_requirement r ON r.id = d.requirement_id WHERE d.id = $1`, [docId]);
     if (!d?.fields?.length) return;
-    const data = await extractFields(await readFile(d.blob_pathname), d.content_type, d.requirement_name, d.fields);
+    const data = await extractFields(buf, d.content_type, d.requirement_name, d.fields);
     const expiry = /^\d{4}-\d{2}-\d{2}$/.test(data.expiry_date) ? data.expiry_date : null;
     await pool.query('UPDATE marina_document SET extracted_data = $1, expiry_date = $2 WHERE id = $3', [data, expiry, docId]);
   } catch (err) {
@@ -89,38 +91,4 @@ async function extractSailorVersion(versionId) {
   }
 }
 
-// Daily: delete files 90 days after departure / cancellation (open-ended:
-// after it has been ended), keep the rows; purge the import's archive.
-async function retentionOnce() {
-  const { rows } = await pool.query(
-    `SELECT d.id, d.blob_pathname FROM marina_document d
-     JOIN marina_booking mb ON mb.id = d.booking_id
-     JOIN property p ON p.id = mb.property_id
-     WHERE d.file_deleted_at IS NULL AND (
-       (mb.status IN ('cancelled', 'declined') AND mb.updated_at < now() - interval '90 days')
-       OR (mb.departure IS NOT NULL AND mb.departure < (now() AT TIME ZONE p.timezone)::date - 90))
-     LIMIT 500`);
-  if (rows.length) {
-    await module.exports.store.del(rows.map((r) => r.blob_pathname));
-    await pool.query('UPDATE marina_document SET file_deleted_at = now() WHERE id = ANY($1)', [rows.map((r) => r.id)]);
-  }
-  let archived = 0;
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
-    // ponytail: one page (1000 objects) per daily pass; the archive starts
-    // at Sidon's 32 orphaned uploads, so later passes catch any remainder.
-    const { blobs } = await blob().list({ prefix: 'marina-docs-archive/', token: process.env.BLOB_READ_WRITE_TOKEN });
-    const old = blobs.filter((b) => new Date(b.uploadedAt) < new Date(Date.now() - 90 * 86400000)).map((b) => b.pathname);
-    if (old.length) { await module.exports.store.del(old); archived = old.length; }
-  }
-  return { files: rows.length, archived };
-}
-
-function startMarinaRetentionJob() {
-  const run = () => retentionOnce()
-    .then(({ files, archived }) => { if (files || archived) console.log(`Marina retention: ${files} files, ${archived} archive objects deleted`); })
-    .catch((err) => console.error('Marina retention failed:', err.message));
-  setTimeout(run, 5 * 60 * 1000).unref();
-  setInterval(run, 24 * 60 * 60 * 1000).unref();
-}
-
-module.exports = { MAX_BYTES, MAX_PER_BOOKING, sniffType, store, putPublic, docPath, sailorDocPath, extractDocument, extractSailorVersion, retentionOnce, startMarinaRetentionJob };
+module.exports = { MAX_BYTES, MAX_PER_BOOKING, EXT, sniffType, store, putPublic, sailorDocPath, extractDocument, extractSailorVersion };

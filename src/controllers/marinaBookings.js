@@ -71,7 +71,7 @@ async function getBooking(req, res, next) {
       // expiry_date is read off the document (passport, insurance) -- bearer
       // only, like the documents routes: guest sites hold the API key.
       pool.query(`SELECT id, requirement_id, type, file_name, content_type, size_bytes, status,
-                         ${req.auth_method === 'bearer' ? 'expiry_date,' : ''} submitted_at, verified_at, file_deleted_at
+                         ${req.auth_method === 'bearer' ? 'expiry_date, drive_web_link,' : ''} submitted_at, verified_at
                   FROM marina_document WHERE booking_id = $1 ORDER BY submitted_at`, [b.id]),
       // rendered_body: the contract text exactly as the guest agreed it.
       pool.query('SELECT template_id, signer_email, agreed_at, rendered_body FROM marina_contract_signature WHERE booking_id = $1', [b.id]),

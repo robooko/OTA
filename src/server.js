@@ -9,7 +9,6 @@ const { startAgenticOrderJob } = require('./lib/agenticOrders');
 const { startReminderJob } = require('./lib/reminders');
 const { startHoldExpiryJob } = require('./lib/spaBookingGuard');
 const { startMarinaHoldExpiryJob } = require('./lib/marinaLifecycle');
-const { startMarinaRetentionJob } = require('./lib/marinaDocuments');
 
 const PORT = process.env.PORT || 3000;
 
@@ -24,5 +23,4 @@ app.listen(PORT, '0.0.0.0', () => {
   startReminderJob();
   startHoldExpiryJob();
   startMarinaHoldExpiryJob();
-  startMarinaRetentionJob();
 });
