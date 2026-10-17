@@ -160,8 +160,8 @@ In this order, each ⚠:
    |---|---|
    | PB | `<origin>/booking?booking={id}&token={token}` |
    | TT | `<origin>/booking?booking={id}&token={token}` |
-   | SEA (Fox) | `<origin>/booking?marina=fox-mooring&booking={id}&token={token}` |
-   | SEA (Pevero) | `<origin>/booking?marina=pevero-mooring&booking={id}&token={token}` |
+   | SEA (Fox) | `<origin>/booking/fox-mooring?booking={id}&token={token}` (SEA master 7c05149 uses path pages) |
+   | SEA (Pevero) | `<origin>/booking/pevero-mooring?booking={id}&token={token}` |
    | MP | `<origin>/booking?booking={id}&token={token}` |
    | PO | set when it launches |
 
