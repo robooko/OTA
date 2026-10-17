@@ -206,6 +206,10 @@ const toolUse = (name, input = {}) => ({ type: 'tool_use', id: `tu_${Math.random
         assert.equal(result.booked, true);
         const appt = await one(`SELECT contact_name, contact_email, contact_phone, status, start_time::text FROM spa_appointment WHERE property_id = $1`, [P]);
         assert.deepEqual(appt, { contact_name: 'Sam Jones', contact_email: 'sam@example.org', contact_phone: CALLER, status: 'pending', start_time: '10:00:00' });
+        const enquiry = await one(`SELECT name, email, event_type, event_time::text, source, message FROM event_inquiry WHERE property_id = $1 AND event_type = 'Haircut'`, [P]);
+        assert.equal(enquiry.source, 'phone');
+        assert.equal(enquiry.event_time, '10:00:00');
+        assert.match(enquiry.message, /^Booked Haircut on .* at 10:00 by phone\.[\s\S]*Caller: Ten please/);
       });
       await check('a taken time is refused in words', async () => {
         sent.length = 0;

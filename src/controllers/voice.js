@@ -302,6 +302,16 @@ async function handleVoiceWebhook(req, res, next) {
             result = await bookAppointment(property, caller, call.input ?? {});
             if (result.booked) {
               const b = call.input;
+              // Every phone booking also shows in the enquiries queue with
+              // its transcript, so staff see the call, not just the slot.
+              inquiryId = await saveEnquiry(property, caller, {
+                name: b.name,
+                email: b.email,
+                summary: `Booked ${b.treatment_name} on ${b.date} at ${b.time} by phone.`,
+                event_date: b.date,
+                event_time: String(b.time).slice(0, 5),
+                event_type: b.treatment_name,
+              }, inquiryId, turns);
               done.push(`[Done: booked ${b.treatment_name} on ${b.date} at ${b.time} for ${b.name}, ${b.email}; held ${HOLD_MINUTES} minutes until they click the email link]`);
             }
           } else if (call.name === 'transfer_call' && property.voice_transfer_number) {
