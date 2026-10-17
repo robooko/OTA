@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { normalEmail } = require('../lib/sailorDocuments');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const q = require('../lib/marinaQueries');
 const life = require('../lib/marinaLifecycle');
@@ -139,6 +140,9 @@ async function updateBooking(req, res, next) {
       const bad = fieldError(fields);
       if (bad) return res.status(400).json({ error: bad });
       if ('contact_email' in fields) fields.contact_email_key = fields.contact_email ? emailKey(fields.contact_email) : null;
+      // A changed email is no longer the one the sailor proved: it must not
+      // open another sailor's shared documents.
+      if ('contact_email' in fields && normalEmail(fields.contact_email) !== normalEmail(b.contact_email)) fields.email_verified = false;
       r = await life.withLockedBooking(b.id, async (client) => ({ ok: true, booking: await life.setRow(client, b.id, fields) }));
     } else return res.status(400).json({ error: 'action must be confirm, decline, cancel or end' });
     if (!r.ok) return res.status(r.status).json({ error: r.error, ...(r.booking ? { booking: r.booking } : {}) });

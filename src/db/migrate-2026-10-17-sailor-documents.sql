@@ -48,3 +48,6 @@ ALTER TABLE marina ADD COLUMN IF NOT EXISTS sailor_documents BOOLEAN NOT NULL DE
 
 -- Import provenance ('sidon:<id>' from sidon-ai's wallet): re-runs skip it.
 ALTER TABLE sailor_document ADD COLUMN IF NOT EXISTS source_ref VARCHAR(50) UNIQUE;
+
+-- The document expiry each verdict was given against: a later change voids it.
+ALTER TABLE sailor_document_approval ADD COLUMN IF NOT EXISTS expiry_date DATE;

@@ -42,4 +42,19 @@ async function canStaffSee(db, { marinaIds, email }) {
   return rowCount > 0;
 }
 
-module.exports = { requirementStatus, missingMandatory, canStaffSee, normalEmail };
+// SQL (needs aliases mb = marina_booking, r = marina_doc_requirement): r is
+// met for mb through shared documents -- the booking's email is verified,
+// and this marina's verdict on the NEWEST version of the sailor's current
+// document (same pick as requirementStatus) is 'approved' at the document's
+// present expiry. Used by auto-confirm and the staff readiness counters.
+const SAILOR_APPROVED_SQL = `(mb.email_verified AND EXISTS (
+  SELECT 1 FROM (SELECT d.id, d.expiry_date FROM sailor_document d
+                 WHERE d.email = lower(trim(mb.contact_email)) AND d.type = r.type AND d.deleted_at IS NULL
+                   AND ((d.expiry_date IS NULL AND d.type NOT IN (${EXPIRY_REQUIRED.map((t) => `'${t}'`).join(', ')}))
+                        OR d.expiry_date >= coalesce(mb.departure, mb.arrival))
+                 ORDER BY d.created_at DESC LIMIT 1) cur
+  JOIN LATERAL (SELECT v.id FROM sailor_document_version v WHERE v.document_id = cur.id ORDER BY v.uploaded_at DESC LIMIT 1) nv ON true
+  JOIN sailor_document_approval a ON a.version_id = nv.id AND a.marina_id = mb.marina_id AND a.status = 'approved'
+                                 AND a.expiry_date IS NOT DISTINCT FROM cur.expiry_date))`;
+
+module.exports = { requirementStatus, missingMandatory, canStaffSee, normalEmail, SAILOR_APPROVED_SQL };

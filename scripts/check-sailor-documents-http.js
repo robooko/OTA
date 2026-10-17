@@ -211,10 +211,6 @@ const app = require('../src/app');
       const r = await guestApi('POST', `/api/marina/guest/${LEGACY.slug}/bookings`, { body: bookingBody() });
       assert.equal(r.status, 201, JSON.stringify(r.body));
     });
-    await check('invalid sailor token on create → 401 even without requirements', async () => {
-      const r = await guestApi('POST', `/api/marina/guest/${FREE.slug}/bookings`, { body: bookingBody(), headers: { 'X-Sailor-Token': 'junk' } });
-      assert.equal(r.status, 401);
-    });
 
     // ---- Task 5: staff panel, file, approvals, auto-confirm ----
     const docCtrl = require('../src/controllers/marinaDocuments');
@@ -326,6 +322,63 @@ const app = require('../src/app');
       const ok = await guestApi('POST', `/api/marina/marinas/${FREE.id}/doc-requirements`, { body: { type: 'passport', name: 'Passport', status: 'inactive' } });
       assert.equal(ok.status, 201);
       assert.equal((await guestApi('PUT', `/api/marina/marinas/${FREE.id}/doc-requirements/${ok.body.id}`, { body: { type: 'visa' } })).status, 400);
+    });
+
+    // ---- Final review fixes ----
+    await check('C1: editing a verified booking email clears email_verified; the new email sees nothing', async () => {
+      const id = await book(REQ, DAN);
+      const vic = mail('vic');
+      const v = (await upload(vic, 'type=passport&expiry_date=2030-01-01')).body;
+      const r = await guestApi('PUT', `/api/marina/bookings/${id}`, { body: { contact_email: vic } });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.equal((await one('SELECT email_verified FROM marina_booking WHERE id = $1', [id])).email_verified, false);
+      assert.equal((await panel(id)).body.sailor, null);
+      assert.equal((await call(docCtrl.streamSailorVersion, { params: { id: v.versions[0].id }, property_id: P })).statusCode, 404);
+    });
+    await check('C1: same email in another case keeps email_verified', async () => {
+      const id = await book(REQ, DAN);
+      await guestApi('PUT', `/api/marina/bookings/${id}`, { body: { contact_email: DAN.toUpperCase() } });
+      assert.equal((await one('SELECT email_verified FROM marina_booking WHERE id = $1', [id])).email_verified, true);
+    });
+    await check('I1: a rejection of the newest version beats an approval of an older one', async () => {
+      const ivy = mail('ivy');
+      const d = (await upload(ivy, 'type=insurance&expiry_date=2030-01-01')).body;
+      const id = await book(AUTO, ivy, as(ivy), { live: true }); // hold: auto-confirm can't fire yet
+      await decide(id, d.versions[0].id, { status: 'approved' });
+      const v2 = (await upload(ivy, `document_id=${d.id}`)).body.versions[0];
+      await decide(id, v2.id, { status: 'rejected' });
+      await pool.query("UPDATE marina_booking SET status = 'pending' WHERE id = $1", [id]);
+      assert.equal(await life.maybeAutoConfirm(id), null);
+      await decide(id, v2.id, { status: 'approved' });
+      await waitStatus(id, 'confirmed');
+    });
+    await check('I2: the sailor changing the expiry after approval voids that approval', async () => {
+      const jay = mail('jay');
+      const d = (await upload(jay, 'type=insurance&expiry_date=2030-01-01')).body;
+      const id = await book(AUTO, jay, as(jay), { live: true });
+      await decide(id, d.versions[0].id, { status: 'approved' });
+      assert.equal((await api('PUT', `${S}/${d.id}`, { headers: as(jay), body: { expiry_date: '2031-01-01' } })).status, 200);
+      await pool.query("UPDATE marina_booking SET status = 'pending' WHERE id = $1", [id]);
+      assert.equal(await life.maybeAutoConfirm(id), null);
+    });
+    await check('I3: staff readiness counts this marina’s approval of the newest version', async () => {
+      const q = require('../src/lib/marinaQueries');
+      const kim = mail('kim');
+      const d = (await upload(kim, 'type=insurance&expiry_date=2030-01-01')).body;
+      const id = await book(REQ, kim, as(kim), { live: true });
+      assert.equal((await q.joinedBooking(pool, id)).docs_required_verified, 0);
+      await decide(id, d.versions[0].id, { status: 'approved' });
+      const b = await q.joinedBooking(pool, id);
+      assert.equal(b.docs_required, 1); assert.equal(b.docs_required_verified, 1);
+    });
+    await check('I4: an invalid sailor token where sailor documents are off books anonymously', async () => {
+      const r = await guestApi('POST', `/api/marina/guest/${FREE.slug}/bookings`, { body: bookingBody({ contact_email: 'anon@example.com' }), headers: { 'X-Sailor-Token': 'junk', 'X-Client-Ip': '203.0.113.250' } });
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      assert.equal((await one('SELECT email_verified FROM marina_booking WHERE id = $1', [r.body.booking.id])).email_verified, false);
+    });
+    await check('I4: an invalid sailor token where sailor documents are on → 401', async () => {
+      const r = await guestApi('POST', `/api/marina/guest/${REQ.slug}/bookings`, { body: bookingBody(), headers: { 'X-Sailor-Token': 'junk', 'X-Client-Ip': '203.0.113.251' } });
+      assert.equal(r.status, 401);
     });
 
     // (later tasks append here)

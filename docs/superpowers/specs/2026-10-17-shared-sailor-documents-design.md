@@ -90,6 +90,13 @@ that type, the UI asks: "new version of this one, or a different/renewed
 document?" and sends `document_id` for a version. No reliance on extraction
 to decide. Delete removes a document and its files.
 
+**Switch-on (added during build).** Enforcement is per marina:
+`marina.sailor_documents` (default off). Off = today's per-booking flow,
+untouched (a sailor token, if sent, still records a verified email). Each
+marina is switched on once its booking site sends `X-Sailor-Token`. An
+invalid/expired token is treated as signed out, never as an error, so a stale
+session can't block a marina that hasn't switched.
+
 **Booking site (happy path).**
 1. Guest picks berth and dates.
 2. If the marina has active requirements, the guest signs in with Clerk.
@@ -109,7 +116,12 @@ for each, the sailor's current document (newest version), its approval
 count from other marinas, and this marina's own verdict on each version.
 Approve / reject records against the version shown. *My call:* if a sailor
 has several current documents of one type, the panel and auto-confirm use the
-newest unexpired one. Auto-confirm counts a
+newest unexpired one. *Tightened in review:* a requirement counts as approved
+(auto-confirm and the staff readiness counters) only when this marina's verdict
+on the document's **newest** version is approved, at the expiry the document
+still has — a newer upload or an expiry change needs a fresh check. Editing a
+booking's email clears its verified flag, so it can't open another sailor's
+documents. Auto-confirm counts a
 requirement as met when this marina has approved any version of the
 matching current document.
 

@@ -1,5 +1,6 @@
 // SQL shared by the guest, staff and lifecycle code. Every function takes a
 // pg client (or the pool) so callers can run it inside their transaction.
+const { SAILOR_APPROVED_SQL } = require('./sailorDocuments');
 
 async function propertyToday(client, propertyId) {
   const { rows: [r] } = await client.query(
@@ -40,12 +41,15 @@ async function activeTiers(client, marinaId) {
 }
 
 // Ready = the booking's verified mandatory requirements against the marina's
-// mandatory total -- the same rule maybeAutoConfirm applies. Needs `mb`.
+// mandatory total -- the same rule maybeAutoConfirm applies: a verified
+// per-booking document, or this marina's approval of the sailor's shared
+// one (SAILOR_APPROVED_SQL). Needs `mb`.
 const READY_COLS = `(SELECT count(*)::int FROM marina_doc_requirement r
      WHERE r.marina_id = mb.marina_id AND r.status = 'active' AND r.mandatory) AS docs_required,
   (SELECT count(*)::int FROM marina_doc_requirement r
      WHERE r.marina_id = mb.marina_id AND r.status = 'active' AND r.mandatory
-       AND EXISTS (SELECT 1 FROM marina_document d WHERE d.booking_id = mb.id AND d.requirement_id = r.id AND d.status = 'verified')) AS docs_required_verified`;
+       AND (EXISTS (SELECT 1 FROM marina_document d WHERE d.booking_id = mb.id AND d.requirement_id = r.id AND d.status = 'verified')
+            OR ${SAILOR_APPROVED_SQL})) AS docs_required_verified`;
 
 async function joinedBooking(client, id) {
   const { rows: [r] } = await client.query(

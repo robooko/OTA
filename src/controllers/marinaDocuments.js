@@ -136,13 +136,15 @@ async function decideSailorVersion(req, res, next) {
       `SELECT v.id, v.document_id FROM sailor_document_version v JOIN sailor_document d ON d.id = v.document_id
        WHERE v.id = $1 AND d.deleted_at IS NULL AND d.email = $2`, [versionId, sd.normalEmail(b.contact_email)]);
     if (!v) return res.status(404).json({ error: 'Document not found' });
-    const { rows: [verdict] } = await pool.query(
-      `INSERT INTO sailor_document_approval (version_id, marina_id, property_id, status, notes, staff_user)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (version_id, marina_id) DO UPDATE SET status = EXCLUDED.status, notes = EXCLUDED.notes, staff_user = EXCLUDED.staff_user, decided_at = now()
-       RETURNING version_id, status, notes, staff_user, decided_at`,
-      [v.id, b.marina_id, b.property_id, status, notes ?? null, req.user?.id ?? null]);
     if (expiry_date !== undefined) await pool.query('UPDATE sailor_document SET expiry_date = $1 WHERE id = $2', [expiry_date, v.document_id]);
+    // Records the expiry it was given against (sd.SAILOR_APPROVED_SQL).
+    const { rows: [verdict] } = await pool.query(
+      `INSERT INTO sailor_document_approval (version_id, marina_id, property_id, status, notes, staff_user, expiry_date)
+       VALUES ($1, $2, $3, $4, $5, $6, (SELECT expiry_date FROM sailor_document WHERE id = $7))
+       ON CONFLICT (version_id, marina_id) DO UPDATE SET status = EXCLUDED.status, notes = EXCLUDED.notes, staff_user = EXCLUDED.staff_user,
+         expiry_date = EXCLUDED.expiry_date, decided_at = now()
+       RETURNING version_id, status, notes, staff_user, expiry_date, decided_at`,
+      [v.id, b.marina_id, b.property_id, status, notes ?? null, req.user?.id ?? null, v.document_id]);
     await life.republish(b.id);
     if (status === 'approved') life.maybeAutoConfirm(b.id).catch((err) => console.error('Marina auto-confirm failed:', err.message));
     res.json(verdict);

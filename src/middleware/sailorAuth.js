@@ -44,8 +44,8 @@ const SIGN_IN = { error: 'Sign in required' };
 async function sailorFromHeader(req, res, next, optional) {
   try {
     const token = req.get('X-Sailor-Token');
-    if (!token && optional) return next();
     const sailor = token ? await module.exports.resolveSailor(token) : null;
+    if (!sailor && optional) return next();
     if (!sailor) return res.status(401).json(SIGN_IN);
     req.sailor = sailor;
     next();
@@ -53,5 +53,7 @@ async function sailorFromHeader(req, res, next, optional) {
 }
 
 module.exports.authenticateSailor = (req, res, next) => sailorFromHeader(req, res, next, false);
-// No header -> carry on without req.sailor; a bad token is still a 401.
+// No header or a bad/expired token -> carry on signed out: routes that need
+// a sailor (marinas with sailor_documents on) answer 'Sign in required'
+// themselves, and a stale session never blocks a marina that doesn't.
 module.exports.optionalSailor = (req, res, next) => sailorFromHeader(req, res, next, true);

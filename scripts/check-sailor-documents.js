@@ -145,10 +145,13 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
   await plain('token from an untrusted instance → 401', async () => {
     assert.equal((await run(sa.authenticateSailor, 'sk_other:u_ok')).res.statusCode, 401);
   });
-  await plain('optionalSailor passes through with no header; invalid token still 401', async () => {
+  await plain('optionalSailor carries on signed out with no header or an invalid token', async () => {
     const r = await run(sa.optionalSailor, null);
     assert.equal(r.nexted, true); assert.equal(r.req.sailor, undefined);
-    assert.equal((await run(sa.optionalSailor, 'sk_one:u_unverified')).res.statusCode, 401);
+    const bad = await run(sa.optionalSailor, 'sk_one:u_unverified');
+    assert.equal(bad.nexted, true); assert.equal(bad.req.sailor, undefined);
+    const ok = await run(sa.optionalSailor, 'sk_one:u_ok');
+    assert.deepEqual(ok.req.sailor, { email: 'ann@example.com' });
   });
   console.log(failed ? `\n${failed} failed` : '\nall passed');
   process.exit(failed ? 1 : 0);
