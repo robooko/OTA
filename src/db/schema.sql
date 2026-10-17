@@ -1465,7 +1465,6 @@ CREATE TABLE IF NOT EXISTS marina_document (
   booking_id      UUID NOT NULL REFERENCES marina_booking(id) ON DELETE CASCADE,
   requirement_id  UUID REFERENCES marina_doc_requirement(id) ON DELETE SET NULL,
   type            VARCHAR(30),
-  blob_pathname   TEXT, -- legacy; dropped by migration B
   drive_file_id   TEXT,
   drive_web_link  TEXT,
   file_name       VARCHAR(255),
@@ -1478,7 +1477,6 @@ CREATE TABLE IF NOT EXISTS marina_document (
   submitted_at    TIMESTAMPTZ DEFAULT now(),
   verified_at     TIMESTAMPTZ,
   verified_by     VARCHAR(255),
-  file_deleted_at TIMESTAMPTZ,
   created_at      TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_marina_document_property ON marina_document (property_id);
