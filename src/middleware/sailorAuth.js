@@ -32,6 +32,10 @@ module.exports.resolveSailor = async (token) => {
       const email = module.exports.verifiedPrimaryEmail(await module.exports._clerk.getUser(key, claims.sub));
       return email ? { email } : null;
     } catch (err) {
+      // @clerk/backend caches JWKS by kid across secret keys, so another
+      // trusted instance's token can verify under this key; its user then
+      // isn't here. User ids are unique across Clerk, so try the next key.
+      if (err.status === 404) continue;
       console.error('Sailor lookup failed:', err.message);
       return null;
     }

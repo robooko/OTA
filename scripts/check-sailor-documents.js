@@ -142,6 +142,23 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
   await plain('secondary verified but primary unverified → 401', async () => {
     assert.equal((await run(sa.authenticateSailor, 'sk_one:u_secondary')).res.statusCode, 401);
   });
+  await plain('token verifying under an earlier key (shared JWKS cache) still resolves on its own instance', async () => {
+    // @clerk/backend caches JWKS by kid across secret keys, so a second
+    // instance's token can verify under the first key; that instance then
+    // has no such user (404) and the lookup must move on.
+    const saved = sa._clerk;
+    sa._clerk = {
+      verifyToken: async () => ({ sub: 'u_ok' }),
+      getUser: async (secretKey, sub) => {
+        if (secretKey === 'sk_one') throw Object.assign(new Error('Not Found'), { status: 404 });
+        return users[sub];
+      },
+    };
+    try {
+      const r = await run(sa.authenticateSailor, 'any');
+      assert.equal(r.nexted, true); assert.deepEqual(r.req.sailor, { email: 'ann@example.com' });
+    } finally { sa._clerk = saved; }
+  });
   await plain('token from an untrusted instance → 401', async () => {
     assert.equal((await run(sa.authenticateSailor, 'sk_other:u_ok')).res.statusCode, 401);
   });
