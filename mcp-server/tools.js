@@ -1108,9 +1108,15 @@ function createTools(apiRequest) {
   },
   {
     name: 'get_voice_settings',
-    description: "The property's AI phone receptionist: enabled, its Twilio number, the transfer number, and whether the feature is configured on this server. Calls are filed as event inquiries with source 'phone'. Switching it on or changing the transfer number is dashboard-admin only.",
+    description: "The property's AI phone receptionist: enabled, its Twilio number, the transfer number, and whether the feature is configured on this server. Calls are filed as event inquiries with source 'phone'. Switching it on is dashboard-admin only.",
     inputSchema: {},
     run: () => apiRequest('GET', '/api/property/voice'),
+  },
+  {
+    name: 'set_voice_transfer_number',
+    description: 'Set the number the AI phone receptionist puts callers through to when they ask for a person, in international format e.g. +441234567890 (null clears it, so the AI only takes messages)',
+    inputSchema: { transfer_number: z.string().nullable() },
+    run: ({ transfer_number }) => apiRequest('PUT', '/api/property/voice/transfer-number', { body: { transfer_number } }),
   },
   {
     name: 'list_spas',

@@ -40,9 +40,11 @@ router.put('/ai-replies', authenticate, requireRole('admin'), ctrl.updateAiReply
 router.put('/ai-replies/instructions', authenticateOrApiKey, ctrl.updateAiReplyInstructions);
 
 // Phone receptionist: on/off and where to transfer -- bearer+admin, like ai-replies mode.
-// GET is on the API-key rail for the MCP get_voice_settings tool.
+// GET and the transfer-number-only PUT are on the API-key rail for the MCP
+// get_voice_settings / set_voice_transfer_number tools; staff still need admin.
 router.get('/voice', authenticateOrApiKey, ctrl.getVoiceSettings);
 router.put('/voice', authenticate, requireRole('admin'), ctrl.updateVoiceSettings);
+router.put('/voice/transfer-number', authenticateOrApiKey, requireRoleOrApiKey('admin'), ctrl.updateVoiceTransferNumber);
 
 // On the API-key rail for the same reason as /me above -- logo, colour and
 // cancel link are the venue's own presentation settings, not something that

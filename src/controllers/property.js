@@ -923,6 +923,18 @@ async function updateVoiceSettings(req, res, next) {
   }
 }
 
+// Transfer-number-only write for the API-key rail (MCP set_voice_transfer_number):
+// where a caller asking for a person is put through. Switching the AI on stays
+// bearer+admin (updateVoiceSettings above).
+function updateVoiceTransferNumber(req, res, next) {
+  const { transfer_number } = req.body ?? {};
+  if (transfer_number === undefined) {
+    return res.status(400).json({ error: 'transfer_number is required (E.164, or null to clear)' });
+  }
+  req.body = { transfer_number };
+  return updateVoiceSettings(req, res, next);
+}
+
 // Instructions-only write for the API-key rail (MCP set_ai_reply_instructions):
 // venue automation may tune what the AI is told about the venue, but mode and
 // the auto-send threshold -- the knobs that decide whether emails leave
@@ -954,7 +966,7 @@ module.exports = {
   getEmailBranding, updateEmailBranding,
   mergeAgenticCommerce, getAgenticCommerce, updateAgenticCommerce,
   getReminderSettings, updateReminderSettings,
-  getVoiceSettings, updateVoiceSettings,
+  getVoiceSettings, updateVoiceSettings, updateVoiceTransferNumber,
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics, getGoogleAnalyticsSetup,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,
