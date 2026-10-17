@@ -158,12 +158,12 @@ In this order, each ⚠:
 
    | site | `booking_url` |
    |---|---|
-   | PB | `<origin>/booking?booking={id}&token={token}` |
-   | TT | `<origin>/booking?booking={id}&token={token}` |
-   | SEA (Fox) | `<origin>/booking/fox-mooring?booking={id}&token={token}` (SEA master 7c05149 uses path pages) |
-   | SEA (Pevero) | `<origin>/booking/pevero-mooring?booking={id}&token={token}` |
-   | MP | `<origin>/booking?booking={id}&token={token}` |
-   | PO | set when it launches |
+   | PB | `https://pirates-bight.vercel.app/booking?booking={id}&token={token}` |
+   | TT | `https://tested-trappist-three.vercel.app/booking?booking={id}&token={token}` |
+   | SEA (Fox) | `https://sea-company.vercel.app/booking/fox-mooring?booking={id}&token={token}` (SEA master 7c05149 uses path pages) |
+   | SEA (Pevero) | `https://sea-company.vercel.app/booking/pevero-mooring?booking={id}&token={token}` |
+   | MP | `https://marina-di-positano.vercel.app/booking?booking={id}&token={token}` |
+   | PO | `https://portals-lemon-psi.vercel.app/booking?booking={id}&token={token}` |
 
 6. Push and merge O `cutover/switch` (`git -C O push origin cutover/switch`, then `git -C O switch main && git -C O merge --no-edit cutover/switch && git -C O push origin main`). Render deploys. Check: `GET /api/marina/sidon-bookings` → 404.
 7. Merge SM `cutover/switch` (`git -C SM push origin cutover/switch:master`). Check: `/api/marina/*` → 410, `/marina` → 301 to the dashboard, `/m/<slug>` → 301 to that marina's site, and an old booking link → the notice page.
