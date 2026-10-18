@@ -170,6 +170,10 @@ const app = require('../src/app');
       const r = await status(FREE, qs0);
       assert.equal(r.status, 200); assert.deepEqual(r.body, { sign_in_required: false, requirements: [], document_uploads: false }); // no org Drive in this fixture
     });
+    await check('sailor-document marina takes uploads without an org Drive', async () => {
+      const r = await status(REQ, qs0, as(CAT));
+      assert.equal(r.status, 200); assert.equal(r.body.document_uploads, true);
+    });
     await check('status with requirements and no token says sign-in required', async () => {
       const r = await status(REQ, qs0);
       assert.equal(r.status, 200); assert.equal(r.body.sign_in_required, true);

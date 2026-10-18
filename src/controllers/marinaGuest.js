@@ -269,6 +269,10 @@ async function createGuestBooking(req, res, next) {
   } finally { client.release(); }
 }
 
+// Sailor documents go to OTA's own store; only per-booking ones need the
+// property's Drive.
+const uploadsOpen = async (marina) => marina.sailor_documents || (await storage.status(marina.property_id)).ok;
+
 // What a booking site shows before Book: does this marina need a sign-in,
 // and which requirements does the signed-in sailor meet for these dates.
 async function requirementsStatus(req, res, next) {
@@ -276,7 +280,7 @@ async function requirementsStatus(req, res, next) {
     const { arrival, departure } = req.query;
     if (!req.sailor) {
       const { rows } = await pool.query("SELECT id, type, name, mandatory FROM marina_doc_requirement WHERE marina_id = $1 AND status = 'active' ORDER BY sort_order, name", [req.marina.id]);
-      return res.json({ sign_in_required: req.marina.sailor_documents && rows.length > 0, requirements: rows.map((r) => ({ ...r, met: false })), document_uploads: (await storage.status(req.marina.property_id)).ok });
+      return res.json({ sign_in_required: req.marina.sailor_documents && rows.length > 0, requirements: rows.map((r) => ({ ...r, met: false })), document_uploads: await uploadsOpen(req.marina) });
     }
     if (!isValidDate(arrival) || (departure !== undefined && !isValidDate(departure)) || (departure && departure <= arrival)) {
       return res.status(400).json({ error: 'arrival and departure must be YYYY-MM-DD with departure after arrival' });
@@ -285,7 +289,7 @@ async function requirementsStatus(req, res, next) {
     res.json({
       sign_in_required: req.marina.sailor_documents && statuses.length > 0,
       requirements: statuses.map(({ requirement, document }) => ({ ...requirement, met: !!document, document })),
-      document_uploads: (await storage.status(req.marina.property_id)).ok,
+      document_uploads: await uploadsOpen(req.marina),
     });
   } catch (err) { next(err); }
 }
