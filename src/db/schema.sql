@@ -1587,3 +1587,7 @@ ALTER TABLE sailor_document ADD COLUMN IF NOT EXISTS source_ref VARCHAR(50) UNIQ
 
 -- The document expiry each verdict was given against: a later change voids it.
 ALTER TABLE sailor_document_approval ADD COLUMN IF NOT EXISTS expiry_date DATE;
+
+-- A marina is pontoon berths or a mooring field (buoys): maps draw a
+-- berth as a turned slot or a swing circle accordingly.
+ALTER TABLE marina ADD COLUMN IF NOT EXISTS kind VARCHAR(10) NOT NULL DEFAULT 'marina' CHECK (kind IN ('marina', 'mooring'));

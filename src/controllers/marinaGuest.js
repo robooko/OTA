@@ -87,7 +87,8 @@ async function getAvailability(req, res, next) {
 
 // Unauthenticated, every property: one marina's berths for Sidon's map.
 // Position, size and free/taken; with a boat length, fit and stay price.
-// A berth without its own rotation lies across its pontoon (the widget's rule).
+// A berth without its own rotation lies across its pontoon (the widget's rule);
+// a mooring field's berths are buoys, so no rotation at all.
 async function getPublicBerths(req, res, next) {
   try {
     const { arrival, departure } = req.query;
@@ -96,7 +97,7 @@ async function getPublicBerths(req, res, next) {
     if (!isValidDate(arrival) || !isValidDate(departure) || departure <= arrival) return res.status(400).json({ error: 'arrival and departure must be YYYY-MM-DD with departure after arrival' });
     if (len !== null && !(len > 0)) return res.status(400).json({ error: 'boat_length_m must be a positive number' });
     const { rows: [m] } = await pool.query(
-      "SELECT m.id, upper(p.currency) AS currency FROM marina m JOIN property p ON p.id = m.property_id WHERE m.id = $1 AND m.status = 'active'", [req.params.id]);
+      "SELECT m.id, m.kind, upper(p.currency) AS currency FROM marina m JOIN property p ON p.id = m.property_id WHERE m.id = $1 AND m.status = 'active'", [req.params.id]);
     if (!m) return res.status(404).json({ error: 'Marina not found' });
     const [berths, avail, tiers] = await Promise.all([
       pool.query(`SELECT b.*, COALESCE(b.rotation, (p.rotation + 90)::numeric % 360) AS heading
@@ -107,9 +108,10 @@ async function getPublicBerths(req, res, next) {
     ]);
     const num = (v) => (v == null ? null : Number(v));
     res.set('Cache-Control', 'public, max-age=60').json({
+      kind: m.kind,
       currency: m.currency,
       berths: berths.rows.map((b) => {
-        const out = { label: b.label, lat: b.lat, lng: b.lng, rotation: num(b.heading), length_m: num(b.length_m), beam_m: num(b.beam_m), available: avail.get(b.id) === true };
+        const out = { label: b.label, lat: b.lat, lng: b.lng, rotation: m.kind === 'mooring' ? null : num(b.heading), length_m: num(b.length_m), beam_m: num(b.beam_m), available: avail.get(b.id) === true };
         if (len === null) return out;
         const fits = !berthFitError(b, len, null);
         const total_price = out.available && fits ? priceStay({ berth: b, tiers, arrival, departure, boatLengthM: len }).total_price : null;
