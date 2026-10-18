@@ -228,7 +228,8 @@ async function createGuestBooking(req, res, next) {
     const { rows: [prop] } = await client.query('SELECT upper(currency) AS currency, stripe_secret_key, stripe_publishable_key FROM property WHERE id = $1', [req.property_id]);
     // Stripe refuses a zero amount, so a free stay confirms by email like an unpriced one.
     const cardPath = price.total_price != null && toCents(price.total_price) > 0 && prop.stripe_secret_key && prop.stripe_publishable_key;
-    const confirmToken = cardPath ? null : crypto.randomBytes(32).toString('base64url');
+    // A signed-in sailor's email is already verified: no confirm link.
+    const confirmToken = cardPath || req.sailor ? null : crypto.randomBytes(32).toString('base64url');
 
     const { rows: [row] } = await client.query(
       `INSERT INTO marina_booking (property_id, marina_id, berth_id, contact_name, contact_email, contact_phone, contact_email_key,
@@ -257,10 +258,15 @@ async function createGuestBooking(req, res, next) {
         return res.status(502).json({ error: 'Card payment could not be set up; please try again', details: err.message });
       }
     }
+    // Signed in without a card: straight to the marina, as the confirm link would.
+    if (!cardPath && req.sailor) {
+      const r = await life.withLockedBooking(row.id, async (c, b) => ({ ok: true, booking: await life.toPending(c, b) }));
+      if (r.ok) life.maybeAutoConfirm(row.id).catch((err) => console.error('Marina auto-confirm failed:', err.message));
+    }
     const booking = await q.joinedBooking(pool, row.id);
     // Card bookings are announced when the card is held (confirm-payment);
     // email-confirm bookings get the confirm link now.
-    if (!cardPath) life.afterChange(null, { ...booking, _confirmToken: confirmToken });
+    if (!cardPath && !req.sailor) life.afterChange(null, { ...booking, _confirmToken: confirmToken });
     res.status(201).json({ booking: guestView(booking), booking_token: bookingToken(row.id), payment });
   } catch (err) {
     if (!committed) await client.query('ROLLBACK').catch(() => {});

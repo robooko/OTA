@@ -117,8 +117,10 @@ const { bookingToken } = require('../src/lib/marinaToken');
         assert.equal((await api('GET', S, { headers: h })).status, 200);
         const r = await api('POST', `${S}/bookings`, { body: guestBody({ contact_email: 'spoof@example.com' }), headers: h });
         assert.equal(r.status, 201); assert.equal(r.body.booking.contact_email, 'sailor@example.com');
-        const row = await one('SELECT property_id, email_verified FROM marina_booking WHERE id = $1', [r.body.booking.id]);
+        const row = await one('SELECT property_id, email_verified, status, confirm_token_hash FROM marina_booking WHERE id = $1', [r.body.booking.id]);
         assert.equal(row.property_id, P); assert.equal(row.email_verified, true);
+        // Already verified: straight to the marina, no confirm link.
+        assert.notEqual(row.status, 'hold'); assert.equal(row.confirm_token_hash, null); assert.notEqual(r.body.booking.status, 'hold');
         assert.equal((await api('GET', `${S}/bookings/${r.body.booking.id}`, { headers: { ...h, 'X-Booking-Token': r.body.booking_token } })).status, 200);
       } finally { sa.resolveSailor = saved; }
     });
