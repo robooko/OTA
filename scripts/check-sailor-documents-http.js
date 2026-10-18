@@ -21,6 +21,7 @@ docs.store = {
   del: async (ps) => ps.forEach((p) => blobs.delete(p)),
 };
 docs.extractDocument = async () => {};
+const realExtractSailor = docs.extractSailorVersion;
 docs.extractSailorVersion = async () => {};
 
 const pool = require('../src/db');
@@ -94,6 +95,22 @@ const app = require('../src/app');
       const clr = await api('PUT', `${S}/${annDoc.id}`, { headers: as(ANN), body: { expiry_date: null } });
       assert.equal(clr.body.expiry_date, null);
       assert.equal((await api('PUT', `${S}/${annDoc.id}`, { headers: as(ANN), body: { expiry_date: 'soon' } })).status, 400);
+    });
+    await check('extracted expiry is saved on the document unless the sailor gave one', async () => {
+      const key = process.env.ANTHROPIC_API_KEY; process.env.ANTHROPIC_API_KEY ||= 'stub';
+      docs.extractSailorVersion = realExtractSailor;
+      docs.extractFields = async () => ({ expiry_date: '2031-03-15' });
+      try {
+        const r = await upload(BOB, 'type=passport');
+        assert.equal(r.status, 201, JSON.stringify(r.body)); assert.equal(r.body.expiry_date, '2031-03-15');
+        const own = await upload(BOB, 'type=insurance&expiry_date=2029-09-09');
+        assert.equal(own.body.expiry_date, '2029-09-09');
+        await api('DELETE', `${S}/${r.body.id}`, { headers: as(BOB) });
+        await api('DELETE', `${S}/${own.body.id}`, { headers: as(BOB) });
+      } finally {
+        docs.extractSailorVersion = async () => {};
+        if (key === undefined) delete process.env.ANTHROPIC_API_KEY;
+      }
     });
     await check('file streams for its owner', async () => {
       const r = await fetch(`${base}${S}/versions/${annDoc.versions[0].id}/file`, { headers: as(ANN) });

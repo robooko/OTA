@@ -74,21 +74,26 @@ async function extractDocument(docId, buf) {
 }
 
 // Sailor documents: fields from the shared type list. Writes extracted_data
-// on the version and the document -- never expiry_date (the sailor confirms
-// it; extraction's expiry_date is only a suggestion). Never throws.
-async function extractSailorVersion(versionId) {
+// on the version and the document, and the extracted expiry_date onto the
+// document unless keepExpiry (the sailor gave one with this upload): the
+// booking widget has no expiry entry, so passport/insurance are only met
+// through it. Never throws.
+async function extractSailorVersion(versionId, { keepExpiry = false } = {}) {
   try {
     if (!process.env.ANTHROPIC_API_KEY) return;
     const { rows: [v] } = await pool.query(
       'SELECT v.blob_pathname, v.content_type, v.document_id, d.type FROM sailor_document_version v JOIN sailor_document d ON d.id = v.document_id WHERE v.id = $1', [versionId]);
     if (!v) return;
     const { label, fields } = TYPES[v.type];
-    const data = await extractFields(await readFile(v.blob_pathname), v.content_type, label, fields);
+    const data = await module.exports.extractFields(await readFile(v.blob_pathname), v.content_type, label, fields);
     await pool.query('UPDATE sailor_document_version SET extracted_data = $1 WHERE id = $2', [data, versionId]);
     await pool.query('UPDATE sailor_document SET extracted_data = $1 WHERE id = $2', [data, v.document_id]);
+    if (!keepExpiry && /^\d{4}-\d{2}-\d{2}$/.test(data.expiry_date)) {
+      await pool.query('UPDATE sailor_document SET expiry_date = $1 WHERE id = $2', [data.expiry_date, v.document_id]);
+    }
   } catch (err) {
     await pool.query('UPDATE sailor_document_version SET extracted_data = $1 WHERE id = $2', [{ error: err.message }, versionId]).catch(() => {});
   }
 }
 
-module.exports = { MAX_BYTES, MAX_PER_BOOKING, EXT, sniffType, store, putPublic, sailorDocPath, extractDocument, extractSailorVersion };
+module.exports = { MAX_BYTES, MAX_PER_BOOKING, EXT, sniffType, store, putPublic, sailorDocPath, extractFields, extractDocument, extractSailorVersion };

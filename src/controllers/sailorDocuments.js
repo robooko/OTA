@@ -78,9 +78,9 @@ async function uploadDocument(req, res, next) {
     const { rows: [v] } = await pool.query(
       `INSERT INTO sailor_document_version (document_id, blob_pathname, file_name, content_type, size_bytes)
        VALUES ($1, $2, $3, $4, $5) RETURNING id`, [documentId, pathname, fileName, contentType, buf.length]);
-    // Awaited so the response carries the suggestion (extracted_data.expiry_date)
-    // for the sailor to confirm. Never throws.
-    await docs.extractSailorVersion(v.id);
+    // Awaited so the response carries the extracted expiry (kept off when the
+    // sailor sent one). Never throws.
+    await docs.extractSailorVersion(v.id, { keepExpiry: expiry.value !== undefined });
     res.status(201).json((await ownDocuments(email, documentId))[0]);
   } catch (err) { next(err); }
 }
