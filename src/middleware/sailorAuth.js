@@ -46,6 +46,7 @@ module.exports.resolveSailor = async (token) => {
 const SIGN_IN = { error: 'Sign in required' };
 
 async function sailorFromHeader(req, res, next, optional) {
+  if (req.sailor) return next(); // the sailor rail already verified it
   try {
     const token = req.get('X-Sailor-Token');
     const sailor = token ? await module.exports.resolveSailor(token) : null;

@@ -102,6 +102,26 @@ const { bookingToken } = require('../src/lib/marinaToken');
       assert.equal((await api('POST', `${G}/bookings`, { body: b })).status, 201);
       assert.equal((await api('POST', `${G}/bookings`, { body: { ...b, contact_email: 'other@example.com' } })).status, 409);
     });
+    await check('sailor rail: books by marina id with a sailor token, no site key', async () => {
+      const sa = require('../src/middleware/sailorAuth');
+      const saved = sa.resolveSailor;
+      sa.resolveSailor = async (t) => (t === 'good' ? { email: 'sailor@example.com' } : null);
+      try {
+        const S = `/api/marina/sailor/${m.id}`;
+        const noKey = { 'X-Api-Key': '' };
+        assert.equal((await api('POST', `${S}/bookings`, { body: guestBody(), headers: noKey })).status, 401);
+        assert.equal((await api('POST', `${S}/bookings`, { body: guestBody(), headers: { ...noKey, 'X-Sailor-Token': 'bad' } })).status, 401);
+        assert.equal((await api('GET', `/api/marina/sailor/${crypto.randomUUID()}`, { headers: { ...noKey, 'X-Sailor-Token': 'good' } })).status, 404);
+        assert.equal((await api('GET', '/api/marina/sailor/porto-http', { headers: { ...noKey, 'X-Sailor-Token': 'good' } })).status, 404);
+        const h = { ...noKey, 'X-Sailor-Token': 'good' };
+        assert.equal((await api('GET', S, { headers: h })).status, 200);
+        const r = await api('POST', `${S}/bookings`, { body: guestBody({ contact_email: 'spoof@example.com' }), headers: h });
+        assert.equal(r.status, 201); assert.equal(r.body.booking.contact_email, 'sailor@example.com');
+        const row = await one('SELECT property_id, email_verified FROM marina_booking WHERE id = $1', [r.body.booking.id]);
+        assert.equal(row.property_id, P); assert.equal(row.email_verified, true);
+        assert.equal((await api('GET', `${S}/bookings/${r.body.booking.id}`, { headers: { ...h, 'X-Booking-Token': r.body.booking_token } })).status, 200);
+      } finally { sa.resolveSailor = saved; }
+    });
     await check('staff list hides holds; staff can confirm a pending booking', async () => {
       const r = await api('POST', '/api/marina/bookings', { body: { berth_id: berthRes.body.id, contact_name: 'Staff', arrival: future(400), departure: future(402), status: 'pending' } });
       assert.equal(r.status, 201);

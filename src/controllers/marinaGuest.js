@@ -30,6 +30,20 @@ async function resolveMarina(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Sailor rail (/api/marina/sailor/:marina_id/...): any active marina, by id.
+// authenticateSailor ran first, so the booking's email is Clerk-verified.
+async function sailorMarina(req, res, next) {
+  try {
+    const { marina_id: id } = req.params;
+    const m = isValidUuid(id) && (await pool.query("SELECT * FROM marina WHERE id = $1 AND status = 'active'", [id])).rows[0];
+    if (!m) return res.status(404).json({ error: 'Marina not found' });
+    req.marina = m;
+    req.property_id = m.property_id;
+    req.auth_method = 'sailor';
+    next();
+  } catch (err) { next(err); }
+}
+
 // The map payload. Whitelisted: nothing else from marina or property.
 async function getMarinaMap(req, res, next) {
   try {
@@ -182,7 +196,7 @@ async function createGuestBooking(req, res, next) {
   try {
     const today = await q.propertyToday(client, req.property_id);
     // Staff (bearer) use POST /api/marina/bookings; this route is the guest rail only.
-    if (req.auth_method !== 'api_key') return res.status(403).json({ error: 'Use POST /api/marina/bookings for staff bookings' });
+    if (req.auth_method === 'bearer') return res.status(403).json({ error: 'Use POST /api/marina/bookings for staff bookings' });
     // No secret, no booking_token: the guest could never reach the booking
     // again, so refuse before a hold takes the berth.
     if (!process.env.MARINA_BOOKING_TOKEN_SECRET) return res.status(503).json({ error: 'Online booking is not configured' });
@@ -425,6 +439,6 @@ async function createEnquiry(req, res, next) {
 
 module.exports = {
   requirementsStatus,
-  resolveMarina, getMarinaMap, getAvailability, getPublicBerths, getDocRequirements, quote,
+  resolveMarina, sailorMarina, getMarinaMap, getAvailability, getPublicBerths, getDocRequirements, quote,
   requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink, ablyToken, confirmPayment, contractPreview, agreeContract, createEnquiry,
 };

@@ -89,8 +89,9 @@ function guestLimiter(name, max) {
     limit: max,
     standardHeaders: true,
     legacyHeaders: false,
-    skip: (req) => req.auth_method !== 'api_key',
-    keyGenerator: (req) => `${name}:${req.property_id}:${clientIpKey(req)}`,
+    skip: (req) => req.auth_method !== 'api_key' && req.auth_method !== 'sailor',
+    // Sailor rail: one bucket per verified email, across marinas.
+    keyGenerator: (req) => (req.auth_method === 'sailor' ? `${name}:sailor:${req.sailor.email}` : `${name}:${req.property_id}:${clientIpKey(req)}`),
     handler: (req, res) => res.status(429).json({ error: 'Too many requests, please try again later' }),
   });
 }

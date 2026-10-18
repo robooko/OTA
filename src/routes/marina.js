@@ -16,7 +16,7 @@ const rawDocSafe = (req, res, next) => rawDoc(req, res, (err) => (err?.status ==
 const rawImage = express.raw({ type: ['image/jpeg', 'image/png'], limit: '4mb' });
 const rawImageSafe = (req, res, next) => rawImage(req, res, (err) => (err?.status === 413 ? res.status(413).json({ error: 'Images are limited to 4 MB' }) : next(err)));
 const { authenticate, authenticateOrApiKey, requireRole } = require('../middleware/auth');
-const { optionalSailor } = require('../middleware/sailorAuth');
+const { authenticateSailor, optionalSailor } = require('../middleware/sailorAuth');
 
 // Literal segments before '/:id' throughout (see eventInquiries.js).
 
@@ -40,14 +40,31 @@ for (const kind of Object.keys(cat.TABLES)) {
   router.put(`/marinas/:marina_id/${kind}/:id`, authenticateOrApiKey, h.update);
 }
 
-// Guest rail -- the only prefix a site's forwarder passes through.
-const G = '/guest/:marina';
-router.get(G, authenticateOrApiKey, guest.resolveMarina, guest.getMarinaMap);
-router.get(`${G}/availability`, authenticateOrApiKey, guest.resolveMarina, guest.getAvailability);
-router.get(`${G}/doc-requirements`, authenticateOrApiKey, guest.resolveMarina, guest.getDocRequirements);
-// X-Sailor-Token (Clerk) optional: shared sailor documents.
-router.get(`${G}/requirements-status`, authenticateOrApiKey, guest.resolveMarina, optionalSailor, guest.requirementsStatus);
-router.post(`${G}/quote`, authenticateOrApiKey, guest.resolveMarina, guest.quote);
+// Guest rail -- the only prefix a site's forwarder passes through -- and the
+// sailor rail: Sidon books any marina by id, the X-Sailor-Token's verified
+// email standing in for a site key.
+for (const [G, ...entry] of [
+  ['/guest/:marina', authenticateOrApiKey, guest.resolveMarina],
+  ['/sailor/:marina_id', authenticateSailor, guest.sailorMarina],
+]) {
+  router.get(G, ...entry, guest.getMarinaMap);
+  router.get(`${G}/availability`, ...entry, guest.getAvailability);
+  router.get(`${G}/doc-requirements`, ...entry, guest.getDocRequirements);
+  // X-Sailor-Token (Clerk) optional: shared sailor documents.
+  router.get(`${G}/requirements-status`, ...entry, optionalSailor, guest.requirementsStatus);
+  router.post(`${G}/quote`, ...entry, guest.quote);
+
+  router.post(`${G}/bookings`, ...entry, bookingLimiter, optionalSailor, guest.createGuestBooking);
+  router.get(`${G}/bookings/:id`, ...entry, guest.requireBookingToken, guest.getGuestBooking);
+  router.post(`${G}/bookings/:id/cancel`, ...entry, guest.requireBookingToken, guest.cancelGuestBooking);
+  router.get(`${G}/bookings/:id/ably-token`, ...entry, guest.requireBookingToken, guest.ablyToken);
+  router.post(`${G}/bookings/:id/confirm-payment`, ...entry, guest.requireBookingToken, guest.confirmPayment);
+  router.post(`${G}/bookings/:id/documents`, ...entry, uploadLimiter, guest.requireBookingToken, rawDocSafe, docCtrl.uploadDocument);
+
+  router.get(`${G}/contract-preview`, ...entry, guest.contractPreview);
+  router.post(`${G}/bookings/:id/contract`, ...entry, guest.requireBookingToken, guest.agreeContract);
+  router.post(`${G}/enquiries`, ...entry, enquiryLimiter, guest.createEnquiry);
+}
 
 // Unauthenticated: the emailed confirm link (spa pattern).
 router.get('/confirm-booking/:id/:confirmToken', guest.confirmBookingLink);
@@ -65,16 +82,5 @@ router.post('/bookings', authenticateOrApiKey, bookings.createBooking);
 router.get('/bookings/:id', authenticateOrApiKey, bookings.getBooking);
 router.put('/bookings/:id', authenticateOrApiKey, bookings.updateBooking);
 router.post('/bookings/:id/send-guest-link', authenticateOrApiKey, bookings.sendGuestLink);
-
-router.post(`${G}/bookings`, authenticateOrApiKey, bookingLimiter, guest.resolveMarina, optionalSailor, guest.createGuestBooking);
-router.get(`${G}/bookings/:id`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.getGuestBooking);
-router.post(`${G}/bookings/:id/cancel`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.cancelGuestBooking);
-router.get(`${G}/bookings/:id/ably-token`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.ablyToken);
-router.post(`${G}/bookings/:id/confirm-payment`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.confirmPayment);
-router.post(`${G}/bookings/:id/documents`, authenticateOrApiKey, uploadLimiter, guest.resolveMarina, guest.requireBookingToken, rawDocSafe, docCtrl.uploadDocument);
-
-router.get(`${G}/contract-preview`, authenticateOrApiKey, guest.resolveMarina, guest.contractPreview);
-router.post(`${G}/bookings/:id/contract`, authenticateOrApiKey, guest.resolveMarina, guest.requireBookingToken, guest.agreeContract);
-router.post(`${G}/enquiries`, authenticateOrApiKey, enquiryLimiter, guest.resolveMarina, guest.createEnquiry);
 
 module.exports = router;
