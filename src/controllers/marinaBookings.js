@@ -50,7 +50,7 @@ async function listBookings(req, res, next) {
                          mb.total_price, mb.currency, mb.payment_status, mb.payment_error, mb.hold_expires_at, mb.created_at,
                          ${q.READY_COLS}
                   FROM marina_booking mb JOIN marina_berth b ON b.id = mb.berth_id JOIN marina m ON m.id = mb.marina_id
-                  WHERE ${w} ORDER BY mb.arrival, b.label LIMIT ${limit} OFFSET ${offset}`, params),
+                  WHERE ${w} ORDER BY mb.created_at DESC, mb.id LIMIT ${limit} OFFSET ${offset}`, params),
     ]);
     res.json({ total, data: rows });
   } catch (err) { next(err); }

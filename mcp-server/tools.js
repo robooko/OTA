@@ -914,7 +914,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'list_marina_bookings',
-    description: 'Berth bookings across this property\'s marinas, paged ({ total, data }), ordered by arrival then berth. from = bookings departing after this date (open-ended always included), to = arriving before it. Guest checkouts in progress (holds) are never listed.',
+    description: 'Berth bookings across this property\'s marinas, paged ({ total, data }), newest first. from = bookings departing after this date (open-ended always included), to = arriving before it. Guest checkouts in progress (holds) are never listed.',
     inputSchema: {
       from: z.string().optional().describe('YYYY-MM-DD'), to: z.string().optional().describe('YYYY-MM-DD'),
       status: z.enum(['pending', 'confirmed', 'declined', 'cancelled']).optional(),
