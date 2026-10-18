@@ -10,9 +10,10 @@ const normalEmail = (s) => String(s ?? '').trim().toLowerCase();
 // not deleted, right type, expiry on/after departure (arrival when
 // open-ended); null expiry only for types that needn't have one. Several
 // candidates -> the newest. approval_count: other marinas that approved any
-// version (never names or notes).
+// version (never names or notes). latest: the newest document of the type
+// whatever its expiry, so a guest can be told why it doesn't count.
 async function requirementStatus(db, { marinaId, email, arrival, departure }) {
-  const [{ rows: reqs }, { rows: docs }] = await Promise.all([
+  const [{ rows: reqs }, { rows: docs }, { rows: newest }] = await Promise.all([
     db.query("SELECT id, type, name, mandatory FROM marina_doc_requirement WHERE marina_id = $1 AND status = 'active' ORDER BY sort_order, name", [marinaId]),
     db.query(
       `SELECT DISTINCT ON (d.type) d.id, d.type, d.expiry_date,
@@ -25,9 +26,12 @@ async function requirementStatus(db, { marinaId, email, arrival, departure }) {
          AND ((d.expiry_date IS NULL AND d.type <> ALL($4)) OR d.expiry_date >= $3)
        ORDER BY d.type, d.created_at DESC`,
       [marinaId, normalEmail(email), departure ?? arrival, EXPIRY_REQUIRED]),
+    db.query('SELECT DISTINCT ON (type) id, type, expiry_date FROM sailor_document WHERE email = $1 AND deleted_at IS NULL ORDER BY type, created_at DESC',
+      [normalEmail(email)]),
   ]);
   const byType = new Map(docs.map((d) => [d.type, d]));
-  return reqs.map((requirement) => ({ requirement, document: byType.get(requirement.type) ?? null }));
+  const latestByType = new Map(newest.map((d) => [d.type, d]));
+  return reqs.map((requirement) => ({ requirement, document: byType.get(requirement.type) ?? null, latest: latestByType.get(requirement.type) ?? null }));
 }
 
 const missingMandatory = (statuses) => statuses.filter((s) => s.requirement.mandatory && !s.document)

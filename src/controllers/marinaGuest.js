@@ -288,7 +288,11 @@ async function requirementsStatus(req, res, next) {
     const statuses = await sd.requirementStatus(pool, { marinaId: req.marina.id, email: req.sailor.email, arrival, departure: departure ?? null });
     res.json({
       sign_in_required: req.marina.sailor_documents && statuses.length > 0,
-      requirements: statuses.map(({ requirement, document }) => ({ ...requirement, met: !!document, document })),
+      requirements: statuses.map(({ requirement, document, latest }) => ({
+        ...requirement, met: !!document, document,
+        // Unmet but uploaded: why it doesn't count (expired, or no expiry read).
+        ...(!document && latest && { latest: { id: latest.id, expiry_date: latest.expiry_date } }),
+      })),
       document_uploads: await uploadsOpen(req.marina),
     });
   } catch (err) { next(err); }

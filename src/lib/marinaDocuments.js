@@ -88,8 +88,10 @@ async function extractSailorVersion(versionId, { keepExpiry = false } = {}) {
     const data = await module.exports.extractFields(await readFile(v.blob_pathname), v.content_type, label, fields);
     await pool.query('UPDATE sailor_document_version SET extracted_data = $1 WHERE id = $2', [data, versionId]);
     await pool.query('UPDATE sailor_document SET extracted_data = $1 WHERE id = $2', [data, v.document_id]);
-    if (!keepExpiry && /^\d{4}-\d{2}-\d{2}$/.test(data.expiry_date)) {
-      await pool.query('UPDATE sailor_document SET expiry_date = $1 WHERE id = $2', [data.expiry_date, v.document_id]);
+    // A new version is read afresh: no readable expiry clears the old one.
+    if (!keepExpiry) {
+      const expiry = /^\d{4}-\d{2}-\d{2}$/.test(data.expiry_date) ? data.expiry_date : null;
+      await pool.query('UPDATE sailor_document SET expiry_date = $1 WHERE id = $2', [expiry, v.document_id]);
     }
   } catch (err) {
     await pool.query('UPDATE sailor_document_version SET extracted_data = $1 WHERE id = $2', [{ error: err.message }, versionId]).catch(() => {});

@@ -103,6 +103,10 @@ const app = require('../src/app');
       try {
         const r = await upload(BOB, 'type=passport');
         assert.equal(r.status, 201, JSON.stringify(r.body)); assert.equal(r.body.expiry_date, '2031-03-15');
+        docs.extractFields = async () => ({ expiry_date: null });
+        const unread = await upload(BOB, `document_id=${r.body.id}`);
+        assert.equal(unread.body.expiry_date, null, 'a new version with no readable expiry clears the old one');
+        docs.extractFields = async () => ({ expiry_date: '2031-03-15' });
         const own = await upload(BOB, 'type=insurance&expiry_date=2029-09-09');
         assert.equal(own.body.expiry_date, '2029-09-09');
         await api('DELETE', `${S}/${r.body.id}`, { headers: as(BOB) });
@@ -187,6 +191,14 @@ const app = require('../src/app');
       assert.equal(ins.met, false); assert.equal(ins.document, null);
       assert.equal(reg.met, true); assert.equal(reg.document.id, d.id);
       assert.equal((await status(REQ, 'arrival=nope', as(CAT))).status, 400);
+    });
+    await check('an unmet requirement says why: the newest document of its type and its expiry', async () => {
+      const DOT = mail('dot');
+      const old = (await upload(DOT, 'type=insurance&expiry_date=2020-01-31')).body;
+      const [ins, reg] = (await status(REQ, qs0, as(DOT))).body.requirements;
+      assert.equal(ins.met, false); assert.deepEqual(ins.latest, { id: old.id, expiry_date: '2020-01-31' });
+      assert.equal(reg.latest, undefined);
+      await api('DELETE', `${S}/${old.id}`, { headers: as(DOT) });
     });
     await check('create without token at a marina with requirements → 401', async () => {
       const r = await guestApi('POST', `/api/marina/guest/${REQ.slug}/bookings`, { body: bookingBody() });
