@@ -41,6 +41,9 @@ for (const kind of Object.keys(cat.TABLES)) {
 }
 
 // Guest rail -- the only prefix a site's forwarder passes through -- and the
+// Before the loop below, or /sailor/:marina_id would take 'bookings' as an id.
+router.get('/sailor/bookings', authenticateSailor, guest.listSailorBookings);
+router.get('/sailor/bookings/ably-token', authenticateSailor, guest.sailorAblyToken);
 // sailor rail: Sidon books any marina by id, the X-Sailor-Token's verified
 // email standing in for a site key.
 for (const [G, ...entry] of [

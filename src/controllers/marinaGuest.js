@@ -364,6 +364,41 @@ async function ablyToken(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Sidon's "my bookings": every verified booking of the signed-in sailor.
+async function listSailorBookings(req, res, next) {
+  try {
+    const rows = await q.sailorBookings(pool, req.sailor.email);
+    const templates = new Map();
+    for (const id of new Set(rows.map((r) => r.marina_id))) templates.set(id, await activeTemplates(id));
+    const { rows: reqs } = rows.length ? await pool.query(
+      `SELECT mb.id AS booking_id, r.id, r.name FROM marina_booking mb
+       JOIN marina_doc_requirement r ON r.marina_id = mb.marina_id AND r.status = 'active' AND r.mandatory
+       WHERE mb.id = ANY($1) AND NOT EXISTS (SELECT 1 FROM marina_document d WHERE d.booking_id = mb.id AND d.requirement_id = r.id)
+       ORDER BY r.sort_order, r.name`, [rows.map((r) => r.id)]) : { rows: [] };
+    res.json(rows.map((b) => ({
+      ...guestView(b),
+      marina_id: b.marina_id, marina_image_url: b.marina_image_url,
+      marina_lat: b.marina_lat, marina_lng: b.marina_lng, booking_token: bookingToken(b.id),
+      contract_required: !!b.departure && kc.pickTemplate(templates.get(b.marina_id), nightsBetween(b.arrival, b.departure)) != null,
+      contract_agreed: b.has_signature,
+      missing_documents: reqs.filter((r) => r.booking_id === b.id).map(({ id, name }) => ({ id, name })),
+    })));
+  } catch (err) { next(err); }
+}
+
+// One token for every live booking, so the app holds a single Ably connection.
+async function sailorAblyToken(req, res, next) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id FROM marina_booking WHERE lower(contact_email) = $1 AND email_verified
+         AND status IN ('hold', 'pending', 'confirmed') AND (departure IS NULL OR departure >= current_date)`, [req.sailor.email]);
+    if (!rows.length) return res.status(204).end();
+    const t = await createSubscribeTokenRequest(rows.map((r) => `marina-booking:${r.id}`));
+    if (!t) return res.status(503).json({ error: 'Live updates are not configured' });
+    res.json(t);
+  } catch (err) { next(err); }
+}
+
 async function confirmPayment(req, res, next) {
   try {
     const r = await life.withLockedBooking(req.booking.id, async (client, row) => {
@@ -440,5 +475,5 @@ async function createEnquiry(req, res, next) {
 module.exports = {
   requirementsStatus,
   resolveMarina, sailorMarina, getMarinaMap, getAvailability, getPublicBerths, getDocRequirements, quote,
-  requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink, ablyToken, confirmPayment, contractPreview, agreeContract, createEnquiry,
+  requireBookingToken, guestView, createGuestBooking, getGuestBooking, cancelGuestBooking, confirmBookingLink, ablyToken, listSailorBookings, sailorAblyToken, confirmPayment, contractPreview, agreeContract, createEnquiry,
 };

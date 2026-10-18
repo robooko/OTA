@@ -330,10 +330,12 @@ async function publishMarinaGuestUpdate(bookingId, status) {
 }
 
 // Subscribe-only, one channel, short-lived: handed to a guest holding the
-// booking token. OTA issued no TokenRequests before this.
-async function createSubscribeTokenRequest(channel) {
+// booking token (or a sailor's own bookings: pass an array). OTA issued no
+// TokenRequests before this.
+async function createSubscribeTokenRequest(channels) {
   if (!client) return null;
-  return client.auth.createTokenRequest({ capability: { [channel]: ['subscribe'] }, ttl: 60 * 60 * 1000 });
+  const capability = Object.fromEntries([].concat(channels).map((c) => [c, ['subscribe']]));
+  return client.auth.createTokenRequest({ capability, ttl: 60 * 60 * 1000 });
 }
 
 module.exports = {

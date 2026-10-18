@@ -122,6 +122,55 @@ const { bookingToken } = require('../src/lib/marinaToken');
         assert.equal((await api('GET', `${S}/bookings/${r.body.booking.id}`, { headers: { ...h, 'X-Booking-Token': r.body.booking_token } })).status, 200);
       } finally { sa.resolveSailor = saved; }
     });
+    // Fixed far-future dates: guestBody's rolling counter must not move for later checks.
+    const fixedBody = { berth_label: 'H1', contact_name: 'Ann', boat_name: 'Wave', boat_length_m: 10 };
+    const sailorH = { 'X-Api-Key': '', 'X-Sailor-Token': 'good' };
+    await check('sailor bookings: lists only my verified bookings, across properties, with tokens', async () => {
+      const sa = require('../src/middleware/sailorAuth');
+      const saved = sa.resolveSailor;
+      sa.resolveSailor = async (t) => (t === 'good' ? { email: 'sailor@example.com' } : null);
+      const reqRow = await one(`INSERT INTO marina_doc_requirement (property_id, marina_id, type, name, mandatory) VALUES ($1, $2, 'passport', 'Passport SB', true) RETURNING id`, [P, m.id]);
+      try {
+        const S = `/api/marina/sailor/${m.id}`;
+        const mine = await api('POST', `${S}/bookings`, { body: { ...fixedBody, arrival: future(950), departure: future(952) }, headers: sailorH });
+        assert.equal(mine.status, 201);
+        const sailorBookingId = mine.body.booking.id;
+        const site = await api('POST', `${G}/bookings`, { body: { ...fixedBody, contact_email: 'sailor@example.com', arrival: future(960), departure: future(962) } });
+        assert.equal(site.status, 201);
+        const unverifiedId = site.body.booking.id;
+        const r = await api('GET', '/api/marina/sailor/bookings', { headers: sailorH });
+        assert.equal(r.status, 200);
+        assert.ok(r.body.every((b) => b.contact_email === 'sailor@example.com'));
+        assert.equal(r.body.filter((b) => b.id === unverifiedId).length, 0);
+        const b = r.body.find((x) => x.id === sailorBookingId);
+        assert.equal(b.booking_token, bookingToken(b.id));
+        assert.equal(b.marina_id, m.id); assert.equal(typeof b.contract_required, 'boolean');
+        assert.equal(typeof b.contract_agreed, 'boolean');
+        assert.ok(Array.isArray(b.missing_documents));
+        assert.deepEqual(b.missing_documents, [{ id: reqRow.id, name: 'Passport SB' }]);
+        assert.equal((await api('GET', '/api/marina/sailor/bookings', { headers: { 'X-Api-Key': '' } })).status, 401);
+      } finally {
+        sa.resolveSailor = saved;
+        await pool.query('DELETE FROM marina_doc_requirement WHERE id = $1', [reqRow.id]);
+      }
+    });
+    await check('sailor bookings: route is not swallowed by /sailor/:marina_id', async () => {
+      const sa = require('../src/middleware/sailorAuth');
+      const saved = sa.resolveSailor;
+      sa.resolveSailor = async (t) => (t === 'good' ? { email: 'sailor@example.com' } : null);
+      try {
+        assert.notEqual((await api('GET', '/api/marina/sailor/bookings', { headers: sailorH })).status, 404);
+      } finally { sa.resolveSailor = saved; }
+    });
+    await check('sailor ably token: 503 when Ably is off', async () => {
+      const sa = require('../src/middleware/sailorAuth');
+      const saved = sa.resolveSailor;
+      sa.resolveSailor = async (t) => (t === 'good' ? { email: 'sailor@example.com' } : null);
+      try {
+        // ABLY_API_KEY is deleted at the top of this script
+        assert.equal((await api('GET', '/api/marina/sailor/bookings/ably-token', { headers: sailorH })).status, 503);
+      } finally { sa.resolveSailor = saved; }
+    });
     await check('staff list hides holds; staff can confirm a pending booking', async () => {
       const r = await api('POST', '/api/marina/bookings', { body: { berth_id: berthRes.body.id, contact_name: 'Staff', arrival: future(400), departure: future(402), status: 'pending' } });
       assert.equal(r.status, 201);

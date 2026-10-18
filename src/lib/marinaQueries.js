@@ -67,4 +67,27 @@ async function joinedBooking(client, id) {
   return r || null;
 }
 
-module.exports = { READY_COLS, propertyToday, marinaBySlug, freeBerths, berthAvailability, activeTiers, joinedBooking };
+// A sailor's verified bookings across every marina, minus expired holds.
+// Same columns as joinedBooking plus map/card fields.
+async function sailorBookings(client, email) {
+  const { rows } = await client.query(
+    `SELECT mb.*, b.label AS berth_label, m.name AS marina_name, m.slug AS marina_slug,
+            m.email AS marina_email, m.phone AS marina_phone, m.website AS marina_website,
+            m.booking_url, m.response_window_hours, m.auto_confirm, p.name AS property_name,
+            m.lat AS marina_lat, m.lng AS marina_lng,
+            (SELECT i.url FROM marina_image i WHERE i.marina_id = m.id AND i.status = 'active' ORDER BY i.sort_order LIMIT 1) AS marina_image_url,
+            EXISTS (SELECT 1 FROM marina_contract_signature s WHERE s.booking_id = mb.id AND s.agreed_at IS NOT NULL) AS has_signature,
+            (SELECT count(*)::int FROM marina_document d WHERE d.booking_id = mb.id) AS doc_count,
+            (SELECT count(*)::int FROM marina_document d WHERE d.booking_id = mb.id AND d.status = 'verified') AS docs_verified,
+            ${READY_COLS}
+     FROM marina_booking mb
+     JOIN marina_berth b ON b.id = mb.berth_id
+     JOIN marina m ON m.id = mb.marina_id
+     JOIN property p ON p.id = mb.property_id
+     WHERE lower(mb.contact_email) = $1 AND mb.email_verified
+       AND NOT (mb.status = 'hold' AND mb.hold_expires_at < now())
+     ORDER BY mb.arrival DESC`, [email]);
+  return rows;
+}
+
+module.exports = { sailorBookings, READY_COLS, propertyToday, marinaBySlug, freeBerths, berthAvailability, activeTiers, joinedBooking };
