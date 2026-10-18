@@ -78,23 +78,49 @@ function handOff(res, property, text) {
   twiml(res, `${say(`Sorry, there's no one free to take your call. Please try ${property.name} again later. Goodbye.`)}<Hangup/>`);
 }
 
-function systemPrompt(property, spa, today) {
-  return `You are the receptionist answering the phone for ${property.name}.
+// The same receptionist answers calls and texts (controllers/sms.js); only
+// the medium changes what it says and how.
+const CHANNELS = {
+  phone: {
+    role: 'answering the phone',
+    tone: 'Calm, warm and brief, like a good receptionist. One or two short spoken sentences per reply. Everything you write is read aloud by a text-to-speech voice: no lists, markdown or emojis. Never read out a web address. Say prices the way a person would ("forty-five pounds").',
+    heading: 'What you do on the phone',
+    from: 'the call',
+    readBack: 'read it back letter by letter and only use it once they confirm',
+    confirm: 'Their yes to the read-back is their go-ahead',
+    person: 'call "transfer_call" if you have it; otherwise take an enquiry',
+    label: { u: 'Caller', a: 'Receptionist', log: 'Call transcript' },
+  },
+  sms: {
+    role: 'answering text messages',
+    tone: 'Warm and brief, like a good receptionist texting back. One to three short sentences per message, plain text: no markdown, lists or emojis. Write prices in figures ("£45").',
+    heading: 'What you do by text',
+    from: 'their text',
+    readBack: 'use it as written, and only check it if it looks mistyped',
+    confirm: 'Their yes to the time is their go-ahead',
+    person: 'take an enquiry and tell them the team will call them back',
+    label: { u: 'Guest', a: 'Receptionist', log: 'Text conversation' },
+  },
+};
+
+function systemPrompt(property, spa, today, channel = 'phone') {
+  const c = CHANNELS[channel];
+  return `You are the receptionist ${c.role} for ${property.name}.
 
 Tone
-Calm, warm and brief, like a good receptionist. One or two short spoken sentences per reply. Everything you write is read aloud by a text-to-speech voice: no lists, markdown or emojis. Never read out a web address. Say prices the way a person would ("forty-five pounds").
+${c.tone}
 
 <venue>
 ${buildVenueFacts(property, null, spa)}</venue>
 ${property.ai_reply_instructions ? `<instructions>\n${property.ai_reply_instructions}\n</instructions>\n` : ''}
 Only state facts given above. If you don't know something, say the team will get back to them and take their details.
 
-What you do on the phone
+${c.heading}
 - Answer questions about the venue using only the information above.
-- For a booking, an event or anything the team must follow up, get their name, what they want and, where it applies, the date, time and number of guests, then call "take_enquiry". Their number comes from the call, so don't ask for it unless it's withheld. An email is optional: ask once if they'd like a reply by email, and don't press if they'd rather not. If they give one, read it back letter by letter and only use it once they confirm.
-${spa ? `- To book an appointment, call "check_availability" and offer two or three of the times it returns, by day and time ("Tuesday at ten"), choosing times on the hour where there are any. Describe a day by its opening hours ("nine till five"), never by the last start time ("until a quarter to five"). Once they pick one, get their full name and email and read the email back letter by letter. Their yes to the read-back is their go-ahead: call "book_appointment" in that same reply, without asking again or checking availability again. Then tell them the time is held for ${HOLD_MINUTES} minutes until they click the link in the email. If booking fails, say why in plain words and offer another time, or take an enquiry.
+- For a booking, an event or anything the team must follow up, get their name, what they want and, where it applies, the date, time and number of guests, then call "take_enquiry". Their number comes from ${c.from}, so don't ask for it unless it's withheld. An email is optional: ask once if they'd like a reply by email, and don't press if they'd rather not. If they give one, ${c.readBack}.
+${spa ? `- To book an appointment, call "check_availability" and offer two or three of the times it returns, by day and time ("Tuesday at ten"), choosing times on the hour where there are any. Describe a day by its opening hours ("nine till five"), never by the last start time ("until a quarter to five"). Once they pick one, get their full name and email (${c.readBack}). ${c.confirm}: call "book_appointment" in that same reply, without asking again or checking availability again. Then tell them the time is held for ${HOLD_MINUTES} minutes until they click the link in the email. If booking fails, say why in plain words and offer another time, or take an enquiry.
 ` : `- You cannot confirm bookings yourself; say the team will be in touch to confirm.
-`}- If they ask for a person, or need something you can't help with, call "transfer_call" if you have it; otherwise take an enquiry.
+`}- If they ask for a person, or need something you can't help with, ${c.person}.
 
 Lines in square brackets in your earlier replies record what your tools did; they are true, so never redo them, and never say them aloud. You can't see whether someone has clicked an email link; if asked, say the email confirms it once they've clicked.
 When you use a tool, you may say a brief sentence first. If no tool can do what the caller asked, say so instead of guessing. Do not include internal or system XML tags in your reply.
@@ -156,7 +182,7 @@ const BOOK_FAILURES = {
   members_only: 'That is only available to regulars.',
 };
 
-async function bookAppointment(property, caller, input) {
+async function bookAppointment(property, caller, input, channel = 'phone') {
   const email = clip(input.email, 255);
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { booked: false, reason: 'A valid email is needed to hold the time.' };
   const { rows: [treatment] } = await pool.query(
@@ -173,7 +199,7 @@ async function bookAppointment(property, caller, input) {
     contact_name: clip(input.name, 100) ?? 'Caller',
     contact_email: email,
     contact_phone: caller,
-    notes: 'Booked by the phone receptionist',
+    notes: channel === 'sms' ? 'Booked by the receptionist by text' : 'Booked by the phone receptionist',
     enforceLeadTime: true,
     guestRail: true,
   });
@@ -184,9 +210,10 @@ async function bookAppointment(property, caller, input) {
 const clip = (value, max) => (typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null);
 
 // Creates the call's enquiry on the first take_enquiry, updates it after.
-async function saveEnquiry(property, caller, input, inquiryId, turns) {
-  const transcript = turns.map((t) => `${t.r === 'u' ? 'Caller' : 'Receptionist'}: ${t.t}`).join('\n');
-  const message = `${clip(input.summary, 600) ?? ''}\n\nCall transcript:\n${transcript}`;
+async function saveEnquiry(property, caller, input, inquiryId, turns, source = 'phone') {
+  const { label } = CHANNELS[source];
+  const transcript = turns.map((t) => `${label[t.r]}: ${t.t}`).join('\n');
+  const message = `${clip(input.summary, 600) ?? ''}\n\n${label.log}:\n${transcript}`;
   const email = clip(input.email, 255);
   const fields = [
     clip(input.name, 100) ?? 'Caller',
@@ -202,19 +229,112 @@ async function saveEnquiry(property, caller, input, inquiryId, turns) {
     const { rows } = await pool.query(
       `UPDATE event_inquiry SET name = $1, email = COALESCE($2, email), phone = COALESCE($3, phone),
               event_date = $4, event_time = $5, guests = $6, event_type = $7, message = $8
-       WHERE id = $9 AND property_id = $10 AND source = 'phone' RETURNING id`,
-      [...fields, inquiryId, property.id]
+       WHERE id = $9 AND property_id = $10 AND source = $11 RETURNING id`,
+      [...fields, inquiryId, property.id, source]
     );
     if (rows[0]) return rows[0].id;
   }
   const { rows: [row] } = await pool.query(
     `INSERT INTO event_inquiry (property_id, spa_id, name, email, phone, event_date, event_time, guests, event_type, message, source)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'phone') RETURNING *`,
-    [property.id, property.spa_id, ...fields]
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+    [property.id, property.spa_id, ...fields, source]
   );
   publishNewInquiry(property.id, row).catch((err) => console.error('Ably publish failed:', err.message));
   if (row.spa_id) publishNewInquiryForSpa(row.spa_id, row).catch((err) => console.error('Ably publish failed:', err.message));
   return row.id;
+}
+
+// ponytail: first spa only; a property with several spas gets the first one's facts.
+async function findProperty(number) {
+  const { rows: [property] } = await pool.query(
+    `SELECT p.id, p.name, p.currency, p.ai_reply_instructions, p.return_instructions, p.voice_transfer_number,
+            (SELECT s.id FROM spa s WHERE s.property_id = p.id AND s.status = 'active' ORDER BY s.created_at LIMIT 1) AS spa_id
+     FROM property p WHERE p.voice_number = $1 AND p.voice_enabled`,
+    [number]
+  );
+  return property ?? null;
+}
+
+// One turn of the receptionist, by phone or by text (controllers/sms.js):
+// runs the model and its tools on the conversation so far (`turns`, ending
+// with what the guest just said). Throws if the model fails.
+async function runReceptionist(property, { caller, turns, inquiryId, channel = 'phone' }) {
+  const spa = property.spa_id ? await loadSpaContext(property.spa_id) : null;
+  const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Europe/London', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const availability = spa && buildAvailabilityTool({ spa_id: property.spa_id });
+  const tools = [
+    TAKE_ENQUIRY,
+    ...(availability ? [availability, BOOK_APPOINTMENT] : []),
+    ...(channel === 'phone' && property.voice_transfer_number ? [TRANSFER_CALL] : []),
+  ];
+
+  const messages = turns.map((t) => ({ role: t.r === 'u' ? 'user' : 'assistant', content: t.t }));
+  // The API wants the first message from the user; the greeting isn't one.
+  while (messages[0]?.role === 'assistant') messages.shift();
+
+  let reply = '';
+  let transfer = false;
+  // Only words survive between turns (the history rides in the call's URL,
+  // or in sms_thread for texts), so what the tools did is noted on the
+  // stored turn. Without it the next turn didn't know the call was booked,
+  // re-booked it, hit its own booking as "taken" and told the caller it had failed.
+  const done = [];
+  const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
+  for (let step = 0; step < 4; step++) {
+    const response = await client().messages.create({
+      model: MODEL,
+      // Thinking off: Haiku 5.5 thinks by default, and on a 300-token cap
+      // the thinking ate the reply, so callers heard "say that again".
+      // Brevity comes from the prompt; the cap is only a backstop.
+      max_tokens: 1024,
+      thinking: { type: 'disabled' },
+      system: systemPrompt(property, spa, today, channel),
+      tools,
+      messages,
+    }, { signal });
+    // Bracketed notes are for the history only (see `done`); never say one.
+    reply = response.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ')
+      .replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim();
+    const calls = response.content.filter((b) => b.type === 'tool_use');
+    if (!calls.length) break;
+    messages.push({ role: 'assistant', content: response.content });
+    const results = [];
+    for (const call of calls) {
+      let result;
+      if (call.name === 'take_enquiry') {
+        inquiryId = await saveEnquiry(property, caller, call.input ?? {}, inquiryId, turns, channel);
+        done.push('[Done: enquiry filed for the team]');
+        result = { saved: true };
+      } else if (call.name === availability?.name) {
+        result = await executeAvailabilityTool({ spa_id: property.spa_id }, call.input ?? {});
+      } else if (call.name === 'book_appointment' && availability) {
+        result = await bookAppointment(property, caller, call.input ?? {}, channel);
+        if (result.booked) {
+          const b = call.input;
+          // Every phone or text booking also shows in the enquiries queue
+          // with its transcript, so staff see the conversation, not just the slot.
+          inquiryId = await saveEnquiry(property, caller, {
+            name: b.name,
+            email: b.email,
+            summary: `Booked ${b.treatment_name} on ${b.date} at ${b.time} by ${channel === 'sms' ? 'text' : 'phone'}.`,
+            event_date: b.date,
+            event_time: String(b.time).slice(0, 5),
+            event_type: b.treatment_name,
+          }, inquiryId, turns, channel);
+          done.push(`[Done: booked ${b.treatment_name} on ${b.date} at ${b.time} for ${b.name}, ${b.email}; held ${HOLD_MINUTES} minutes until they click the email link]`);
+        }
+      } else if (call.name === 'transfer_call' && tools.includes(TRANSFER_CALL)) {
+        transfer = true;
+        result = { transferring: true };
+      } else {
+        result = { error: 'unknown tool' };
+      }
+      results.push({ type: 'tool_result', tool_use_id: call.id, content: JSON.stringify(result) });
+    }
+    messages.push({ role: 'user', content: results });
+    if (transfer) break;
+  }
+  return { reply, transfer, done, inquiryId };
 }
 
 async function handleVoiceWebhook(req, res, next) {
@@ -223,13 +343,7 @@ async function handleVoiceWebhook(req, res, next) {
     const url = `${PUBLIC_BASE_URL}${req.originalUrl}`;
     if (!twilio.validateWebhook(req.get('x-twilio-signature'), url, params)) return res.status(403).send('Forbidden');
 
-    // ponytail: first spa only; a property with several spas gets the first one's facts.
-    const { rows: [property] } = await pool.query(
-      `SELECT p.id, p.name, p.currency, p.ai_reply_instructions, p.return_instructions, p.voice_transfer_number,
-              (SELECT s.id FROM spa s WHERE s.property_id = p.id AND s.status = 'active' ORDER BY s.created_at LIMIT 1) AS spa_id
-       FROM property p WHERE p.voice_number = $1 AND p.voice_enabled`,
-      [params.To]
-    );
+    const property = await findProperty(params.To);
     if (!property) return twiml(res, `${say('Sorry, this number is not taking calls right now. Goodbye.')}<Hangup/>`);
 
     const turns = decodeHistory(req.query.h);
@@ -249,86 +363,16 @@ async function handleVoiceWebhook(req, res, next) {
     turns.push({ r: 'u', t: speech.slice(0, 1000) });
     // Withheld caller IDs arrive as "anonymous" or similar, not a number.
     const caller = /^\+\d{7,15}$/.test(params.From ?? '') ? params.From : null;
-    const spa = property.spa_id ? await loadSpaContext(property.spa_id) : null;
-    const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Europe/London', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-    const availability = spa && buildAvailabilityTool({ spa_id: property.spa_id });
-    const tools = [
-      TAKE_ENQUIRY,
-      ...(availability ? [availability, BOOK_APPOINTMENT] : []),
-      ...(property.voice_transfer_number ? [TRANSFER_CALL] : []),
-    ];
 
-    const messages = turns.map((t) => ({ role: t.r === 'u' ? 'user' : 'assistant', content: t.t }));
-    // The API wants the first message from the user; the greeting isn't one.
-    while (messages[0]?.role === 'assistant') messages.shift();
-
-    let reply = '';
-    let transfer = false;
-    // Only words survive between turns (the history rides in the URL), so
-    // what the tools did is noted on the stored turn. Without it the next
-    // turn didn't know the call was booked, re-booked it, hit its own
-    // booking as "taken" and told the caller it had failed.
-    const done = [];
+    let result;
     try {
-      const signal = AbortSignal.timeout(TURN_TIMEOUT_MS);
-      for (let step = 0; step < 4; step++) {
-        const response = await client().messages.create({
-          model: MODEL,
-          // Thinking off: Haiku 5.5 thinks by default, and on a 300-token cap
-          // the thinking ate the reply, so callers heard "say that again".
-          // Brevity comes from the prompt; the cap is only a backstop.
-          max_tokens: 1024,
-          thinking: { type: 'disabled' },
-          system: systemPrompt(property, spa, today),
-          tools,
-          messages,
-        }, { signal });
-        // Bracketed notes are for the history only (see `done`); never say one.
-        reply = response.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ')
-          .replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim();
-        const calls = response.content.filter((b) => b.type === 'tool_use');
-        if (!calls.length) break;
-        messages.push({ role: 'assistant', content: response.content });
-        const results = [];
-        for (const call of calls) {
-          let result;
-          if (call.name === 'take_enquiry') {
-            inquiryId = await saveEnquiry(property, caller, call.input ?? {}, inquiryId, turns);
-            done.push('[Done: enquiry filed for the team]');
-            result = { saved: true };
-          } else if (call.name === availability?.name) {
-            result = await executeAvailabilityTool({ spa_id: property.spa_id }, call.input ?? {});
-          } else if (call.name === 'book_appointment' && availability) {
-            result = await bookAppointment(property, caller, call.input ?? {});
-            if (result.booked) {
-              const b = call.input;
-              // Every phone booking also shows in the enquiries queue with
-              // its transcript, so staff see the call, not just the slot.
-              inquiryId = await saveEnquiry(property, caller, {
-                name: b.name,
-                email: b.email,
-                summary: `Booked ${b.treatment_name} on ${b.date} at ${b.time} by phone.`,
-                event_date: b.date,
-                event_time: String(b.time).slice(0, 5),
-                event_type: b.treatment_name,
-              }, inquiryId, turns);
-              done.push(`[Done: booked ${b.treatment_name} on ${b.date} at ${b.time} for ${b.name}, ${b.email}; held ${HOLD_MINUTES} minutes until they click the email link]`);
-            }
-          } else if (call.name === 'transfer_call' && property.voice_transfer_number) {
-            transfer = true;
-            result = { transferring: true };
-          } else {
-            result = { error: 'unknown tool' };
-          }
-          results.push({ type: 'tool_result', tool_use_id: call.id, content: JSON.stringify(result) });
-        }
-        messages.push({ role: 'user', content: results });
-        if (transfer) break;
-      }
+      result = await runReceptionist(property, { caller, turns, inquiryId });
     } catch (err) {
       console.error('[voice] agent error:', err.message);
       return handOff(res, property, "Sorry, I'm having trouble on my end. Let me put you through.");
     }
+    const { reply, transfer, done } = result;
+    inquiryId = result.inquiryId;
 
     if (transfer) return handOff(res, property, reply || 'Putting you through now.');
     turns.push({ r: 'a', t: [reply, ...done].join(' ') });
@@ -338,4 +382,4 @@ async function handleVoiceWebhook(req, res, next) {
   }
 }
 
-module.exports = { handleVoiceWebhook, PUBLIC_BASE_URL };
+module.exports = { handleVoiceWebhook, PUBLIC_BASE_URL, findProperty, runReceptionist, saveEnquiry, MAX_TURNS };

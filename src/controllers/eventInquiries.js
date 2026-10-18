@@ -38,8 +38,8 @@ async function listInquiries(req, res, next) {
     const params = [req.property_id];
     let spaFilter = '';
     if (spa_id) { params.push(spa_id); spaFilter = ` AND ei.spa_id = $${params.length}`; }
-    // 'phone' lists the receptionist's calls; each message is the transcript.
-    if (source === 'web' || source === 'phone') { params.push(source); spaFilter += ` AND ei.source = $${params.length}`; }
+    // 'phone' and 'sms' list the receptionist's calls and texts; each message is the transcript.
+    if (['web', 'phone', 'sms'].includes(source)) { params.push(source); spaFilter += ` AND ei.source = $${params.length}`; }
 
     const { rows } = await pool.query(
       `SELECT ei.*, r.name AS restaurant_name, s.name AS spa_name, mr.name AS marina_name, lrm.direction AS last_reply_direction,

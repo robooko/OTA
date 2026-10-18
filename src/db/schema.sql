@@ -1169,7 +1169,7 @@ CREATE TABLE IF NOT EXISTS event_inquiry (
   name          VARCHAR(100) NOT NULL,
   email         VARCHAR(255), -- nullable since migrate-2026-10-17-phone-receptionist.sql: phone callers may give none
   phone         VARCHAR(30),
-  source        VARCHAR(10)  NOT NULL DEFAULT 'web' CHECK (source IN ('web', 'phone')),
+  source        VARCHAR(10)  NOT NULL DEFAULT 'web' CHECK (source IN ('web', 'phone', 'sms')),
   event_date    DATE, -- nullable since migrate-2026-08-30-event-inquiry-optional-date.sql: general enquiries need no date
   event_time    TIME, -- see migrate-2026-08-18-event-inquiry-time.sql
   guests        INT,

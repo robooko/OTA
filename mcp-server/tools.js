@@ -790,8 +790,8 @@ function createTools(apiRequest) {
   },
   {
     name: 'list_event_inquiries',
-    description: "List event inquiries for this property, newest first. source 'phone' lists only the AI receptionist's calls; each one's message is the call transcript.",
-    inputSchema: { source: z.enum(['web', 'phone']).optional() },
+    description: "List event inquiries for this property, newest first. source 'phone' lists only the AI receptionist's calls and 'sms' its text conversations; each one's message is the transcript.",
+    inputSchema: { source: z.enum(['web', 'phone', 'sms']).optional() },
     run: ({ source }) => apiRequest('GET', `/api/event-inquiries${source ? `?source=${source}` : ''}`),
   },
   {

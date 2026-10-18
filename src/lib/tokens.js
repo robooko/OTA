@@ -19,6 +19,7 @@ const TOKEN_COSTS = {
                     // the body was hand-typed or an approved AI draft, since
                     // sending costs the same either way.
   voice_call: 5000, // one AI receptionist call (Twilio minutes + up to 20 model turns)
+  sms_conversation: 2500, // one day's text conversation with the receptionist (texts + model turns)
 };
 
 // Granted once per owner (idem_key 'starter:<owner>'), so the paid features
