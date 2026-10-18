@@ -3,6 +3,7 @@ const { isValidUuid, isValidUrl } = require('../middleware/validate');
 const { sniffType, putPublic } = require('../lib/marinaDocuments');
 const { unknownPlaceholders } = require('../lib/marinaContracts');
 const { TYPE_NAMES } = require('../lib/sailorDocTypes');
+const { applyPlacement, PLACEMENT_COLS } = require('../lib/pierPlacement');
 
 // Staff CRUD for marinas and their catalogue tables. Every child table is
 // property-scoped and soft-deletes through status, so one table-driven
@@ -198,6 +199,7 @@ function childHandlers(kind) {
         if (table === 'marina_berth') await checkPontoon(pool, req.params.marina_id, values);
         if (table === 'marina_price_tier') checkTierDates(values);
         const { rows: [row] } = await pool.query(insertSql(table, { ...values, property_id: req.property_id, marina_id: req.params.marina_id }));
+        if (table === 'marina_pontoon') row.placement = await applyPlacement(pool, row);
         res.status(201).json(withWarnings(table, row));
       } catch (err) {
         if (err.code === '23505') return res.status(409).json({ error: 'That label is already used at this marina' });
@@ -225,6 +227,8 @@ function childHandlers(kind) {
             [renameBerthInSvg((await client.query('SELECT svg_data FROM marina_pontoon WHERE id = $1 FOR UPDATE', [row.pontoon_id])).rows[0].svg_data, before.label, values.label), row.pontoon_id]
           );
         }
+        // Saving a pontoon's drawing, corners or turn re-places its berths.
+        if (table === 'marina_pontoon' && PLACEMENT_COLS.some((c) => c in values)) row.placement = await applyPlacement(client, row);
         await client.query('COMMIT');
         res.json(withWarnings(table, row));
       } catch (err) {
