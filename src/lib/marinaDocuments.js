@@ -75,10 +75,9 @@ async function extractDocument(docId, buf) {
 
 // Sailor documents: fields from the shared type list. Writes extracted_data
 // on the version and the document, and the extracted expiry_date onto the
-// document unless keepExpiry (the sailor gave one with this upload): the
-// booking widget has no expiry entry, so passport/insurance are only met
-// through it. Never throws.
-async function extractSailorVersion(versionId, { keepExpiry = false } = {}) {
+// document: the only way a sailor's expiry is set (staff can correct it when
+// deciding). Never throws.
+async function extractSailorVersion(versionId) {
   try {
     if (!process.env.ANTHROPIC_API_KEY) return;
     const { rows: [v] } = await pool.query(
@@ -89,10 +88,8 @@ async function extractSailorVersion(versionId, { keepExpiry = false } = {}) {
     await pool.query('UPDATE sailor_document_version SET extracted_data = $1 WHERE id = $2', [data, versionId]);
     await pool.query('UPDATE sailor_document SET extracted_data = $1 WHERE id = $2', [data, v.document_id]);
     // A new version is read afresh: no readable expiry clears the old one.
-    if (!keepExpiry) {
-      const expiry = /^\d{4}-\d{2}-\d{2}$/.test(data.expiry_date) ? data.expiry_date : null;
-      await pool.query('UPDATE sailor_document SET expiry_date = $1 WHERE id = $2', [expiry, v.document_id]);
-    }
+    const expiry = /^\d{4}-\d{2}-\d{2}$/.test(data.expiry_date) ? data.expiry_date : null;
+    await pool.query('UPDATE sailor_document SET expiry_date = $1 WHERE id = $2', [expiry, v.document_id]);
   } catch (err) {
     await pool.query('UPDATE sailor_document_version SET extracted_data = $1 WHERE id = $2', [{ error: err.message }, versionId]).catch(() => {});
   }

@@ -1,6 +1,6 @@
 const { Readable } = require('stream');
 const pool = require('../db');
-const { isValidUuid, isValidDate } = require('../middleware/validate');
+const { isValidUuid } = require('../middleware/validate');
 const docs = require('../lib/marinaDocuments');
 const { TYPE_NAMES } = require('../lib/sailorDocTypes');
 
@@ -28,25 +28,17 @@ async function ownDocuments(email, id = null) {
   return rows;
 }
 
-// expiry_date: absent -> undefined, '' / null -> null, else must be YYYY-MM-DD.
-function parseExpiry(v) {
-  if (v === undefined) return { ok: true, value: undefined };
-  if (v === null || v === '') return { ok: true, value: null };
-  return isValidDate(v) ? { ok: true, value: v } : { ok: false };
-}
-
 async function listDocuments(req, res, next) {
   try { res.json(await ownDocuments(req.sailor.email)); } catch (err) { next(err); }
 }
 
 // Raw body. ?document_id= adds a version to that document; otherwise
-// ?type= starts a new one. ?expiry_date= optional (the sailor's own value).
+// ?type= starts a new one. The expiry is never the sailor's to set: it comes
+// from extraction or from staff, and an unreadable one is handled off-system.
 async function uploadDocument(req, res, next) {
   try {
     const { email } = req.sailor;
     const { type, document_id } = req.query;
-    const expiry = parseExpiry(req.query.expiry_date);
-    if (!expiry.ok) return res.status(400).json({ error: 'expiry_date must be YYYY-MM-DD' });
     let documentId = null;
     if (document_id) {
       if (!isValidUuid(document_id)) return res.status(404).json(NOT_FOUND);
@@ -71,29 +63,14 @@ async function uploadDocument(req, res, next) {
     const fileName = String(req.get('X-File-Name') || '').replace(/[^\w.\- ]/g, '').slice(0, 255) || null;
     if (!documentId) {
       ({ rows: [{ id: documentId }] } = await pool.query(
-        'INSERT INTO sailor_document (email, type, expiry_date) VALUES ($1, $2, $3) RETURNING id', [email, type, expiry.value ?? null]));
-    } else if (expiry.value !== undefined) {
-      await pool.query('UPDATE sailor_document SET expiry_date = $1 WHERE id = $2', [expiry.value, documentId]);
+        'INSERT INTO sailor_document (email, type) VALUES ($1, $2) RETURNING id', [email, type]));
     }
     const { rows: [v] } = await pool.query(
       `INSERT INTO sailor_document_version (document_id, blob_pathname, file_name, content_type, size_bytes)
        VALUES ($1, $2, $3, $4, $5) RETURNING id`, [documentId, pathname, fileName, contentType, buf.length]);
-    // Awaited so the response carries the extracted expiry (kept off when the
-    // sailor sent one). Never throws.
-    await docs.extractSailorVersion(v.id, { keepExpiry: expiry.value !== undefined });
+    // Awaited so the response carries the extracted expiry. Never throws.
+    await docs.extractSailorVersion(v.id);
     res.status(201).json((await ownDocuments(email, documentId))[0]);
-  } catch (err) { next(err); }
-}
-
-async function updateDocument(req, res, next) {
-  try {
-    if (!isValidUuid(req.params.id)) return res.status(404).json(NOT_FOUND);
-    const expiry = parseExpiry((req.body || {}).expiry_date);
-    if (!expiry.ok || expiry.value === undefined) return res.status(400).json({ error: 'expiry_date must be YYYY-MM-DD or null' });
-    const { rowCount } = await pool.query('UPDATE sailor_document SET expiry_date = $1 WHERE id = $2 AND email = $3 AND deleted_at IS NULL',
-      [expiry.value, req.params.id, req.sailor.email]);
-    if (!rowCount) return res.status(404).json(NOT_FOUND);
-    res.json((await ownDocuments(req.sailor.email, req.params.id))[0]);
   } catch (err) { next(err); }
 }
 
@@ -132,4 +109,4 @@ async function streamOwnVersion(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listDocuments, uploadDocument, updateDocument, deleteDocument, streamOwnVersion, streamVersion };
+module.exports = { listDocuments, uploadDocument, deleteDocument, streamOwnVersion, streamVersion };

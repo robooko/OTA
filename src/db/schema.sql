@@ -1542,7 +1542,7 @@ CREATE TABLE IF NOT EXISTS sailor_document (
   email          VARCHAR(255) NOT NULL, -- lower-cased, Clerk primary + verified
   type           VARCHAR(30) NOT NULL CHECK (type IN ('insurance', 'acord25', 'registration', 'uscg_cod', 'passport', 'safety')),
   extracted_data JSONB, -- advisory only
-  expiry_date    DATE, -- set by the sailor or staff, never by extraction
+  expiry_date    DATE, -- set by extraction or staff, never by the sailor
   created_at     TIMESTAMPTZ DEFAULT now(),
   deleted_at     TIMESTAMPTZ
 );

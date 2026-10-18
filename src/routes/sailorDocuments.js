@@ -23,7 +23,6 @@ const rawDocSafe = (req, res, next) => rawDoc(req, res, (err) => (err?.status ==
 router.get('/', ctrl.listDocuments);
 router.post('/', uploadLimiter, rawDocSafe, ctrl.uploadDocument);
 router.get('/versions/:id/file', ctrl.streamOwnVersion);
-router.put('/:id', ctrl.updateDocument);
 router.delete('/:id', ctrl.deleteDocument);
 
 module.exports = router;

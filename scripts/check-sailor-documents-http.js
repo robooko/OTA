@@ -54,8 +54,18 @@ const app = require('../src/app');
   const PDF = Buffer.from('%PDF-1.4 check');
   const as = (email) => ({ 'X-Sailor-Token': `sailor:${email}` });
   const S = '/api/sailor/documents';
-  const upload = (email, qs, buf = PDF, type = 'application/pdf') =>
+  const rawUpload = (email, qs, buf = PDF, type = 'application/pdf') =>
     api('POST', `${S}?${qs}`, { raw: buf, headers: { ...as(email), 'Content-Type': type, 'X-File-Name': 'policy.pdf' } });
+  // Extraction is off, so a fixture's expiry_date= stands in for what it would read.
+  const upload = async (email, qs, ...rest) => {
+    const q = new URLSearchParams(qs); const exp = q.get('expiry_date'); q.delete('expiry_date');
+    const r = await rawUpload(email, q.toString(), ...rest);
+    if (exp && r.status === 201) {
+      await pool.query('UPDATE sailor_document SET expiry_date = $1 WHERE id = $2', [exp, r.body.id]);
+      r.body.expiry_date = exp;
+    }
+    return r;
+  };
 
   try {
     // ---- Task 3: sailor API ----
@@ -86,17 +96,13 @@ const app = require('../src/app');
       const r = await upload(ANN, 'type=passport', Buffer.from('hello world'));
       assert.equal(r.status, 400); assert.equal(r.body.error, 'Only PDF, JPEG or PNG files are accepted');
     });
-    await check('bad expiry_date → 400', async () => {
-      assert.equal((await upload(ANN, 'type=passport&expiry_date=31-01-2028')).status, 400);
+    await check('the sailor cannot set an expiry: no PUT, upload ignores expiry_date', async () => {
+      assert.equal((await api('PUT', `${S}/${annDoc.id}`, { headers: as(ANN), body: { expiry_date: '2099-01-01' } })).status, 404);
+      const r = await rawUpload(ANN, 'type=passport&expiry_date=2099-01-01');
+      assert.equal(r.status, 201); assert.equal(r.body.expiry_date, null);
+      await api('DELETE', `${S}/${r.body.id}`, { headers: as(ANN) });
     });
-    await check('PUT sets and clears expiry', async () => {
-      const set = await api('PUT', `${S}/${annDoc.id}`, { headers: as(ANN), body: { expiry_date: '2029-02-01' } });
-      assert.equal(set.status, 200); assert.equal(set.body.expiry_date, '2029-02-01');
-      const clr = await api('PUT', `${S}/${annDoc.id}`, { headers: as(ANN), body: { expiry_date: null } });
-      assert.equal(clr.body.expiry_date, null);
-      assert.equal((await api('PUT', `${S}/${annDoc.id}`, { headers: as(ANN), body: { expiry_date: 'soon' } })).status, 400);
-    });
-    await check('extracted expiry is saved on the document unless the sailor gave one', async () => {
+    await check('extracted expiry is saved on the document, over anything the sailor sent', async () => {
       const key = process.env.ANTHROPIC_API_KEY; process.env.ANTHROPIC_API_KEY ||= 'stub';
       docs.extractSailorVersion = realExtractSailor;
       docs.extractFields = async () => ({ expiry_date: '2031-03-15' });
@@ -107,8 +113,8 @@ const app = require('../src/app');
         const unread = await upload(BOB, `document_id=${r.body.id}`);
         assert.equal(unread.body.expiry_date, null, 'a new version with no readable expiry clears the old one');
         docs.extractFields = async () => ({ expiry_date: '2031-03-15' });
-        const own = await upload(BOB, 'type=insurance&expiry_date=2029-09-09');
-        assert.equal(own.body.expiry_date, '2029-09-09');
+        const own = await rawUpload(BOB, 'type=insurance&expiry_date=2029-09-09');
+        assert.equal(own.body.expiry_date, '2031-03-15');
         await api('DELETE', `${S}/${r.body.id}`, { headers: as(BOB) });
         await api('DELETE', `${S}/${own.body.id}`, { headers: as(BOB) });
       } finally {
@@ -121,10 +127,9 @@ const app = require('../src/app');
       assert.equal(r.status, 200); assert.equal(r.headers.get('cache-control'), 'private, no-store');
       assert.equal(Buffer.from(await r.arrayBuffer()).toString(), PDF.toString());
     });
-    await check("B cannot read, version, PUT or DELETE A's document → 404", async () => {
+    await check("B cannot read, version or DELETE A's document → 404", async () => {
       assert.equal((await api('GET', `${S}/versions/${annDoc.versions[0].id}/file`, { headers: as(BOB) })).status, 404);
       assert.equal((await upload(BOB, `document_id=${annDoc.id}`)).status, 404);
-      assert.equal((await api('PUT', `${S}/${annDoc.id}`, { headers: as(BOB), body: { expiry_date: null } })).status, 404);
       assert.equal((await api('DELETE', `${S}/${annDoc.id}`, { headers: as(BOB) })).status, 404);
       assert.deepEqual((await api('GET', S, { headers: as(BOB) })).body, []);
       assert.equal((await api('GET', `${S}/not-a-uuid/file`, { headers: as(BOB) })).status, 404);
@@ -385,12 +390,12 @@ const app = require('../src/app');
       await decide(id, v2.id, { status: 'approved' });
       await waitStatus(id, 'confirmed');
     });
-    await check('I2: the sailor changing the expiry after approval voids that approval', async () => {
+    await check('I2: the expiry changing after approval voids that approval', async () => {
       const jay = mail('jay');
       const d = (await upload(jay, 'type=insurance&expiry_date=2030-01-01')).body;
       const id = await book(AUTO, jay, as(jay), { live: true });
       await decide(id, d.versions[0].id, { status: 'approved' });
-      assert.equal((await api('PUT', `${S}/${d.id}`, { headers: as(jay), body: { expiry_date: '2031-01-01' } })).status, 200);
+      await pool.query("UPDATE sailor_document SET expiry_date = '2031-01-01' WHERE id = $1", [d.id]);
       await pool.query("UPDATE marina_booking SET status = 'pending' WHERE id = $1", [id]);
       assert.equal(await life.maybeAutoConfirm(id), null);
     });
