@@ -66,7 +66,7 @@ async function getMarinaMap(req, res, next) {
     ]);
     res.json({
       marina: {
-        name: m.name, slug: m.slug, description: m.description, lat: m.lat, lng: m.lng,
+        name: m.name, slug: m.slug, kind: m.kind, description: m.description, lat: m.lat, lng: m.lng,
         phone: m.phone, email: m.email, website: m.website,
         layout: m.layout_svg ? { svg: m.layout_svg, sw_lat: m.layout_sw_lat, sw_lng: m.layout_sw_lng, ne_lat: m.layout_ne_lat, ne_lng: m.layout_ne_lng, rotation: m.layout_rotation } : null,
       },
