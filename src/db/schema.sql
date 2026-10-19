@@ -1597,3 +1597,8 @@ ALTER TABLE marina ADD COLUMN IF NOT EXISTS kind VARCHAR(10) NOT NULL DEFAULT 'm
 -- off). The staff Pontoons map records it when a berth is turned there.
 -- nautical = a chart / seamark layer (e.g. OpenSeaMap over street tiles).
 ALTER TABLE marina ADD COLUMN IF NOT EXISTS map_style VARCHAR(10) NOT NULL DEFAULT 'satellite' CHECK (map_style IN ('satellite', 'street', 'nautical'));
+
+-- Which edge of a drawn berth meets the dock (the green entrance bar), in the
+-- berth's own frame: end, far_end, left or right. Null = as drawn. Applied
+-- when the map is served; the stored drawing keeps its bar for placement.
+ALTER TABLE marina_berth ADD COLUMN IF NOT EXISTS dock_side VARCHAR(10) CHECK (dock_side IN ('end', 'far_end', 'left', 'right'));

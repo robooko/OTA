@@ -3,7 +3,7 @@ const { isValidUuid, isValidUrl } = require('../middleware/validate');
 const { sniffType, putPublic } = require('../lib/marinaDocuments');
 const { unknownPlaceholders } = require('../lib/marinaContracts');
 const { TYPES, TYPE_NAMES } = require('../lib/sailorDocTypes');
-const { applyPlacement, PLACEMENT_COLS } = require('../lib/pierPlacement');
+const { applyPlacement, PLACEMENT_COLS, DOCK_SIDES } = require('../lib/pierPlacement');
 
 // Staff CRUD for marinas and their catalogue tables. Every child table is
 // property-scoped and soft-deletes through status, so one table-driven
@@ -41,6 +41,7 @@ const TABLES = {
     name: v.required(100), svg_data: v.longText, sw_lat: v.num, sw_lng: v.num, ne_lat: v.num, ne_lng: v.num, rotation: v.num, sort_order: v.int, status: STATUS }, required: ['name'] },
   berths: { table: 'marina_berth', order: 'label', listWhere: "status <> 'inactive'", cols: {
     label: v.required(30), pontoon_id: v.uuidOrNull, lat: v.num, lng: v.num, rotation: v.num,
+    dock_side: (x) => (x == null || x === '' ? null : v.oneOf(...DOCK_SIDES)(x)),
     length_m: v.nonNeg, min_length_m: v.nonNeg, beam_m: v.nonNeg, depth_m: v.nonNeg, price_per_night: v.nonNeg,
     price_mode: v.oneOf('per_metre', 'fixed'), notes: v.longText, status: v.oneOf('active', 'maintenance', 'inactive') }, required: ['label'] },
   'price-tiers': { table: 'marina_price_tier', order: 'valid_from, max_length_m', cols: {

@@ -978,6 +978,7 @@ function createTools(apiRequest) {
       beam_m: z.number().positive().nullable().optional(), depth_m: z.number().positive().nullable().optional(),
       price_per_night: z.number().min(0).nullable().optional(), price_mode: z.enum(['per_metre', 'fixed']).optional(),
       status: z.enum(['active', 'maintenance', 'inactive']).optional(), notes: z.string().nullable().optional(),
+      dock_side: z.enum(['end', 'far_end', 'left', 'right']).nullable().optional().describe("Edge of the drawn berth that meets the dock (the green bar on maps), in the berth's own frame; null = as drawn"),
     },
     run: ({ marina_id, berth_id, ...body }) => apiRequest('PUT', `/api/marina/marinas/${marina_id}/berths/${berth_id}`, { body }),
   },

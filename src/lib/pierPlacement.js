@@ -151,4 +151,31 @@ async function applyPlacement(client, pontoon) {
 
 const PLACEMENT_COLS = ['svg_data', 'sw_lat', 'sw_lng', 'ne_lat', 'ne_lng', 'rotation'];
 
-module.exports = { placeBerths, applyPlacement, PLACEMENT_COLS };
+// A berth's dock_side moves its drawn entrance bar onto that edge of its body
+// rect, in the berth's own frame: end is the rect's top edge, far_end the
+// bottom, left and right the long sides. Applied only when a map is served,
+// never saved: placeBerths reads the stored bar as the stern, so a bar moved
+// onto a long side there would turn the berth 90 degrees.
+// ponytail: regex over flat berth groups (a <g> holding rects and text, as
+// every editor draws them); a berth group with nested <g>s is left as drawn.
+const DOCK_SIDES = ['end', 'far_end', 'left', 'right'];
+function applyDockSides(svg, sides) {
+  if (!svg || !sides.size) return svg;
+  return svg.replace(/<g\b([^>]*)>((?:(?!<\/?g\b)[\s\S])*)<\/g>/g, (all, open, inner) => {
+    const side = sides.get(attrs(open)['data-berth-id']);
+    if (!side) return all;
+    const body = [...inner.matchAll(/<rect\b([^>]*?)\/?>/g)].map((m) => attrs(m[1])).find((a) => !a['data-role']);
+    if (!body) return all;
+    const x = num(body.x), y = num(body.y), w = num(body.width), h = num(body.height);
+    const [bx, by, bw, bh] = {
+      end: [x + 2, y + 2, w - 4, 4], far_end: [x + 2, y + h - 6, w - 4, 4],
+      left: [x + 2, y + 2, 4, h - 4], right: [x + w - 6, y + 2, 4, h - 4],
+    }[side];
+    const bar = /<rect\b[^>]*data-role=(["'])entrance\1[^>]*?\/?>/;
+    const fill = inner.match(bar)?.[0].match(/\bfill=(["'])([^"']*)\1/)?.[2] || '#22c55e';
+    const rect = `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="2" fill="${fill}" data-role="entrance"/>`;
+    return `<g${open}>${bar.test(inner) ? inner.replace(bar, rect) : inner.replace(/<rect\b[^>]*?\/?>/, (r) => r + rect)}</g>`;
+  });
+}
+
+module.exports = { placeBerths, applyPlacement, PLACEMENT_COLS, applyDockSides, DOCK_SIDES };

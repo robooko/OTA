@@ -2,6 +2,7 @@ const pool = require('../db');
 const crypto = require('crypto');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const q = require('../lib/marinaQueries');
+const { applyDockSides } = require('../lib/pierPlacement');
 const { priceStay, addDays, nightsBetween } = require('../lib/marinaPricing');
 const kc = require('../lib/marinaContracts');
 const guard = require('../lib/marinaGuard');
@@ -57,20 +58,21 @@ async function getMarinaMap(req, res, next) {
     }
     const [pontoons, berths, tiers, pois, images, prop, avail] = await Promise.all([
       pool.query("SELECT id, name, svg_data, sw_lat, sw_lng, ne_lat, ne_lng, rotation, sort_order FROM marina_pontoon WHERE marina_id = $1 AND status = 'active' ORDER BY sort_order, name", [m.id]),
-      pool.query("SELECT id, label, pontoon_id, lat, lng, rotation, length_m, min_length_m, beam_m, depth_m, price_per_night, price_mode FROM marina_berth WHERE marina_id = $1 AND status <> 'inactive' ORDER BY label", [m.id]),
+      pool.query("SELECT id, label, pontoon_id, lat, lng, rotation, dock_side, length_m, min_length_m, beam_m, depth_m, price_per_night, price_mode FROM marina_berth WHERE marina_id = $1 AND status <> 'inactive' ORDER BY label", [m.id]),
       pool.query("SELECT valid_from, valid_to, max_length_m, max_beam_m, price_per_night, price_per_month, price_per_year FROM marina_price_tier WHERE marina_id = $1 AND status = 'active' ORDER BY valid_from, max_length_m", [m.id]),
       pool.query("SELECT label, type, lat, lng FROM marina_poi WHERE marina_id = $1 AND status = 'active'", [m.id]),
       pool.query("SELECT url, description FROM marina_image WHERE marina_id = $1 AND status = 'active' ORDER BY sort_order", [m.id]),
       pool.query('SELECT upper(currency) AS currency, stripe_publishable_key FROM property WHERE id = $1', [m.property_id]),
       q.berthAvailability(pool, m.id, from, to),
     ]);
+    const sides = new Map(berths.rows.filter((b) => b.dock_side).map((b) => [b.label, b.dock_side]));
     res.json({
       marina: {
         name: m.name, slug: m.slug, kind: m.kind, map_style: m.map_style, description: m.description, lat: m.lat, lng: m.lng,
         phone: m.phone, email: m.email, website: m.website,
         layout: m.layout_svg ? { svg: m.layout_svg, sw_lat: m.layout_sw_lat, sw_lng: m.layout_sw_lng, ne_lat: m.layout_ne_lat, ne_lng: m.layout_ne_lng, rotation: m.layout_rotation } : null,
       },
-      pontoons: pontoons.rows,
+      pontoons: pontoons.rows.map((p) => ({ ...p, svg_data: applyDockSides(p.svg_data, sides) })),
       berths: berths.rows.map(({ id, ...b }) => ({ ...b, available: avail.get(id) === true })),
       price_tiers: tiers.rows,
       pois: pois.rows,
