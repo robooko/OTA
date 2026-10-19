@@ -115,14 +115,19 @@ async function sailorBlock(b) {
   if (!b.email_verified) return null;
   const statuses = await sd.requirementStatus(pool, { marinaId: b.marina_id, email: b.contact_email, arrival: b.arrival, departure: b.departure });
   const versionIds = statuses.flatMap((s) => s.document?.versions.map((v) => v.id) ?? []);
-  const { rows } = await pool.query('SELECT version_id, status, notes, decided_at FROM sailor_document_approval WHERE marina_id = $1 AND version_id = ANY($2)', [b.marina_id, versionIds]);
+  const { rows } = await pool.query('SELECT version_id, status, notes, expiry_date, decided_at FROM sailor_document_approval WHERE marina_id = $1 AND version_id = ANY($2)', [b.marina_id, versionIds]);
   const mine = new Map(rows.map(({ version_id, ...v }) => [version_id, v]));
   return {
     email: sd.normalEmail(b.contact_email),
-    requirements: statuses.map(({ requirement, document }) => ({
-      requirement_id: requirement.id,
-      document: document && { ...document, versions: document.versions.map((v) => ({ ...v, my_verdict: mine.get(v.id) ?? null })) },
-    })),
+    requirements: statuses.map(({ requirement, document }) => {
+      // Met as sd.SAILOR_APPROVED_SQL counts it: newest version approved here at the present expiry.
+      const v = mine.get(document?.versions[0]?.id);
+      return {
+        requirement_id: requirement.id,
+        approved: !!v && v.status === 'approved' && v.expiry_date === document.expiry_date,
+        document: document && { ...document, versions: document.versions.map((x) => ({ ...x, my_verdict: mine.get(x.id) ?? null })) },
+      };
+    }),
   };
 }
 

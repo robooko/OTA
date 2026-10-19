@@ -16,10 +16,10 @@ async function requirementStatus(db, { marinaId, email, arrival, departure }) {
   const [{ rows: reqs }, { rows: docs }, { rows: newest }] = await Promise.all([
     db.query("SELECT id, type, name, mandatory FROM marina_doc_requirement WHERE marina_id = $1 AND status = 'active' ORDER BY sort_order, name", [marinaId]),
     db.query(
-      `SELECT DISTINCT ON (d.type) d.id, d.type, d.expiry_date,
+      `SELECT DISTINCT ON (d.type) d.id, d.type, d.expiry_date, d.extracted_data,
               (SELECT count(DISTINCT a.marina_id)::int FROM sailor_document_approval a JOIN sailor_document_version v ON v.id = a.version_id
                 WHERE v.document_id = d.id AND a.status = 'approved' AND a.marina_id <> $1) AS approval_count,
-              (SELECT coalesce(json_agg(json_build_object('id', v.id, 'file_name', v.file_name, 'uploaded_at', v.uploaded_at) ORDER BY v.uploaded_at DESC), '[]')
+              (SELECT coalesce(json_agg(json_build_object('id', v.id, 'file_name', v.file_name, 'content_type', v.content_type, 'uploaded_at', v.uploaded_at) ORDER BY v.uploaded_at DESC), '[]')
                  FROM sailor_document_version v WHERE v.document_id = d.id) AS versions
        FROM sailor_document d
        WHERE d.email = $2 AND d.deleted_at IS NULL

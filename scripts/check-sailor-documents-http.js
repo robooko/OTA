@@ -293,6 +293,7 @@ const app = require('../src/app');
       assert.equal(p.sailor.email, DAN);
       const ins = p.sailor.requirements.find((x) => x.document?.type === 'insurance');
       assert.equal(ins.document.id, danIns.id); assert.equal(ins.document.versions[0].my_verdict, null);
+      assert.equal(ins.approved, false); assert.ok('extracted_data' in ins.document); assert.ok('content_type' in ins.document.versions[0]);
       const legacy = await book(LEGACY, DAN, {});
       assert.equal((await panel(legacy)).body.sailor, null);
     });
@@ -306,6 +307,7 @@ const app = require('../src/app');
       assert.deepEqual(rows, [{ status: 'approved', notes: null, staff_user: 'staff_1' }]);
       const v = (await panel(id)).body.sailor.requirements.find((x) => x.document?.type === 'insurance').document.versions[0];
       assert.equal(v.my_verdict.status, 'approved');
+      assert.equal((await panel(id)).body.sailor.requirements.find((x) => x.document?.type === 'insurance').approved, true);
       assert.equal((await decide(id, vid, { status: 'maybe' })).statusCode, 400);
     });
     await check("approval of another email's version → 404", async () => {
