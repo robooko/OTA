@@ -1592,6 +1592,8 @@ ALTER TABLE sailor_document_approval ADD COLUMN IF NOT EXISTS expiry_date DATE;
 -- berth as a turned slot or a swing circle accordingly.
 ALTER TABLE marina ADD COLUMN IF NOT EXISTS kind VARCHAR(10) NOT NULL DEFAULT 'marina' CHECK (kind IN ('marina', 'mooring'));
 
--- Base map the apps draw a marina on. nautical = a chart / seamark layer
--- (e.g. OpenSeaMap over street tiles); the app picks the tile provider.
+-- The base map a marina's berths were lined up against, so the apps draw
+-- them on the imagery they match (another provider's pontoons can sit metres
+-- off). The staff Pontoons map records it when a berth is turned there.
+-- nautical = a chart / seamark layer (e.g. OpenSeaMap over street tiles).
 ALTER TABLE marina ADD COLUMN IF NOT EXISTS map_style VARCHAR(10) NOT NULL DEFAULT 'satellite' CHECK (map_style IN ('satellite', 'street', 'nautical'));
