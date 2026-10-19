@@ -2,7 +2,7 @@ const pool = require('../db');
 const { isValidUuid, isValidUrl } = require('../middleware/validate');
 const { sniffType, putPublic } = require('../lib/marinaDocuments');
 const { unknownPlaceholders } = require('../lib/marinaContracts');
-const { TYPE_NAMES } = require('../lib/sailorDocTypes');
+const { TYPES, TYPE_NAMES } = require('../lib/sailorDocTypes');
 const { applyPlacement, PLACEMENT_COLS } = require('../lib/pierPlacement');
 
 // Staff CRUD for marinas and their catalogue tables. Every child table is
@@ -199,6 +199,8 @@ function childHandlers(kind) {
         const values = pick(req.body, cols, { create: true, required });
         if (table === 'marina_berth') await checkPontoon(pool, req.params.marina_id, values);
         if (table === 'marina_price_tier') checkTierDates(values);
+        // No fields given: the type's shared extraction list, as sidon-marina's presets did.
+        if (table === 'marina_doc_requirement' && (!values.fields || values.fields === '[]')) values.fields = JSON.stringify(TYPES[values.type].fields);
         const { rows: [row] } = await pool.query(insertSql(table, { ...values, property_id: req.property_id, marina_id: req.params.marina_id }));
         if (table === 'marina_pontoon') row.placement = await applyPlacement(pool, row);
         res.status(201).json(withWarnings(table, row));

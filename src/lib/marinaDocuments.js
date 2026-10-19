@@ -62,10 +62,12 @@ async function extractDocument(docId, buf) {
   try {
     if (!process.env.ANTHROPIC_API_KEY) return;
     const { rows: [d] } = await pool.query(
-      `SELECT d.*, r.fields, r.name AS requirement_name FROM marina_document d
+      `SELECT d.*, r.fields, r.type AS requirement_type, r.name AS requirement_name FROM marina_document d
        LEFT JOIN marina_doc_requirement r ON r.id = d.requirement_id WHERE d.id = $1`, [docId]);
-    if (!d?.fields?.length) return;
-    const data = await extractFields(buf, d.content_type, d.requirement_name, d.fields);
+    // A requirement saved with no fields falls back to its type's shared list.
+    const fields = d?.fields?.length ? d.fields : TYPES[d?.requirement_type]?.fields;
+    if (!fields?.length) return;
+    const data = await extractFields(buf, d.content_type, d.requirement_name, fields);
     const expiry = /^\d{4}-\d{2}-\d{2}$/.test(data.expiry_date) ? data.expiry_date : null;
     await pool.query('UPDATE marina_document SET extracted_data = $1, expiry_date = $2 WHERE id = $3', [data, expiry, docId]);
   } catch (err) {
