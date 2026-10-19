@@ -151,18 +151,23 @@ async function applyPlacement(client, pontoon) {
 
 const PLACEMENT_COLS = ['svg_data', 'sw_lat', 'sw_lng', 'ne_lat', 'ne_lng', 'rotation'];
 
-// A berth's dock_side moves its drawn entrance bar onto that edge of its body
-// rect, in the berth's own frame: end is the rect's top edge, far_end the
-// bottom, left and right the long sides. Applied only when a map is served,
-// never saved: placeBerths reads the stored bar as the stern, so a bar moved
-// onto a long side there would turn the berth 90 degrees.
+// A pontoon drawing as maps are served it. shown: Map of label -> dock_side
+// (or null) for every berth that isn't inactive. A drawn berth not in it is
+// dropped, so an inactive berth disappears from every map. A dock_side moves
+// the berth's entrance bar onto that edge of its body rect, in the berth's
+// own frame: end is the rect's top edge, far_end the bottom, left and right
+// the long sides. Never saved: placeBerths reads the stored bar as the stern,
+// so a bar moved onto a long side there would turn the berth 90 degrees.
 // ponytail: regex over flat berth groups (a <g> holding rects and text, as
 // every editor draws them); a berth group with nested <g>s is left as drawn.
 const DOCK_SIDES = ['end', 'far_end', 'left', 'right'];
-function applyDockSides(svg, sides) {
-  if (!svg || !sides.size) return svg;
+function servedDrawing(svg, shown) {
+  if (!svg) return svg;
   return svg.replace(/<g\b([^>]*)>((?:(?!<\/?g\b)[\s\S])*)<\/g>/g, (all, open, inner) => {
-    const side = sides.get(attrs(open)['data-berth-id']);
+    const label = attrs(open)['data-berth-id'];
+    if (label == null) return all;
+    if (!shown.has(label)) return '';
+    const side = shown.get(label);
     if (!side) return all;
     const body = [...inner.matchAll(/<rect\b([^>]*?)\/?>/g)].map((m) => attrs(m[1])).find((a) => !a['data-role']);
     if (!body) return all;
@@ -178,4 +183,4 @@ function applyDockSides(svg, sides) {
   });
 }
 
-module.exports = { placeBerths, applyPlacement, PLACEMENT_COLS, applyDockSides, DOCK_SIDES };
+module.exports = { placeBerths, applyPlacement, PLACEMENT_COLS, servedDrawing, DOCK_SIDES };

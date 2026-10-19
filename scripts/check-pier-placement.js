@@ -1,7 +1,7 @@
 // Checks berth placement from pontoon drawings (src/lib/pierPlacement.js).
 // Pure maths, no DB.   node scripts/check-pier-placement.js
 const assert = require('node:assert/strict');
-const { placeBerths, applyDockSides } = require('../src/lib/pierPlacement');
+const { placeBerths, servedDrawing } = require('../src/lib/pierPlacement');
 
 const near = (a, b, m, what) => assert.ok(Math.abs(a - b) * 111320 < m, `${what}: ${a} vs ${b}`);
 // A 100 x 100 m box at the equator (1 deg = 111320 m), so 1 SVG unit = 1 m.
@@ -61,11 +61,12 @@ check('dock_side moves the entrance bar onto that edge, or adds one', () => {
   const g = (id, inner) => `<g data-berth-id="${id}">${inner}</g>`;
   const body = '<rect x="0" y="0" width="10" height="20"/>';
   const drawn = g('A', body + '<rect x="2" y="2" width="6" height="4" fill="#123" data-role="entrance"/>') + g('B', body) + g('C', body);
-  const out = applyDockSides(drawn, new Map([['A', 'left'], ['B', 'far_end']]));
+  const out = servedDrawing(drawn, new Map([['A', 'left'], ['B', 'far_end'], ['C', null]]));
   assert.ok(out.includes('<rect x="2" y="2" width="4" height="16" rx="2" fill="#123" data-role="entrance"/>'), out);
   assert.ok(out.includes('<rect x="2" y="14" width="6" height="4" rx="2" fill="#22c55e" data-role="entrance"/>'), out);
   assert.ok(out.endsWith(g('C', body)), 'unlisted berth untouched');
-  assert.equal(applyDockSides(drawn, new Map()), drawn);
+  assert.equal(servedDrawing(drawn, new Map([['A', null], ['B', null], ['C', null]])), drawn);
+  assert.equal(servedDrawing('<svg>' + drawn + '<g id="pier"><rect/></g></svg>', new Map([['B', null]])), '<svg>' + g('B', body) + '<g id="pier"><rect/></g></svg>', 'inactive berths dropped, the pier kept');
 });
 
 
