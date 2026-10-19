@@ -64,6 +64,7 @@ const MARINA_COLS = {
   auto_confirm: v.bool,
   sailor_documents: v.bool,
   kind: v.oneOf('marina', 'mooring'),
+  map_style: v.oneOf('satellite', 'street', 'nautical'),
   booking_url: (x) => (x == null || x === '' ? null : isValidUrl(x) && x.includes('{id}') && x.includes('{token}') ? x : fail('must be an http(s) URL containing {id} and {token}')),
   status: STATUS,
 };
@@ -130,7 +131,7 @@ async function listMarinas(req, res, next) {
 // Unauthenticated, every property: map pins for Sidon. Public fields only.
 async function listPublicMarinas(req, res, next) {
   try {
-    const { rows } = await pool.query(`SELECT id, name, kind, description, website, lat, lng,
+    const { rows } = await pool.query(`SELECT id, name, kind, map_style, description, website, lat, lng,
       (SELECT url FROM marina_image i WHERE i.marina_id = marina.id AND i.status = 'active' ORDER BY sort_order LIMIT 1) AS image_url
       FROM marina WHERE status = 'active' AND lat IS NOT NULL AND lng IS NOT NULL ORDER BY name`);
     res.set('Cache-Control', 'public, max-age=300').json(rows);
