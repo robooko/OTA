@@ -39,6 +39,7 @@ for (const kind of Object.keys(cat.TABLES)) {
   router.post(`/marinas/:marina_id/${kind}`, authenticateOrApiKey, h.create);
   router.put(`/marinas/:marina_id/${kind}/:id`, authenticateOrApiKey, h.update);
 }
+router.delete('/marinas/:marina_id/doc-requirements/:id', authenticateOrApiKey, cat.deleteDocRequirement);
 
 // Guest rail -- the only prefix a site's forwarder passes through -- and the
 // Before the loop below, or /sailor/:marina_id would take 'bookings' as an id.

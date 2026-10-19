@@ -750,6 +750,7 @@ const swaggerSpec = {
     },
     '/api/marina/marinas/{marina_id}/doc-requirements/{id}': {
       put: { tags: ['Marina'], summary: "Update one of a marina's document requirements (status inactive = soft delete)", security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'marina_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: "Updated" }, 400: { description: "Validation failed" }, 404: { description: "Not found" } } },
+      delete: { tags: ['Marina'], summary: 'Delete a document requirement no upload references (otherwise 409: deactivate it instead)', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'marina_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 204: { description: 'Deleted' }, 404: { description: 'Not found' }, 409: { description: 'Documents reference it' } } },
     },
     '/api/marina/marinas/{marina_id}/contract-templates': {
       get: { tags: ['Marina'], summary: "List contract templates (create/update return warnings.unknown_placeholders)", security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'marina_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, INCLUDE_INACTIVE], responses: { 200: { description: "OK" } } },

@@ -241,6 +241,21 @@ function childHandlers(kind) {
   };
 }
 
+// Hard delete, only while no upload points at it (the FK would just null
+// requirement_id and orphan the upload's history); otherwise Deactivate.
+async function deleteDocRequirement(req, res, next) {
+  try {
+    if (!isValidUuid(req.params.id)) return res.status(404).json({ error: 'Not found' });
+    const { rows: [r] } = await pool.query(
+      `SELECT EXISTS (SELECT 1 FROM marina_document WHERE requirement_id = r.id) AS used FROM marina_doc_requirement r
+       WHERE r.id = $1 AND r.marina_id = $2 AND r.property_id = $3`, [req.params.id, req.params.marina_id, req.property_id]);
+    if (!r) return res.status(404).json({ error: 'Not found' });
+    if (r.used) return res.status(409).json({ error: 'Documents have been uploaded against this requirement; deactivate it instead' });
+    await pool.query('DELETE FROM marina_doc_requirement WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM marina_document WHERE requirement_id = $1)', [req.params.id]);
+    res.status(204).end();
+  } catch (err) { next(err); }
+}
+
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function renameBerthInSvg(svg, oldLabel, newLabel) {
   if (!svg) return svg;
@@ -296,4 +311,4 @@ async function uploadImage(req, res, next) {
 }
 
 module.exports = {
-  uploadImage, listMarinas, listPublicMarinas, getMarina, createMarina, updateMarina, childHandlers, bulkBerths, renameBerthInSvg, TABLES };
+  uploadImage, listMarinas, listPublicMarinas, getMarina, createMarina, updateMarina, childHandlers, deleteDocRequirement, bulkBerths, renameBerthInSvg, TABLES };
