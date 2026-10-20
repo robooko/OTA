@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const q = require('../lib/marinaQueries');
 const { servedDrawing } = require('../lib/pierPlacement');
-const { priceStay, addDays, nightsBetween } = require('../lib/marinaPricing');
+const { priceStay, closedFor, addDays, nightsBetween } = require('../lib/marinaPricing');
 const kc = require('../lib/marinaContracts');
 const guard = require('../lib/marinaGuard');
 const sd = require('../lib/sailorDocuments');
@@ -94,6 +94,7 @@ async function getAvailability(req, res, next) {
     if (!(len > 0)) return res.status(400).json({ error: 'boat_length_m must be a positive number' });
     if (beam !== null && !(beam > 0)) return res.status(400).json({ error: 'boat_beam_m must be a positive number' });
     const [berths, tiers] = await Promise.all([q.freeBerths(pool, req.marina.id, arrival, departure), q.activeTiers(pool, req.marina.id)]);
+    if (closedFor(tiers, arrival, departure)) return res.json([]);
     res.json(berths
       .filter((b) => !berthFitError(b, len, beam))
       .map((b) => ({ label: b.label, pontoon_id: b.pontoon_id, length_m: b.length_m, beam_m: b.beam_m, depth_m: b.depth_m,
@@ -120,15 +121,17 @@ async function getPublicBerths(req, res, next) {
         FROM marina_berth b LEFT JOIN marina_pontoon p ON p.id = b.pontoon_id
         WHERE b.marina_id = $1 AND b.status <> 'inactive' AND b.lat IS NOT NULL AND b.lng IS NOT NULL ORDER BY b.label`, [m.id]),
       q.berthAvailability(pool, m.id, arrival, departure),
-      len ? q.activeTiers(pool, m.id) : [],
+      q.activeTiers(pool, m.id),
     ]);
     const num = (v) => (v == null ? null : Number(v));
+    const closed = closedFor(tiers, arrival, departure);
     res.set('Cache-Control', 'public, max-age=60').json({
       kind: m.kind,
       map_style: m.map_style,
       currency: m.currency,
+      closed,
       berths: berths.rows.map((b) => {
-        const out = { label: b.label, lat: b.lat, lng: b.lng, rotation: m.kind === 'mooring' ? null : num(b.heading), length_m: num(b.length_m), beam_m: num(b.beam_m), available: avail.get(b.id) === true };
+        const out = { label: b.label, lat: b.lat, lng: b.lng, rotation: m.kind === 'mooring' ? null : num(b.heading), length_m: num(b.length_m), beam_m: num(b.beam_m), available: !closed && avail.get(b.id) === true };
         if (len === null) return out;
         const fits = !berthFitError(b, len, null);
         const total_price = out.available && fits ? priceStay({ berth: b, tiers, arrival, departure, boatLengthM: len }).total_price : null;
@@ -157,7 +160,9 @@ async function quote(req, res, next) {
     if (!berth) return res.status(404).json({ error: 'Berth not found' });
     const fit = berthFitError(berth, len, beam);
     if (fit) return res.status(400).json({ error: fit });
-    const price = priceStay({ berth, tiers: await q.activeTiers(pool, req.marina.id), arrival, departure, boatLengthM: len, boatBeamM: beam });
+    const tiers = await q.activeTiers(pool, req.marina.id);
+    if (closedFor(tiers, arrival, departure)) return res.status(409).json({ error: 'Closed on those dates' });
+    const price = priceStay({ berth, tiers, arrival, departure, boatLengthM: len, boatBeamM: beam });
     const { rows: [p] } = await pool.query('SELECT upper(currency) AS currency FROM property WHERE id = $1', [req.marina.property_id]);
     res.json({ berth_label: berth.label, arrival, departure, ...price, currency: p.currency });
   } catch (err) { next(err); }
@@ -227,7 +232,9 @@ async function createGuestBooking(req, res, next) {
     const cap = await guard.checkEmailCap(client, req.property_id, v.contact_email, today);
     if (!cap.ok) { await client.query('ROLLBACK'); return res.status(429).json({ error: `At most ${guard.MAX_UPCOMING} upcoming bookings per email` }); }
 
-    const price = priceStay({ berth, tiers: await q.activeTiers(client, req.marina.id), arrival: v.arrival, departure: v.departure, boatLengthM: v.boat_length_m, boatBeamM: v.boat_beam_m });
+    const tiers = await q.activeTiers(client, req.marina.id);
+    if (closedFor(tiers, v.arrival, v.departure)) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Closed on those dates' }); }
+    const price = priceStay({ berth, tiers, arrival: v.arrival, departure: v.departure, boatLengthM: v.boat_length_m, boatBeamM: v.boat_beam_m });
     const { rows: [prop] } = await client.query('SELECT upper(currency) AS currency, stripe_secret_key, stripe_publishable_key FROM property WHERE id = $1', [req.property_id]);
     // Stripe refuses a zero amount, so a free stay confirms by email like an unpriced one.
     const cardPath = price.total_price != null && toCents(price.total_price) > 0 && prop.stripe_secret_key && prop.stripe_publishable_key;

@@ -36,4 +36,10 @@ function priceStay({ berth, tiers, arrival, departure, boatLengthM, boatBeamM })
   return { nights, total_price: cents == null ? null : fromCents(cents), tier_id: tier?.id ?? null };
 }
 
-module.exports = { priceStay, nightsBetween, addDays };
+// Seasons are the tiers' date windows: a marina with tiers is closed on any
+// night none of them covers (the dashboard's "make berths bookable on those
+// dates"). No tiers at all = berth prices year-round.
+const closedFor = (tiers, arrival, departure) => tiers.length > 0
+  && !tiers.some((t) => t.valid_from <= arrival && addDays(departure, -1) <= t.valid_to);
+
+module.exports = { priceStay, closedFor, nightsBetween, addDays };

@@ -14,7 +14,7 @@ const { findRestaurantAvailability } = require('../controllers/restaurant');
 const { findSpaAvailability } = require('../controllers/spa');
 const marinaQueries = require('./marinaQueries');
 const { berthFitError } = require('./marinaGuard');
-const { priceStay } = require('./marinaPricing');
+const { priceStay, closedFor } = require('./marinaPricing');
 
 const MAX_RESULT_SLOTS = 20;
 const TOOL_NAME = 'check_availability';
@@ -137,6 +137,7 @@ async function executeBerthAvailability(marinaId, input) {
     marinaQueries.freeBerths(pool, marinaId, arrival, departure),
     marinaQueries.activeTiers(pool, marinaId),
   ]);
+  if (closedFor(tiers, arrival, departure)) return { closed: true, free_berths: 0, options: [] };
   const fits = len ? berths.filter((b) => !berthFitError(b, len, beam)) : berths;
   return {
     free_berths: fits.length,
