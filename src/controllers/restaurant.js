@@ -445,15 +445,49 @@ async function listReservations(req, res, next) {
 async function getReservation(req, res, next) {
   try {
     const { rows } = await pool.query(
-      `SELECT rr.*, rt.table_number, rt.seats, rt.location
+      `SELECT rr.*, rt.table_number, rt.seats, rt.location, rt.restaurant_id
        FROM restaurant_reservation rr
        JOIN restaurant_table rt ON rt.id = rr.table_id
        WHERE rr.id = $1 AND rr.property_id = $2`,
       [req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Reservation not found' });
-    res.json(rows[0]);
+    const r = rows[0];
+    r.guest_stats = r.contact_email ? await reservationGuestStats(r.contact_email, req.property_id, r.restaurant_id) : null;
+    res.json(r);
   } catch (err) { next(err); }
+}
+
+// The guest is identified by contact_email (most reservations carry no
+// guest_id). A visit = a non-cancelled reservation dated today or earlier;
+// "org" spans every property sharing this one's clerk_org_id. Avg bill is
+// per visit at this restaurant that had at least one non-cancelled order.
+async function reservationGuestStats(email, propertyId, restaurantId) {
+  const { rows } = await pool.query(
+    `WITH visits AS (
+       SELECT rr.id, rt.restaurant_id, rt.table_number
+       FROM restaurant_reservation rr
+       JOIN restaurant_table rt ON rt.id = rr.table_id
+       JOIN property p ON p.id = rr.property_id
+       WHERE lower(rr.contact_email) = lower($1)
+         AND rr.status <> 'cancelled' AND rr.reservation_date <= CURRENT_DATE
+         AND (p.id = $2 OR p.clerk_org_id = (SELECT clerk_org_id FROM property WHERE id = $2))
+     )
+     SELECT
+       count(*) FILTER (WHERE restaurant_id = $3)::int AS restaurant_visits,
+       count(*)::int AS org_visits,
+       mode() WITHIN GROUP (ORDER BY table_number) FILTER (WHERE restaurant_id = $3) AS top_table,
+       (SELECT avg(total) FROM (
+          SELECT sum(o.total_price) AS total
+          FROM restaurant_table_session s
+          JOIN restaurant_order o ON o.table_session_id = s.id AND o.status <> 'cancelled'
+          WHERE s.reservation_id IN (SELECT id FROM visits WHERE restaurant_id = $3)
+          GROUP BY s.reservation_id
+        ) bills) AS avg_bill
+     FROM visits`,
+    [email, propertyId, restaurantId]
+  );
+  return rows[0];
 }
 
 // Fetches the live status/amount of the reservation's linked Stripe
