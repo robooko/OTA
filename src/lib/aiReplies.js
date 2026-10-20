@@ -91,7 +91,10 @@ function buildVenueFacts(property, restaurant, spa, marina = null) {
     if (marina.berth_range?.max != null) text += `    Berths for boats from ${marina.berth_range.min ?? marina.berth_range.max} m to ${marina.berth_range.max} m long.\n`;
     if (marina.tiers?.length) {
       text += '    Nightly berth rates (by boat length):\n';
-      for (const t of marina.tiers) text += `      Up to ${t.max_length_m} m, ${t.valid_from} to ${t.valid_to}: ${money(t.price_per_night, property.currency)} a night\n`;
+      for (const t of marina.tiers) {
+        const when = t.repeats_yearly ? `every year ${t.valid_from.slice(5)} to ${t.valid_to.slice(5)} (MM-DD)` : `${t.valid_from} to ${t.valid_to}`;
+        text += `      Up to ${t.max_length_m} m, ${when}: ${money(t.price_per_night, property.currency)} a night\n`;
+      }
     }
     text += `    The marina replies to booking requests within ${marina.response_window_hours} hours.\n`;
     if (marina.requirements?.length) text += `    Documents needed for a booking: ${marina.requirements.map((r) => neutraliseTags(r.name)).join(', ')}.\n`;

@@ -28,6 +28,7 @@ const v = {
   int: (x) => (x == null || x === '' ? null : Number.isInteger(Number(x)) ? Number(x) : fail('must be an integer')),
   bool: (x) => (typeof x === 'boolean' ? x : fail('must be true or false')),
   date: (x) => (/^\d{4}-\d{2}-\d{2}$/.test(x) ? x : fail('must be YYYY-MM-DD')),
+  dateOrNull: (x) => (x == null || x === '' ? null : v.date(x)),
   oneOf: (...opts) => (x) => (opts.includes(x) ? x : fail(`must be one of ${opts.join(', ')}`)),
   json: (x) => (Array.isArray(x) ? JSON.stringify(x) : fail('must be an array')),
   url: (x) => (x == null || x === '' ? null : isValidUrl(x) ? x : fail('must be an http(s) URL')),
@@ -44,9 +45,12 @@ const TABLES = {
     dock_side: (x) => (x == null || x === '' ? null : v.oneOf(...DOCK_SIDES)(x)),
     length_m: v.nonNeg, min_length_m: v.nonNeg, beam_m: v.nonNeg, depth_m: v.nonNeg, price_per_night: v.nonNeg,
     price_mode: v.oneOf('per_metre', 'fixed'), notes: v.longText, status: v.oneOf('active', 'maintenance', 'inactive') }, required: ['label'] },
+  seasons: { table: 'marina_season', order: 'valid_from, name', cols: {
+    name: v.required(100), valid_from: v.date, valid_to: v.date, repeats_yearly: v.bool, status: STATUS }, required: ['name', 'valid_from', 'valid_to'] },
+  // A tier has a season (its dates) or its own valid_from/valid_to.
   'price-tiers': { table: 'marina_price_tier', order: 'valid_from, max_length_m', cols: {
-    valid_from: v.date, valid_to: v.date, max_length_m: v.nonNeg, max_beam_m: v.nonNeg, price_per_night: v.nonNeg,
-    price_per_month: v.nonNeg, price_per_year: v.nonNeg, status: STATUS }, required: ['valid_from', 'valid_to', 'max_length_m', 'price_per_night'] },
+    season_id: v.uuidOrNull, valid_from: v.dateOrNull, valid_to: v.dateOrNull, max_length_m: v.nonNeg, max_beam_m: v.nonNeg, price_per_night: v.nonNeg,
+    price_per_month: v.nonNeg, price_per_year: v.nonNeg, status: STATUS }, required: ['max_length_m', 'price_per_night'] },
   'doc-requirements': { table: 'marina_doc_requirement', order: 'sort_order, name', cols: {
     type: v.oneOf(...TYPE_NAMES), name: v.required(100), description: v.longText, fields: v.json, mandatory: v.bool, sort_order: v.int, status: STATUS }, required: ['type', 'name'] },
   'contract-templates': { table: 'marina_contract_template', order: 'min_nights, name', cols: {
@@ -97,6 +101,21 @@ async function checkPontoon(client, marinaId, values) {
 // order is date order.
 function checkTierDates(t) {
   if (t.valid_from > t.valid_to) fail('valid_to must be on or after valid_from');
+}
+
+// A repeating season longer than a year would overlap its own next year.
+function checkSeason(s) {
+  checkTierDates(s);
+  if (s.repeats_yearly && `${Number(s.valid_from.slice(0, 4)) + 1}${s.valid_from.slice(4)}` <= s.valid_to) fail('a season that repeats every year must be shorter than a year');
+}
+
+// A tier's season must be one of its own marina's; without one it needs its own dates.
+async function checkTier(client, marinaId, t) {
+  if (t.season_id) {
+    const { rowCount } = await client.query('SELECT 1 FROM marina_season WHERE id = $1 AND marina_id = $2', [t.season_id, marinaId]);
+    if (!rowCount) fail('season_id must be a season of this marina');
+  } else if (!t.valid_from || !t.valid_to) fail('season_id, or valid_from and valid_to, is required');
+  else checkTierDates(t);
 }
 
 async function marinaOr404(req, res, client = pool) {
@@ -200,7 +219,8 @@ function childHandlers(kind) {
         if (!(await marinaOr404(req, res))) return;
         const values = pick(req.body, cols, { create: true, required });
         if (table === 'marina_berth') await checkPontoon(pool, req.params.marina_id, values);
-        if (table === 'marina_price_tier') checkTierDates(values);
+        if (table === 'marina_price_tier') await checkTier(pool, req.params.marina_id, values);
+        if (table === 'marina_season') checkSeason(values);
         // No fields given: the type's shared extraction list, as sidon-marina's presets did.
         if (table === 'marina_doc_requirement' && (!values.fields || values.fields === '[]')) values.fields = JSON.stringify(TYPES[values.type].fields);
         const { rows: [row] } = await pool.query(insertSql(table, { ...values, property_id: req.property_id, marina_id: req.params.marina_id }));
@@ -222,7 +242,8 @@ function childHandlers(kind) {
         if (!before) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
         if (table === 'marina_berth') await checkPontoon(client, req.params.marina_id, values);
         // Against the stored row: an update may move just one end.
-        if (table === 'marina_price_tier') checkTierDates({ ...before, ...values });
+        if (table === 'marina_price_tier') await checkTier(client, req.params.marina_id, { ...before, ...values });
+        if (table === 'marina_season') checkSeason({ ...before, ...values });
         const { rows: [row] } = await client.query(updateSql(table, values, req.params.id, req.property_id));
         // A berth's label is what its pontoon SVG's data-berth-id points
         // at; keep them in step in the same transaction.

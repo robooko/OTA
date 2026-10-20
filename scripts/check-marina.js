@@ -109,6 +109,34 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       const r = priceStay({ berth: { ...berthA, price_per_night: '3.33' }, tiers: [], arrival: '2027-06-10', departure: '2027-06-11', boatLengthM: 10.15, boatBeamM: null });
       assert.equal(r.total_price, '33.80'); // 3.33 × 10.15 = 33.7995
     });
+    const { closedFor, seasons, datedTier } = require('../src/lib/marinaPricing');
+    await check('repeating season prices later years; one-off does not', async () => {
+      const summer = tier({ valid_from: '2026-05-01', valid_to: '2026-10-31', repeats_yearly: true });
+      assert.equal(priceStay({ berth: berthA, tiers: [summer], arrival: '2028-07-01', departure: '2028-07-03', boatLengthM: 10, boatBeamM: null }).tier_id, 't');
+      assert.ok(!closedFor([summer], '2028-07-01', '2028-07-03'));
+      assert.ok(closedFor([summer], '2028-11-01', '2028-11-02'));
+      assert.ok(closedFor([{ ...summer, repeats_yearly: false }], '2028-07-01', '2028-07-03'));
+    });
+    await check('repeating winter season wraps New Year', async () => {
+      const winter = tier({ valid_from: '2026-11-01', valid_to: '2027-03-31', repeats_yearly: true });
+      assert.ok(!closedFor([winter], '2029-12-30', '2030-01-03')); // crosses 31 Dec
+      assert.ok(!closedFor([winter], '2030-02-01', '2030-02-05')); // window began 2029
+      assert.ok(closedFor([winter], '2030-03-30', '2030-04-02'));
+      assert.deepEqual(seasons([winter], '2030-02-01'), [{ from: '2029-11-01', to: '2030-03-31' }, { from: '2030-11-01', to: '2031-03-31' }, { from: '2031-11-01', to: '2032-03-31' }]);
+      assert.deepEqual([datedTier(winter, '2030-04-15').valid_from, datedTier(winter, '2030-04-15').valid_to], ['2030-11-01', '2031-03-31']);
+    });
+    await check('activeTiers takes season dates and drops inactive seasons', async () => {
+      const q = require('../src/lib/marinaQueries');
+      const s = await one(`INSERT INTO marina_season (property_id, marina_id, name, valid_from, valid_to, repeats_yearly) VALUES ($1, $2, 'Summer', '2026-05-01', '2026-10-31', true) RETURNING id`, [P, marina.id]);
+      await db.query(`INSERT INTO marina_price_tier (property_id, marina_id, season_id, max_length_m, price_per_night) VALUES ($1, $2, $3, 12, 50)`, [P, marina.id, s.id]);
+      const [t] = (await q.activeTiers(db, marina.id)).filter((x) => x.season_id === s.id);
+      assert.deepEqual([t.valid_from, t.valid_to, t.repeats_yearly, t.season_name], ['2026-05-01', '2026-10-31', true, 'Summer']);
+      await db.query(`UPDATE marina_season SET status = 'inactive' WHERE id = $1`, [s.id]);
+      assert.equal((await q.activeTiers(db, marina.id)).filter((x) => x.season_id === s.id).length, 0);
+    });
+    await check('tier needs a season or its own dates', async () => {
+      await rejects(() => db.query(`INSERT INTO marina_price_tier (property_id, marina_id, max_length_m, price_per_night) VALUES ($1, $2, 12, 50)`, [P, marina.id]), '23514');
+    });
     await check('no boat length falls back to berth length (staff)', async () => {
       const r = priceStay({ berth: berthA, tiers: [], arrival: '2027-06-10', departure: '2027-06-11', boatLengthM: null, boatBeamM: null });
       assert.equal(r.total_price, '60.00'); // 5 × 12

@@ -771,6 +771,21 @@ const { bookingToken } = require('../src/lib/marinaToken');
       assert.equal(upd.status, 400); assert.equal(upd.body.error, 'valid_to must be on or after valid_from');
       assert.equal((await api('PUT', `${T}/${ok.body.id}`, { body: { valid_to: '2092-06-30' } })).status, 200);
     });
+    await check('seasons: tier takes a season instead of dates; checks ownership and span', async () => {
+      const S = `/api/marina/marinas/${m.id}/seasons`, T = `/api/marina/marinas/${m.id}/price-tiers`;
+      const long = await api('POST', S, { body: { name: 'Too long', valid_from: '2093-05-01', valid_to: '2094-05-01', repeats_yearly: true } });
+      assert.equal(long.status, 400); assert.equal(long.body.error, 'a season that repeats every year must be shorter than a year');
+      const s = await api('POST', S, { body: { name: 'Summer', valid_from: '2093-05-01', valid_to: '2093-10-31', repeats_yearly: true, status: 'inactive' } });
+      assert.equal(s.status, 201);
+      const t = await api('POST', T, { body: { season_id: s.body.id, max_length_m: 10, price_per_night: 1, status: 'inactive' } });
+      assert.equal(t.status, 201); assert.equal(t.body.valid_from, null);
+      const none = await api('POST', T, { body: { max_length_m: 10, price_per_night: 1 } });
+      assert.equal(none.status, 400); assert.equal(none.body.error, 'season_id, or valid_from and valid_to, is required');
+      const unhook = await api('PUT', `${T}/${t.body.id}`, { body: { season_id: null } });
+      assert.equal(unhook.status, 400, 'dropping the season needs dates');
+      const foreign = await api('POST', T, { body: { season_id: '6f1c0d4e-0000-4000-8000-000000000009', max_length_m: 10, price_per_night: 1 } });
+      assert.equal(foreign.status, 400); assert.equal(foreign.body.error, 'season_id must be a season of this marina');
+    });
     await check('R15: staff booking contact_phone over 30 and bad boat sizes → 400, on create and edit', async () => {
       const base = { berth_id: berthRes.body.id, contact_name: 'Val', arrival: future(3100), departure: future(3102), status: 'pending' };
       const post = (o) => api('POST', '/api/marina/bookings', { body: { ...base, ...o } });

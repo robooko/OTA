@@ -34,9 +34,17 @@ async function berthAvailability(client, marinaId, from, to) {
   return new Map(rows.map((r) => [r.id, r.available]));
 }
 
+// A tier with a season takes the season's dates and repeats_yearly; an
+// inactive season takes its tiers with it.
 async function activeTiers(client, marinaId) {
   const { rows } = await client.query(
-    "SELECT * FROM marina_price_tier WHERE marina_id = $1 AND status = 'active'", [marinaId]);
+    `SELECT t.id, t.season_id, s.name AS season_name,
+       COALESCE(s.valid_from, t.valid_from) AS valid_from, COALESCE(s.valid_to, t.valid_to) AS valid_to,
+       COALESCE(s.repeats_yearly, false) AS repeats_yearly,
+       t.max_length_m, t.max_beam_m, t.price_per_night, t.price_per_month, t.price_per_year
+     FROM marina_price_tier t LEFT JOIN marina_season s ON s.id = t.season_id
+     WHERE t.marina_id = $1 AND t.status = 'active' AND (s.id IS NULL OR s.status = 'active')
+     ORDER BY valid_from, max_length_m`, [marinaId]);
   return rows;
 }
 

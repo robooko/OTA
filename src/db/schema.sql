@@ -1374,13 +1374,32 @@ CREATE TABLE IF NOT EXISTS marina_berth (
 );
 CREATE INDEX IF NOT EXISTS idx_marina_berth_property ON marina_berth (property_id);
 
--- valid_to is inclusive (the last night the tier covers).
+-- A named date window shared by a marina's price tiers. repeats_yearly =
+-- the same days every year (the stored year is just where it starts).
+-- valid_to is inclusive.
+CREATE TABLE IF NOT EXISTS marina_season (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id     UUID NOT NULL REFERENCES property(id),
+  marina_id       UUID NOT NULL REFERENCES marina(id) ON DELETE CASCADE,
+  name            VARCHAR(100) NOT NULL,
+  valid_from      DATE NOT NULL,
+  valid_to        DATE NOT NULL,
+  repeats_yearly  BOOLEAN NOT NULL DEFAULT false,
+  status          VARCHAR(20) DEFAULT 'active',
+  created_at      TIMESTAMPTZ DEFAULT now(),
+  CHECK (valid_to >= valid_from)
+);
+CREATE INDEX IF NOT EXISTS idx_marina_season_property ON marina_season (property_id);
+
+-- valid_to is inclusive (the last night the tier covers). A tier with a
+-- season takes the season's dates and ignores its own.
 CREATE TABLE IF NOT EXISTS marina_price_tier (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id     UUID NOT NULL REFERENCES property(id),
   marina_id       UUID NOT NULL REFERENCES marina(id) ON DELETE CASCADE,
-  valid_from      DATE NOT NULL,
-  valid_to        DATE NOT NULL,
+  season_id       UUID REFERENCES marina_season(id),
+  valid_from      DATE,
+  valid_to        DATE,
   max_length_m    NUMERIC(6,2) NOT NULL,
   max_beam_m      NUMERIC(6,2),
   price_per_night NUMERIC(10,2) NOT NULL,
@@ -1388,7 +1407,8 @@ CREATE TABLE IF NOT EXISTS marina_price_tier (
   price_per_year  NUMERIC(10,2),
   status          VARCHAR(20) DEFAULT 'active',
   created_at      TIMESTAMPTZ DEFAULT now(),
-  CHECK (valid_to >= valid_from)
+  CHECK (valid_to >= valid_from),
+  CONSTRAINT marina_price_tier_season_or_dates CHECK (season_id IS NOT NULL OR (valid_from IS NOT NULL AND valid_to IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_marina_price_tier_property ON marina_price_tier (property_id);
 

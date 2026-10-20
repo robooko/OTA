@@ -7,6 +7,7 @@
 // spa never imports this module or eventInquiries). eventInquiries imports
 // this; it never imports eventInquiries.
 const pool = require('../db');
+const { activeTiers } = require('./marinaQueries');
 const {
   publishAiDraftReady, publishAiDraftUpdated,
   publishAiDraftReadyForSpa, publishAiDraftUpdatedForSpa,
@@ -98,10 +99,10 @@ async function loadSpaContext(spaId) {
 // Marina facts for a draft: berth size range, live price tiers, response
 // window, required documents. Loaded fresh per draft like the spa context.
 async function loadMarinaContext(marinaId) {
-  const [{ rows: [marina] }, { rows: [range] }, { rows: tiers }, { rows: requirements }] = await Promise.all([
+  const [{ rows: [marina] }, { rows: [range] }, tiers, { rows: requirements }] = await Promise.all([
     pool.query('SELECT name, description, website, response_window_hours FROM marina WHERE id = $1', [marinaId]),
     pool.query("SELECT min(length_m) AS min, max(length_m) AS max FROM marina_berth WHERE marina_id = $1 AND status = 'active'", [marinaId]),
-    pool.query("SELECT valid_from, valid_to, max_length_m, price_per_night FROM marina_price_tier WHERE marina_id = $1 AND status = 'active' ORDER BY valid_from, max_length_m", [marinaId]),
+    activeTiers(pool, marinaId),
     pool.query("SELECT name FROM marina_doc_requirement WHERE marina_id = $1 AND status = 'active' AND mandatory ORDER BY sort_order, name", [marinaId]),
   ]);
   return marina ? { ...marina, berth_range: range, tiers, requirements } : null;
