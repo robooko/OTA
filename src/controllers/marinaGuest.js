@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const q = require('../lib/marinaQueries');
 const { servedDrawing } = require('../lib/pierPlacement');
-const { priceStay, closedFor, addDays, nightsBetween } = require('../lib/marinaPricing');
+const { priceStay, closedFor, seasons, addDays, nightsBetween } = require('../lib/marinaPricing');
 const kc = require('../lib/marinaContracts');
 const guard = require('../lib/marinaGuard');
 const sd = require('../lib/sailorDocuments');
@@ -130,6 +130,7 @@ async function getPublicBerths(req, res, next) {
       map_style: m.map_style,
       currency: m.currency,
       closed,
+      seasons: seasons(tiers, new Date().toISOString().slice(0, 10)),
       berths: berths.rows.map((b) => {
         const out = { label: b.label, lat: b.lat, lng: b.lng, rotation: m.kind === 'mooring' ? null : num(b.heading), length_m: num(b.length_m), beam_m: num(b.beam_m), available: !closed && avail.get(b.id) === true };
         if (len === null) return out;

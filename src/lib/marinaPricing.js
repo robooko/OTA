@@ -42,4 +42,12 @@ function priceStay({ berth, tiers, arrival, departure, boatLengthM, boatBeamM })
 const closedFor = (tiers, arrival, departure) => tiers.length > 0
   && !tiers.some((t) => t.valid_from <= arrival && addDays(departure, -1) <= t.valid_to);
 
-module.exports = { priceStay, closedFor, nightsBetween, addDays };
+// The open windows from today on, for a calendar: null = no tiers, open
+// year-round; [] = every season is past.
+function seasons(tiers, today) {
+  if (!tiers.length) return null;
+  const keys = new Set(tiers.filter((t) => t.valid_to >= today).map((t) => `${t.valid_from}|${t.valid_to}`));
+  return [...keys].sort().map((k) => { const [from, to] = k.split('|'); return { from, to }; });
+}
+
+module.exports = { priceStay, closedFor, seasons, nightsBetween, addDays };
