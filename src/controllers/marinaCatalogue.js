@@ -68,6 +68,7 @@ const MARINA_COLS = {
   response_window_hours: (x) => (Number.isInteger(x) && x >= 1 && x <= 144 ? x : fail('must be a whole number of hours, 1-144')),
   auto_confirm: v.bool,
   sailor_documents: v.bool,
+  fixed_berths_flat: v.bool,
   kind: v.oneOf('marina', 'mooring'),
   map_style: v.oneOf('satellite', 'street', 'nautical'),
   booking_url: (x) => (x == null || x === '' ? null : isValidUrl(x) && x.includes('{id}') && x.includes('{token}') ? x : fail('must be an http(s) URL containing {id} and {token}')),

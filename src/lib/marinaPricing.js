@@ -30,35 +30,48 @@ function covers(t, arrival, lastNight) {
   return [y - 1, y].some((yr) => { const w = shift(t, yr); return w.from <= arrival && lastNight <= w.to; });
 }
 
-// A tier covers the stay when every night falls inside [valid_from,
-// valid_to] and the boat fits its size band. Tiers match on the BOAT's
-// length (a deliberate change from Sidon's book.ts, which used the
-// berth's); staff bookings without a boat length use the berth's.
+// Each night is priced by the tier whose window holds it, so a stay can
+// cross from one season into the next. A tier fits when the boat fits its
+// size band. Tiers match on the BOAT's length (a deliberate change from
+// Sidon's book.ts, which used the berth's); staff bookings without a boat
+// length use the berth's. A night no fitting tier covers takes the berth's
+// own price. With the marina's fixed_berths_flat, fixed-price berths (buoys
+// next to slips) skip the tiers and keep their price all year.
+const tierFor = (tiers, night, length, beam) => tiers
+  .filter((t) => covers(t, night, night)
+    && num(t.max_length_m) >= length
+    && (t.max_beam_m == null || beam == null || num(t.max_beam_m) >= beam))
+  .sort((a, b) => num(a.max_length_m) - num(b.max_length_m))[0];
+
+const nightsOf = (arrival, departure) => Array.from({ length: nightsBetween(arrival, departure) }, (_, i) => addDays(arrival, i));
+
 function priceStay({ berth, tiers, arrival, departure, boatLengthM, boatBeamM }) {
   if (!departure) return { nights: null, total_price: null, tier_id: null };
   const nights = nightsBetween(arrival, departure);
   const length = boatLengthM ?? num(berth.length_m);
-  const lastNight = addDays(departure, -1);
+  const fixed = berth.price_mode === 'fixed';
+  const usable = fixed && tiers[0]?.fixed_berths_flat ? [] : tiers;
+  const berthCents = berth.price_per_night == null ? null
+    : fixed ? toCents(berth.price_per_night)
+      : length == null ? null : Math.round(num(berth.price_per_night) * length * 100);
 
-  const tier = length == null ? null : tiers
-    .filter((t) => covers(t, arrival, lastNight)
-      && num(t.max_length_m) >= length
-      && (t.max_beam_m == null || boatBeamM == null || num(t.max_beam_m) >= boatBeamM))
-    .sort((a, b) => num(a.max_length_m) - num(b.max_length_m))[0];
-
-  let cents = null;
-  if (tier) cents = toCents(tier.price_per_night) * nights;
-  else if (berth.price_per_night != null && berth.price_mode === 'fixed') cents = toCents(berth.price_per_night) * nights;
-  else if (berth.price_per_night != null && length != null) cents = Math.round(num(berth.price_per_night) * length * 100) * nights;
-
-  return { nights, total_price: cents == null ? null : fromCents(cents), tier_id: tier?.id ?? null };
+  let cents = 0;
+  let firstTier = null;
+  for (const [i, night] of nightsOf(arrival, departure).entries()) {
+    const tier = length == null ? null : tierFor(usable, night, length, boatBeamM);
+    if (i === 0) firstTier = tier;
+    const c = tier ? toCents(tier.price_per_night) : berthCents;
+    if (c == null) return { nights, total_price: null, tier_id: null };
+    cents += c;
+  }
+  return { nights, total_price: fromCents(cents), tier_id: firstTier?.id ?? null };
 }
 
 // Seasons are the tiers' date windows: a marina with tiers is closed on any
 // night none of them covers (the dashboard's "make berths bookable on those
 // dates"). No tiers at all = berth prices year-round.
 const closedFor = (tiers, arrival, departure) => tiers.length > 0
-  && !tiers.some((t) => covers(t, arrival, addDays(departure, -1)));
+  && nightsOf(arrival, departure).some((night) => !tiers.some((t) => covers(t, night, night)));
 
 // The open windows from today on, for a calendar: null = no tiers, open
 // year-round; [] = every season is past. A repeating season shows as its

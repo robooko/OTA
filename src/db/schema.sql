@@ -1622,3 +1622,8 @@ ALTER TABLE marina ADD COLUMN IF NOT EXISTS map_style VARCHAR(10) NOT NULL DEFAU
 -- berth's own frame: end, far_end, left or right. Null = as drawn. Applied
 -- when the map is served; the stored drawing keeps its bar for placement.
 ALTER TABLE marina_berth ADD COLUMN IF NOT EXISTS dock_side VARCHAR(10) CHECK (dock_side IN ('end', 'far_end', 'left', 'right'));
+
+-- Fixed-price berths (mooring buoys next to a marina's slips) can keep their
+-- price all year instead of taking the season tiers, which match on boat
+-- length only. Off by default: fox-mooring's buoys follow its tiers.
+ALTER TABLE marina ADD COLUMN IF NOT EXISTS fixed_berths_flat BOOLEAN NOT NULL DEFAULT false;

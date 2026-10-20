@@ -41,8 +41,9 @@ async function activeTiers(client, marinaId) {
     `SELECT t.id, t.season_id, s.name AS season_name,
        COALESCE(s.valid_from, t.valid_from) AS valid_from, COALESCE(s.valid_to, t.valid_to) AS valid_to,
        COALESCE(s.repeats_yearly, false) AS repeats_yearly,
-       t.max_length_m, t.max_beam_m, t.price_per_night, t.price_per_month, t.price_per_year
-     FROM marina_price_tier t LEFT JOIN marina_season s ON s.id = t.season_id
+       t.max_length_m, t.max_beam_m, t.price_per_night, t.price_per_month, t.price_per_year,
+       m.fixed_berths_flat
+     FROM marina_price_tier t JOIN marina m ON m.id = t.marina_id LEFT JOIN marina_season s ON s.id = t.season_id
      WHERE t.marina_id = $1 AND t.status = 'active' AND (s.id IS NULL OR s.status = 'active')
      ORDER BY valid_from, max_length_m`, [marinaId]);
   return rows;
