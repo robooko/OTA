@@ -392,13 +392,22 @@ async function listSailorBookings(req, res, next) {
        JOIN marina_doc_requirement r ON r.marina_id = mb.marina_id AND r.status = 'active' AND r.mandatory
        WHERE mb.id = ANY($1) AND NOT EXISTS (SELECT 1 FROM marina_document d WHERE d.booking_id = mb.id AND d.requirement_id = r.id)
        ORDER BY r.sort_order, r.name`, [rows.map((r) => r.id)]) : { rows: [] };
+    // Requirements the sailor's wallet meets for the stay: not missing, shown as on file.
+    // ponytail: one requirementStatus per booking; batch it if a sailor ever has hundreds.
+    const wallet = new Map();
+    for (const b of rows) {
+      const statuses = await sd.requirementStatus(pool, { marinaId: b.marina_id, email: req.sailor.email, arrival: b.arrival, departure: b.departure ?? null });
+      wallet.set(b.id, statuses.filter((s) => s.document)
+        .map(({ requirement: r, document: d }) => ({ id: r.id, name: r.name, file_name: d.versions[0]?.file_name ?? null })));
+    }
     res.json(rows.map((b) => ({
       ...guestView(b),
       marina_id: b.marina_id, marina_image_url: b.marina_image_url,
       marina_lat: b.marina_lat, marina_lng: b.marina_lng, booking_token: bookingToken(b.id),
       contract_required: !!b.departure && kc.pickTemplate(templates.get(b.marina_id), nightsBetween(b.arrival, b.departure)) != null,
       contract_agreed: b.has_signature,
-      missing_documents: reqs.filter((r) => r.booking_id === b.id).map(({ id, name }) => ({ id, name })),
+      missing_documents: reqs.filter((r) => r.booking_id === b.id && !wallet.get(b.id).some((w) => w.id === r.id)).map(({ id, name }) => ({ id, name })),
+      wallet_documents: wallet.get(b.id),
     })));
   } catch (err) { next(err); }
 }
