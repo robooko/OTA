@@ -31,6 +31,48 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal(r.basket_reminder_delay_mins, 60);
     });
 
+    const { upsertBasket, listOpenBaskets } = require('../src/lib/shopBaskets');
+    const shop = await one(`INSERT INTO shop (property_id, name) VALUES ($1, 'Basket Shop') RETURNING id`, [P]);
+    const mkItem = (name, price, status = 'active') => one(
+      `INSERT INTO proshop_item (property_id, shop_id, name, price, status) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [P, shop.id, name, price, status]);
+    const itemA = await mkItem('Cap', 10);
+    const itemB = await mkItem('Old tee', 5, 'inactive');
+    const guest = (items, extra = {}) => ({ shop_id: shop.id, clerk_user_id: 'user_1', contact_email: 'g@x.com', contact_name: 'G', items, ...extra });
+
+    await check('upsert creates one open basket per guest', async () => {
+      await upsertBasket(db, P, guest([{ item_id: itemA.id, quantity: 1 }]));
+      await upsertBasket(db, P, guest([{ item_id: itemA.id, quantity: 3 }]));
+      const rows = (await db.query(`SELECT * FROM shop_basket WHERE property_id = $1 AND status = 'open'`, [P])).rows;
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].items.length, 1);
+      assert.equal(rows[0].items[0].quantity, 3);
+    });
+
+    await check('upsert reprices and drops inactive', async () => {
+      const mix = [{ item_id: itemA.id, quantity: 2 }, { item_id: itemB.id, quantity: 1 }];
+      let b = await upsertBasket(db, P, guest(mix));
+      assert.equal(b.items.length, 1);
+      assert.equal(b.items_subtotal, '20.00');
+      await db.query('UPDATE proshop_item SET price = 12 WHERE id = $1', [itemA.id]);
+      b = await upsertBasket(db, P, guest(mix));
+      assert.equal(b.items_subtotal, '24.00');
+    });
+
+    await check('empty items expires', async () => {
+      const b = await upsertBasket(db, P, guest([]));
+      assert.equal(b.status, 'expired');
+    });
+
+    await check('reminder_due_at', async () => {
+      await upsertBasket(db, P, guest([{ item_id: itemA.id, quantity: 1 }]));
+      await db.query('UPDATE property SET basket_reminder_enabled = true, basket_reminder_delay_mins = 60 WHERE id = $1', [P]);
+      const on = (await listOpenBaskets(db, P, 5))[0];
+      assert.equal(on.reminder_due_at.getTime(), on.updated_at.getTime() + 60 * 60000);
+      await db.query('UPDATE property SET basket_reminder_enabled = false WHERE id = $1', [P]);
+      assert.equal((await listOpenBaskets(db, P, 5))[0].reminder_due_at, null);
+    });
+
     // New check() blocks for later tasks go above this line.
   } finally {
     await db.query('ROLLBACK');

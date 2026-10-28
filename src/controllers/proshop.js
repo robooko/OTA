@@ -845,5 +845,5 @@ module.exports = {
   lookupOrder, listReturns, getReturn, updateReturnStatus,
   createReturn,
   // used by lib/agenticOrders.js
-  emailOrderConfirmationInBackground, forFeed,
+  emailOrderConfirmationInBackground, forFeed, unitPrice,
 };

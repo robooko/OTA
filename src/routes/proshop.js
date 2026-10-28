@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/proshop');
+const baskets = require('../controllers/shopBaskets');
 const { authenticateOrApiKey } = require('../middleware/auth');
 
 // Shops
@@ -16,6 +17,11 @@ router.put('/items/:id', authenticateOrApiKey, ctrl.updateItem);
 router.get('/booking/:booking_id', authenticateOrApiKey, ctrl.listBookingItems);
 router.post('/booking/:booking_id', authenticateOrApiKey, ctrl.addBookingItem);
 router.delete('/booking/:booking_id/:id', authenticateOrApiKey, ctrl.removeBookingItem);
+
+// Baskets (signed-in guest's saved cart; /mine before anything with :id)
+router.put('/baskets', authenticateOrApiKey, baskets.saveBasket);
+router.get('/baskets', authenticateOrApiKey, baskets.listBaskets);
+router.get('/baskets/mine', authenticateOrApiKey, baskets.myBasket);
 
 // Orders (guest self-checkout from the venue's website, no booking)
 router.get('/orders', authenticateOrApiKey, ctrl.listOrders);
