@@ -646,7 +646,7 @@ async function updateAiReplySettings(req, res, next) {
 // object for the API/UI; stored as email_branding JSONB + email_cancel_url.
 
 const BRANDING_KEYS = ['logo_url', 'brand_color', 'header_bg'];
-const REVIEW_REQUEST_FIELDS = 'email_branding, email_cancel_url, review_request_enabled, review_url, review_request_delay_mins, review_request_cooldown_days';
+const REVIEW_REQUEST_FIELDS = 'email_branding, email_cancel_url, review_request_enabled, review_url, review_request_delay_mins, review_request_cooldown_days, basket_reminder_enabled, basket_reminder_delay_mins';
 
 function emailBrandingResponse(row) {
   const b = row.email_branding ?? {};
@@ -661,6 +661,9 @@ function emailBrandingResponse(row) {
     review_url: row.review_url ?? null,
     review_request_delay_mins: row.review_request_delay_mins,
     review_request_cooldown_days: row.review_request_cooldown_days,
+    // Abandoned shop basket reminder -- see migrate-2026-10-28-shop-baskets.sql.
+    basket_reminder_enabled: row.basket_reminder_enabled,
+    basket_reminder_delay_mins: row.basket_reminder_delay_mins,
   };
 }
 
@@ -793,11 +796,28 @@ async function updateEmailBranding(req, res, next) {
       }
     }
 
+    let basketEnabled = current.basket_reminder_enabled;
+    if (body.basket_reminder_enabled !== undefined) {
+      if (typeof body.basket_reminder_enabled !== 'boolean') {
+        return res.status(400).json({ error: 'basket_reminder_enabled must be true or false' });
+      }
+      basketEnabled = body.basket_reminder_enabled;
+    }
+
+    let basketDelayMins = current.basket_reminder_delay_mins;
+    if (body.basket_reminder_delay_mins !== undefined) {
+      basketDelayMins = Number(body.basket_reminder_delay_mins);
+      if (!Number.isInteger(basketDelayMins) || basketDelayMins < 0 || basketDelayMins > 1440) {
+        return res.status(400).json({ error: 'basket_reminder_delay_mins must be an integer between 0 and 1440' });
+      }
+    }
+
     const { rows } = await pool.query(
       `UPDATE property SET email_branding = $1, email_cancel_url = $2,
               review_request_enabled = $3, review_url = $4,
-              review_request_delay_mins = $5, review_request_cooldown_days = $6
-       WHERE id = $7
+              review_request_delay_mins = $5, review_request_cooldown_days = $6,
+              basket_reminder_enabled = $7, basket_reminder_delay_mins = $8
+       WHERE id = $9
        RETURNING ${REVIEW_REQUEST_FIELDS}`,
       [
         Object.keys(branding).length ? JSON.stringify(branding) : null,
@@ -806,6 +826,8 @@ async function updateEmailBranding(req, res, next) {
         reviewUrl,
         reviewDelayMins,
         reviewCooldownDays,
+        basketEnabled,
+        basketDelayMins,
         req.property_id,
       ]
     );
