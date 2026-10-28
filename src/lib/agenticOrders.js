@@ -115,9 +115,10 @@ async function orderProperties(db = pool) {
 function afterRecordDefault(order, p) {
   // Lazy require: controllers/proshop pulls in a lot; keeps this module's
   // pure exports cheap to load in the check script.
-  const { emailOrderConfirmationInBackground, forFeed } = require('../controllers/proshop');
+  const { emailOrderConfirmationInBackground, closeBasketsInBackground, forFeed } = require('../controllers/proshop');
   publishNewProshopOrder(p.id, forFeed(order)).catch((err) => console.error('Ably publish failed:', err.message));
   emailOrderConfirmationInBackground(order.id, p.id);
+  closeBasketsInBackground(order);
 }
 
 async function sweepProperty(p, {

@@ -6,6 +6,7 @@ const {
   publishProshopOrderStatusChanged,
   publishProshopReturnStatusChanged,
   publishNewInquiry,
+  publishBasketUpdated,
 } = require('../lib/ably');
 const {
   RETURN_STATUSES, RETURN_TRANSITIONS, RETURN_EVENT_TYPE,
@@ -324,6 +325,14 @@ async function emailOrderConfirmation(orderId, propertyId) {
   );
 }
 
+// Closes the buyer's open shop baskets and tells the dashboard. Never throws.
+function closeBasketsInBackground(order) {
+  const { closeBasketsForPaidOrder } = require('../lib/shopBaskets'); // lazy: shopBaskets requires this module
+  closeBasketsForPaidOrder(pool, order)
+    .then((closed) => Promise.all(closed.map((b) => publishBasketUpdated(order.property_id, b))))
+    .catch((err) => console.error(`Basket close failed for order ${order.id}:`, err.message));
+}
+
 // Fire-and-forget, matching the Ably publishes it sits beside: a Resend
 // outage must never fail a payment that has already gone through.
 function emailOrderConfirmationInBackground(orderId, propertyId) {
@@ -476,6 +485,8 @@ async function createOrder(req, res, next) {
       }
 
       await client.query('COMMIT');
+      require('../lib/shopBaskets').linkBasketToOrder(pool, order)
+        .catch((err) => console.error(`Basket link failed for order ${order.id}:`, err.message));
       res.status(201).json(orderWithItems(order, lineItems));
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
@@ -539,6 +550,7 @@ async function updateOrder(req, res, next) {
     }
     if (status === 'paid' && !wasPaid) {
       emailOrderConfirmationInBackground(rows[0].id, req.property_id);
+      closeBasketsInBackground(rows[0]);
     }
     if (status !== undefined) {
       publishProshopOrderStatusChanged(req.property_id, { id: rows[0].id, status: rows[0].status, payment_status: rows[0].payment_status })
@@ -579,6 +591,7 @@ async function createOrderPaymentIntent(req, res, next) {
         publishNewProshopOrder(req.property_id, forFeed(orderWithItems(paidRows[0], order.items)))
           .catch((err) => console.error('Ably publish failed:', err.message));
         emailOrderConfirmationInBackground(order.id, req.property_id);
+        closeBasketsInBackground(paidRows[0]);
         return res.json({ already_paid: true, payment_intent_id: existing.id });
       }
       // canceled/failed -> fall through and mint a fresh intent
@@ -636,6 +649,7 @@ async function confirmOrderPayment(req, res, next) {
       publishNewProshopOrder(req.property_id, forFeed(orderWithItems(rows[0], order.items)))
         .catch((err) => console.error('Ably publish failed:', err.message));
       emailOrderConfirmationInBackground(order.id, req.property_id);
+      closeBasketsInBackground(rows[0]);
     }
     res.json(rows[0]);
   } catch (err) {
@@ -845,5 +859,5 @@ module.exports = {
   lookupOrder, listReturns, getReturn, updateReturnStatus,
   createReturn,
   // used by lib/agenticOrders.js
-  emailOrderConfirmationInBackground, forFeed, unitPrice,
+  emailOrderConfirmationInBackground, closeBasketsInBackground, forFeed, unitPrice,
 };

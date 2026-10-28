@@ -77,4 +77,30 @@ async function getOpenBasketFor(db, propertyId, shopId, clerkUserId) {
   return rows[0] || null;
 }
 
-module.exports = { upsertBasket, listOpenBaskets, getOpenBasketFor };
+// Called after the order commits: ties the guest's open basket to it.
+async function linkBasketToOrder(db, order) {
+  if (!order.clerk_user_id) return;
+  await db.query(
+    `UPDATE shop_basket SET order_id = $1
+      WHERE property_id = $2 AND shop_id = $3 AND clerk_user_id = $4 AND status = 'open'`,
+    [order.id, order.property_id, order.shop_id, order.clerk_user_id]
+  );
+}
+
+// Closes the buyer's open baskets: linked to this order, or same email.
+// 'recovered' only if our reminder had gone out.
+async function closeBasketsForPaidOrder(db, order) {
+  const { rows } = await db.query(
+    `UPDATE shop_basket SET
+        status = CASE WHEN reminder_sent_at IS NULL THEN 'bought' ELSE 'recovered' END,
+        order_id = $3, updated_at = now()
+      WHERE property_id = $1 AND shop_id = $2 AND status = 'open'
+        AND (order_id = $3
+             OR ($4::text IS NOT NULL AND lower(trim(contact_email)) = lower(trim($4::text))))
+      RETURNING *`,
+    [order.property_id, order.shop_id, order.id, order.contact_email || null]
+  );
+  return rows;
+}
+
+module.exports = { upsertBasket, listOpenBaskets, getOpenBasketFor, linkBasketToOrder, closeBasketsForPaidOrder };

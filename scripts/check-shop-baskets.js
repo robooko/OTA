@@ -31,7 +31,7 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal(r.basket_reminder_delay_mins, 60);
     });
 
-    const { upsertBasket, listOpenBaskets } = require('../src/lib/shopBaskets');
+    const { upsertBasket, listOpenBaskets, closeBasketsForPaidOrder, linkBasketToOrder, getOpenBasketFor } = require('../src/lib/shopBaskets');
     const shop = await one(`INSERT INTO shop (property_id, name) VALUES ($1, 'Basket Shop') RETURNING id`, [P]);
     const mkItem = (name, price, status = 'active') => one(
       `INSERT INTO proshop_item (property_id, shop_id, name, price, status) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
@@ -71,6 +71,44 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal(on.reminder_due_at.getTime(), on.updated_at.getTime() + 60 * 60000);
       await db.query('UPDATE property SET basket_reminder_enabled = false WHERE id = $1', [P]);
       assert.equal((await listOpenBaskets(db, P, 5))[0].reminder_due_at, null);
+    });
+
+    const mkOrder = (ref, email, clerk) => one(
+      `INSERT INTO proshop_order (property_id, shop_id, reference, clerk_user_id, contact_name, contact_email, items_subtotal, total_price, status, payment_status)
+       VALUES ($1,$2,$3,$4,'G',$5,10,10,'paid','paid') RETURNING *`, [P, shop.id, ref, clerk, email]);
+    const cart = [{ item_id: itemA.id, quantity: 1 }];
+
+    await check('paid order with clerk id recovers reminded basket', async () => {
+      const b = await upsertBasket(db, P, guest(cart, { clerk_user_id: 'u_rec', contact_email: 'rec@x.com' }));
+      await db.query('UPDATE shop_basket SET reminder_sent_at = now() WHERE id = $1', [b.id]);
+      const order = await mkOrder('BCK001', 'rec@x.com', 'u_rec');
+      await linkBasketToOrder(db, order);
+      const closed = await closeBasketsForPaidOrder(db, order);
+      assert.equal(closed.length, 1);
+      assert.equal(closed[0].status, 'recovered');
+      assert.equal(closed[0].order_id, order.id);
+    });
+
+    await check('paid order without reminder marks bought', async () => {
+      await upsertBasket(db, P, guest(cart, { clerk_user_id: 'u_b', contact_email: 'b@x.com' }));
+      const order = await mkOrder('BCK002', 'b@x.com', 'u_b');
+      const closed = await closeBasketsForPaidOrder(db, order);
+      assert.equal(closed[0].status, 'bought');
+    });
+
+    await check('paid order matches by email when no clerk id', async () => {
+      await upsertBasket(db, P, guest(cart, { clerk_user_id: 'u_e', contact_email: 'sam@x.com' }));
+      const order = await mkOrder('BCK003', ' Sam@X.com ', null);
+      const closed = await closeBasketsForPaidOrder(db, order);
+      assert.equal(closed.length, 1);
+      assert.equal(closed[0].status, 'bought');
+    });
+
+    await check("other guest's basket untouched", async () => {
+      await upsertBasket(db, P, guest(cart, { clerk_user_id: 'u_o', contact_email: 'other@x.com' }));
+      const order = await mkOrder('BCK004', 'someone@x.com', 'u_else');
+      assert.equal((await closeBasketsForPaidOrder(db, order)).length, 0);
+      assert.equal((await getOpenBasketFor(db, P, shop.id, 'u_o')).status, 'open');
     });
 
     // New check() blocks for later tasks go above this line.
