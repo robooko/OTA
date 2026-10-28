@@ -6,7 +6,6 @@ const {
   publishProshopOrderStatusChanged,
   publishProshopReturnStatusChanged,
   publishNewInquiry,
-  publishBasketUpdated,
 } = require('../lib/ably');
 const {
   RETURN_STATUSES, RETURN_TRANSITIONS, RETURN_EVENT_TYPE,
@@ -327,9 +326,9 @@ async function emailOrderConfirmation(orderId, propertyId) {
 
 // Closes the buyer's open shop baskets and tells the dashboard. Never throws.
 function closeBasketsInBackground(order) {
-  const { closeBasketsForPaidOrder } = require('../lib/shopBaskets'); // lazy: shopBaskets requires this module
+  const { closeBasketsForPaidOrder, publishBasket } = require('../lib/shopBaskets'); // lazy: shopBaskets requires this module
   closeBasketsForPaidOrder(pool, order)
-    .then((closed) => Promise.all(closed.map((b) => publishBasketUpdated(order.property_id, b))))
+    .then((closed) => Promise.all(closed.map((b) => publishBasket(pool, order.property_id, b.id))))
     .catch((err) => console.error(`Basket close failed for order ${order.id}:`, err.message));
 }
 

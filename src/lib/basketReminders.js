@@ -1,7 +1,7 @@
 const pool = require('../db');
 // Called through the module objects so checks can stub them.
 const resend = require('./resend');
-const ably = require('./ably');
+const { publishBasket } = require('./shopBaskets');
 const spa = require('../controllers/spa');
 
 const OTA_API_BASE_URL = 'https://ota-u6ii.onrender.com';
@@ -70,7 +70,7 @@ async function sweep(db = pool, at = new Date()) {
   for (const b of claimed) await sendOne(b, db); // sequential: small volumes
   const expired = await expireStaleBaskets(db, at);
   for (const b of [...claimed, ...expired]) {
-    ably.publishBasketUpdated(b.property_id, b).catch(console.error);
+    publishBasket(db, b.property_id, b.id);
   }
   return claimed.length;
 }

@@ -30,15 +30,15 @@ async function publishOrderStatusChanged(restaurantId, payload) {
   await channel.publish('order-status-changed', payload);
 }
 
-// Mirrors new-order/order-status-changed onto a property-wide channel, for a
-// dashboard that shows orders across every restaurant on the property rather
-// than one restaurant at a time (the restaurant-scoped channel above stays,
-// for guest-facing views scoped to a single restaurant).
 async function publishBasketUpdated(propertyId, basket) {
   if (!client) return;
   await client.channels.get(`property:${propertyId}:baskets`).publish('basket-updated', basket);
 }
 
+// Mirrors new-order/order-status-changed onto a property-wide channel, for a
+// dashboard that shows orders across every restaurant on the property rather
+// than one restaurant at a time (the restaurant-scoped channel above stays,
+// for guest-facing views scoped to a single restaurant).
 async function publishNewOrderForProperty(propertyId, order) {
   if (!client) return;
   const channel = client.channels.get(`property:${propertyId}:orders`);

@@ -31,7 +31,7 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal(r.basket_reminder_delay_mins, 60);
     });
 
-    const { upsertBasket, listOpenBaskets, closeBasketsForPaidOrder, linkBasketToOrder, getOpenBasketFor } = require('../src/lib/shopBaskets');
+    const { upsertBasket, listOpenBaskets, closeBasketsForPaidOrder, linkBasketToOrder, getOpenBasketFor, getBasketForFeed, publishBasket } = require('../src/lib/shopBaskets');
     const shop = await one(`INSERT INTO shop (property_id, name) VALUES ($1, 'Basket Shop') RETURNING id`, [P]);
     const mkItem = (name, price, status = 'active') => one(
       `INSERT INTO proshop_item (property_id, shop_id, name, price, status) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
@@ -62,6 +62,24 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
     await check('empty items expires', async () => {
       const b = await upsertBasket(db, P, guest([]));
       assert.equal(b.status, 'expired');
+    });
+
+    await check('empty items with nothing open inserts nothing, returns null', async () => {
+      const count = async () => Number((await one('SELECT count(*) FROM shop_basket WHERE property_id = $1', [P])).count);
+      const before = await count();
+      assert.equal(await upsertBasket(db, P, guest([], { clerk_user_id: 'u_none' })), null);
+      assert.equal(await count(), before);
+    });
+
+    await check('non-UUID item_id dropped, not a 22P02', async () => {
+      const b = await upsertBasket(db, P, guest([{ item_id: 'nope', quantity: 1 }, { item_id: itemA.id, quantity: 1 }], { clerk_user_id: 'u_bad' }));
+      assert.equal(b.items.length, 1);
+      assert.equal(await upsertBasket(db, P, guest([{ item_id: 'nope', quantity: 1 }], { clerk_user_id: 'u_bad2' })), null);
+    });
+
+    await check('contact_name truncated to 100', async () => {
+      const b = await upsertBasket(db, P, guest([{ item_id: itemA.id, quantity: 1 }], { clerk_user_id: 'u_long', contact_name: 'x'.repeat(150) }));
+      assert.equal(b.contact_name.length, 100);
     });
 
     await check('reminder_due_at', async () => {
@@ -102,6 +120,35 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       const closed = await closeBasketsForPaidOrder(db, order);
       assert.equal(closed.length, 1);
       assert.equal(closed[0].status, 'bought');
+    });
+
+    await check('linked basket a race expired still closes as bought', async () => {
+      const b = await upsertBasket(db, P, guest(cart, { clerk_user_id: 'u_race', contact_email: 'race@x.com' }));
+      const order = await mkOrder('BCK005', 'race@x.com', 'u_race');
+      await linkBasketToOrder(db, order);
+      await upsertBasket(db, P, guest([], { clerk_user_id: 'u_race' })); // empty PUT expires it first
+      const closed = await closeBasketsForPaidOrder(db, order);
+      assert.equal(closed.length, 1);
+      assert.equal(closed[0].id, b.id);
+      assert.equal(closed[0].status, 'bought');
+    });
+
+    await check('feed row has listOpenBaskets shape incl. reminder_due_at; publish uses it', async () => {
+      await db.query('UPDATE property SET basket_reminder_enabled = true, basket_reminder_delay_mins = 30 WHERE id = $1', [P]);
+      const b = await upsertBasket(db, P, guest(cart, { clerk_user_id: 'u_feed', contact_email: 'feed@x.com' }));
+      const row = await getBasketForFeed(db, P, b.id);
+      assert.equal(row.status, 'open');
+      assert.equal(row.reminder_due_at.getTime(), row.updated_at.getTime() + 30 * 60000);
+      assert.deepEqual(Object.keys(row).sort(), Object.keys((await listOpenBaskets(db, P, 50)).find((r) => r.id === b.id)).sort());
+      const ably = require('../src/lib/ably');
+      const orig = ably.publishBasketUpdated;
+      const sent = [];
+      ably.publishBasketUpdated = async (pid, r) => { sent.push([pid, r]); };
+      try { await publishBasket(db, P, b.id); } finally { ably.publishBasketUpdated = orig; }
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0][0], P);
+      assert.deepEqual(sent[0][1], row);
+      await db.query('UPDATE property SET basket_reminder_enabled = false WHERE id = $1', [P]);
     });
 
     await check("other guest's basket untouched", async () => {

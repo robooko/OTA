@@ -1,7 +1,6 @@
 const pool = require('../db');
-const { publishBasketUpdated } = require('../lib/ably');
 const { isValidUuid } = require('../middleware/validate');
-const { upsertBasket, listOpenBaskets, getOpenBasketFor } = require('../lib/shopBaskets');
+const { upsertBasket, listOpenBaskets, getOpenBasketFor, publishBasket } = require('../lib/shopBaskets');
 const { escapeHtml } = require('../lib/resend');
 
 async function saveBasket(req, res, next) {
@@ -12,7 +11,8 @@ async function saveBasket(req, res, next) {
     const { rows } = await pool.query(`SELECT id FROM shop WHERE id = $1 AND property_id = $2`, [shop_id, req.property_id]);
     if (!rows[0]) return res.status(404).json({ error: 'Shop not found' });
     const basket = await upsertBasket(pool, req.property_id, req.body);
-    publishBasketUpdated(req.property_id, basket).catch(console.error);
+    if (!basket) return res.json({ ok: true }); // empty cart, nothing open: nothing to publish
+    publishBasket(pool, req.property_id, basket.id);
     res.json(basket);
   } catch (err) { next(err); }
 }
