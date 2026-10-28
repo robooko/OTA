@@ -727,6 +727,14 @@ function createTools(apiRequest) {
     run: (args) => apiRequest('GET', '/api/proshop/orders', { query: args }),
   },
   {
+    name: 'list_shop_baskets',
+    description: 'List recent abandoned pro shop baskets (default 5, max 50)',
+    inputSchema: {
+      limit: z.number().int().min(1).max(50).optional(),
+    },
+    run: (args) => apiRequest('GET', '/api/proshop/baskets', { query: args }),
+  },
+  {
     name: 'get_proshop_order',
     description: 'Get a pro shop order with its line items',
     inputSchema: { id: z.string() },
