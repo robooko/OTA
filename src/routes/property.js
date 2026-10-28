@@ -68,9 +68,11 @@ router.put('/agentic-commerce', authenticate, requireRole('admin'), ctrl.updateA
 router.get('/reminders', authenticate, ctrl.getReminderSettings);
 router.put('/reminders', authenticate, requireRole('admin'), ctrl.updateReminderSettings);
 
+// Writes on the API-key rail too (MCP create/update_website): a website row
+// is just a URL plus which analytics source the dashboard chart reads.
 router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
-router.post('/websites', authenticate, ctrl.createWebsite);
-router.put('/websites/:id', authenticate, ctrl.updateWebsite);
+router.post('/websites', authenticateOrApiKey, ctrl.createWebsite);
+router.put('/websites/:id', authenticateOrApiKey, ctrl.updateWebsite);
 router.get('/websites/:id/analytics', authenticateOrApiKey, ctrl.getWebsiteAnalytics);
 // Tells Settings which service-account address a venue grants Viewer access
 // to in GA4. No secret in the response -- the email is meant to be shared.

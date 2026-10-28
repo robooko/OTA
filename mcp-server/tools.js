@@ -900,6 +900,46 @@ function createTools(apiRequest) {
     run: (args) => apiRequest('PUT', '/api/property/me', { body: args }),
   },
   {
+    name: 'list_websites',
+    description: "The property's websites, each with the analytics source the dashboard's visitors chart reads (vercel_project_id or ga4_property_id; GA4 wins when both are set)",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/property/websites'),
+  },
+  {
+    name: 'create_website',
+    description: "Add a website to the property. Set ga4_property_id to chart its Google Analytics visitors on the dashboard -- the GA4 property must also grant Viewer to the service account from GET /api/property/analytics/google.",
+    inputSchema: {
+      url: z.string().url(),
+      label: z.string().nullable().optional(),
+      vercel_project_id: z.string().nullable().optional(),
+      ga4_property_id: z.string().nullable().optional().describe('Numeric GA4 property id (GA Admin > Property details), not the G- measurement id'),
+    },
+    run: (args) => apiRequest('POST', '/api/property/websites', { body: args }),
+  },
+  {
+    name: 'update_website',
+    description: 'Update a website. Omit a field to leave it unchanged; null clears vercel_project_id / ga4_property_id. Set status to "inactive" to delete it.',
+    inputSchema: {
+      id: z.string().uuid(),
+      url: z.string().url().optional(),
+      label: z.string().optional(),
+      status: z.enum(['active', 'inactive']).optional(),
+      vercel_project_id: z.string().nullable().optional(),
+      ga4_property_id: z.string().nullable().optional().describe('Numeric GA4 property id, or null to clear'),
+    },
+    run: ({ id, ...body }) => apiRequest('PUT', `/api/property/websites/${id}`, { body }),
+  },
+  {
+    name: 'get_website_analytics',
+    description: "A website's visitor stats from its mapped GA4 property or Vercel project -- the same data as the dashboard chart. Defaults to the last 30 days.",
+    inputSchema: {
+      id: z.string().uuid(),
+      since: z.string().optional().describe('YYYY-MM-DD'),
+      until: z.string().optional().describe('YYYY-MM-DD'),
+    },
+    run: ({ id, ...query }) => apiRequest('GET', `/api/property/websites/${id}/analytics`, { query }),
+  },
+  {
     name: 'get_email_branding',
     description: "The property's stored default branding for booking and enquiry emails (logo, accent colour, header background, cancel link), plus its post-visit Google review request settings. This is the saved default -- distinct from the per-request `branding` some booking tools accept, which styles one email and is never stored.",
     inputSchema: {},
