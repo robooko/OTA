@@ -111,6 +111,70 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       assert.equal((await getOpenBasketFor(db, P, shop.id, 'u_o')).status, 'open');
     });
 
+    const { claimDueBaskets, expireStaleBaskets } = require('../src/lib/basketReminders');
+    const { optOut } = require('../src/controllers/shopBaskets');
+    const min = (t, m) => new Date(t.getTime() + m * 60000);
+    // A fresh enabled-property basket for claim checks; email sam@x.com.
+    const claimFixture = async (clerk = 'u_claim') => {
+      await db.query('DELETE FROM basket_reminder_opt_out WHERE property_id = $1', [P]);
+      await db.query(`UPDATE shop_basket SET status = 'expired' WHERE property_id = $1 AND status = 'open'`, [P]);
+      await db.query('UPDATE property SET basket_reminder_enabled = true, basket_reminder_delay_mins = 60, enabled_modules = NULL WHERE id = $1', [P]);
+      return upsertBasket(db, P, guest(cart, { clerk_user_id: clerk, contact_email: 'sam@x.com' }));
+    };
+
+    await check('claims after delay, not before', async () => {
+      const b = await claimFixture();
+      assert.deepEqual(await claimDueBaskets(db, min(b.updated_at, 59)), []);
+      const got = await claimDueBaskets(db, min(b.updated_at, 61));
+      assert.equal(got.length, 1);
+      assert.equal(got[0].id, b.id);
+      assert.equal(got[0].property_name, 'Basket Check Hotel');
+    });
+
+    await check('never claims twice', async () => {
+      const b = await claimFixture();
+      assert.equal((await claimDueBaskets(db, min(b.updated_at, 61))).length, 1);
+      assert.deepEqual(await claimDueBaskets(db, min(b.updated_at, 120)), []);
+    });
+
+    await check("edit after reminder doesn't re-claim", async () => {
+      const b = await claimFixture();
+      await claimDueBaskets(db, min(b.updated_at, 61));
+      const sent = (await one('SELECT reminder_sent_at FROM shop_basket WHERE id = $1', [b.id])).reminder_sent_at;
+      const b2 = await upsertBasket(db, P, guest(cart, { clerk_user_id: 'u_claim', contact_email: 'sam@x.com' }));
+      assert.deepEqual(await claimDueBaskets(db, min(b2.updated_at, 200)), []);
+      const after = (await one('SELECT reminder_sent_at FROM shop_basket WHERE id = $1', [b.id])).reminder_sent_at;
+      assert.equal(after.getTime(), sent.getTime());
+    });
+
+    await check('opted-out guest skipped', async () => {
+      const b = await claimFixture();
+      await db.query(`INSERT INTO basket_reminder_opt_out (property_id, email) VALUES ($1, ' SAM@x.com ')`, [P]);
+      assert.deepEqual(await claimDueBaskets(db, min(b.updated_at, 61)), []);
+      await optOut(db, P, 'sam@x.com');
+      await optOut(db, P, 'sam@x.com');
+    });
+
+    await check('disabled or module off claims nothing and leaves it claimable', async () => {
+      const b = await claimFixture();
+      const at = min(b.updated_at, 61);
+      await db.query('UPDATE property SET basket_reminder_enabled = false WHERE id = $1', [P]);
+      assert.deepEqual(await claimDueBaskets(db, at), []);
+      await db.query('UPDATE property SET basket_reminder_enabled = true, enabled_modules = $2 WHERE id = $1', [P, JSON.stringify(['spa'])]);
+      assert.deepEqual(await claimDueBaskets(db, at), []);
+      await db.query('UPDATE property SET enabled_modules = NULL WHERE id = $1', [P]);
+      assert.equal((await claimDueBaskets(db, at)).length, 1);
+    });
+
+    await check('older than 7 days never claimed, gets expired', async () => {
+      const b = await claimFixture();
+      const at = min(b.updated_at, 8 * 24 * 60);
+      assert.deepEqual(await claimDueBaskets(db, at), []);
+      const changed = await expireStaleBaskets(db, at);
+      assert.equal(changed.length, 1);
+      assert.equal((await one('SELECT status FROM shop_basket WHERE id = $1', [b.id])).status, 'expired');
+    });
+
     // New check() blocks for later tasks go above this line.
   } finally {
     await db.query('ROLLBACK');

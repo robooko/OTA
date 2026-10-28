@@ -4,6 +4,7 @@ const { startAvailabilityHorizonJob } = require('./lib/availabilitySeeder');
 const { startTeeSheetHorizonJob } = require('./lib/teeTimeSeeder');
 const { startTourTimetableHorizonJob } = require('./lib/tourSlotSeeder');
 const { startReviewRequestJob } = require('./lib/reviewRequester');
+const { startBasketReminderJob } = require('./lib/basketReminders');
 const { startAgenticFeedJob } = require('./lib/agenticFeed');
 const { startAgenticOrderJob } = require('./lib/agenticOrders');
 const { startReminderJob } = require('./lib/reminders');
@@ -18,6 +19,7 @@ app.listen(PORT, '0.0.0.0', () => {
   startTeeSheetHorizonJob();
   startTourTimetableHorizonJob();
   startReviewRequestJob();
+  startBasketReminderJob();
   startAgenticFeedJob();
   startAgenticOrderJob();
   startReminderJob();

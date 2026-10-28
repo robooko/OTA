@@ -454,6 +454,42 @@ async function sendReviewRequest({ to, name, propertyName, branding, reviewUrl, 
   return data.id;
 }
 
+// One-shot abandoned-basket nudge. No discount copy by design. Same
+// skeleton and unsubscribe footer as sendReviewRequest.
+async function sendBasketReminder({ to, name, propertyName, branding, items, subtotal, currency, returnUrl, optOutUrl, idempotencyKey }) {
+  if (!client) throw new Error('Resend not configured');
+  const subject = `You left something in your basket at ${propertyName}`;
+  const greeting = name ? `Hi ${name},` : 'Hi there,';
+  const note = `You left a few things in your basket at ${propertyName}. They're still here if you'd like to finish up.`;
+  const lines = (items || []).map((i) => `${i.quantity} x ${i.item_name} (${formatMoney(Number(i.unit_price) * i.quantity, currency)})`);
+  const total = `Subtotal: ${formatMoney(Number(subtotal), currency)}`;
+
+  const text = [greeting, '', note, '', ...lines, total, '', ...(returnUrl ? [`Return to your basket: ${returnUrl}`, ''] : []), `Don't want these? Unsubscribe: ${optOutUrl}`].join('\n');
+
+  const listHtml = `<ul style="margin:0 0 12px;padding-left:20px;">${(items || []).map((i, n) => `<li>${escapeHtml(lines[n])}</li>`).join('')}</ul><p style="margin:0 0 20px;font-weight:600;">${escapeHtml(total)}</p>`;
+  const ctaHtml = returnUrl ? `<div style="margin:20px 0;">
+      <a href="${escapeHtml(returnUrl)}" style="display:inline-block;background:${branding?.brand_color || '#1a1a1a'};color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:6px;">Return to your basket</a>
+    </div>` : '';
+  const unsubscribeHtml = `<a href="${escapeHtml(optOutUrl)}" style="color:#888;text-decoration:underline;">Don't want these? Unsubscribe</a>`;
+
+  const { data, error } = await client.emails.send({
+    from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
+    to,
+    subject,
+    text,
+    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;margin:0 auto;">
+      ${brandingHeaderHtml(branding, propertyName)}
+      <p style="margin:0 0 16px;">${escapeHtml(greeting)}</p>
+      <p style="margin:0 0 16px;">${escapeHtml(note)}</p>
+      ${listHtml}
+      ${ctaHtml}
+      <p style="margin:24px 0 0;font-size:12px;">${unsubscribeHtml}</p>
+    </div>`,
+  }, idempotencyKey ? { idempotencyKey } : undefined);
+  if (error) throw new Error(error.message);
+  return data.id;
+}
+
 // A pro-shop order's receipt, sent once when the order first becomes paid
 // (proshop.js's emailOrderConfirmation owns the send-once guard). Same
 // skeleton as sendAppointmentEmail -- header / greeting / details card /
@@ -569,6 +605,7 @@ module.exports = {
   sendSpaReminder,
   sendReservationReminder,
   sendReviewRequest,
+  sendBasketReminder,
   sendOrderConfirmation,
   verifyInboundWebhook,
   getReceivedEmail,

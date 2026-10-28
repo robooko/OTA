@@ -2,6 +2,7 @@ const pool = require('../db');
 const { publishBasketUpdated } = require('../lib/ably');
 const { isValidUuid } = require('../middleware/validate');
 const { upsertBasket, listOpenBaskets, getOpenBasketFor } = require('../lib/shopBaskets');
+const { escapeHtml } = require('../lib/resend');
 
 async function saveBasket(req, res, next) {
   try {
@@ -33,4 +34,31 @@ async function myBasket(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { saveBasket, listBaskets, myBasket };
+// Property-scoped, idempotent. Shared with scripts/check-shop-baskets.js.
+async function optOut(db, propertyId, email) {
+  if (!email) return;
+  await db.query(
+    `INSERT INTO basket_reminder_opt_out (property_id, email) VALUES ($1, lower(trim($2))) ON CONFLICT DO NOTHING`,
+    [propertyId, email]
+  );
+}
+
+// GET, unauthenticated -- the basket UUID is the capability (only ever in
+// that guest's own reminder email). Same shape as reviews.js reviewOptOut.
+async function basketReminderOptOut(req, res, next) {
+  try {
+    const { rows: [r] } = await pool.query(
+      `SELECT b.property_id, b.contact_email, p.name AS property_name
+       FROM shop_basket b JOIN property p ON p.id = b.property_id WHERE b.id = $1`,
+      [req.params.basket_id]
+    );
+    if (!r) return res.status(404).send('<p>That link is no longer valid.</p>');
+    await optOut(pool, r.property_id, r.contact_email);
+    res.send(`<p>You won't get basket reminders from ${escapeHtml(r.property_name)} again.</p>`);
+  } catch (err) {
+    if (err.code === '22P02') return res.status(404).send('<p>That link is no longer valid.</p>');
+    next(err);
+  }
+}
+
+module.exports = { saveBasket, listBaskets, myBasket, optOut, basketReminderOptOut };
