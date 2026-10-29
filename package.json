@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "RESTful hotel booking backend",
   "main": "src/server.js",
+  "engines": {
+    "node": ">=22.23.4 <23"
+  },
   "workspaces": [
     "packages/*"
   ],
