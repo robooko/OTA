@@ -342,9 +342,17 @@ async function getWebsiteAnalytics(req, res, next) {
         host = null; // unparseable stored url: fall back to the whole property
       }
       try {
-        const analytics = await googleAnalytics.fetchGa4Analytics({ propertyId: ga4_property_id, sinceIso, untilIso, host });
+        const [analytics, search] = await Promise.all([
+          googleAnalytics.fetchGa4Analytics({ propertyId: ga4_property_id, sinceIso, untilIso, host }),
+          // Optional: null when the site isn't shared in Search Console.
+          host
+            ? googleAnalytics
+                .fetchSearchConsole({ host, startDate: sinceIso.slice(0, 10), endDate: untilIso.slice(0, 10) })
+                .catch(() => null)
+            : null,
+        ]);
         if (!analytics) return res.status(502).json({ error: 'Failed to fetch analytics from Google' });
-        return res.json({ ...analytics, source: 'ga4', host });
+        return res.json({ ...analytics, search, source: 'ga4', host });
       } catch (err) {
         // Access and setup problems carry a message a venue can act on.
         return res.status(502).json({ error: err.message });

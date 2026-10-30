@@ -13,7 +13,10 @@
 const crypto = require('crypto');
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
-const SCOPE = 'https://www.googleapis.com/auth/analytics.readonly';
+// Search Console rides the same service account: the venue adds it as a user
+// on their Search Console property as well as a Viewer on GA4.
+const SCOPE = 'https://www.googleapis.com/auth/analytics.readonly https://www.googleapis.com/auth/webmasters.readonly';
+const SEARCH_API = 'https://www.googleapis.com/webmasters/v3/sites';
 const DATA_API = 'https://analyticsdata.googleapis.com/v1beta';
 
 let serviceAccount;
@@ -226,4 +229,36 @@ async function fetchGa4Analytics({ propertyId, sinceIso, untilIso, host = null }
   return result;
 }
 
-module.exports = { isConfigured, serviceAccountEmail, normalisePropertyId, fetchGa4Analytics, Ga4AccessError };
+/**
+ * Google Search Console totals and top searches for a host, or null when the
+ * service account can't read either form of the site (a Domain property,
+ * then a URL-prefix one) -- the dashboard just leaves search out then.
+ * { impressions, clicks, queries: [{ name, value }] }, value = impressions.
+ */
+async function fetchSearchConsole({ host, startDate, endDate }) {
+  const bare = String(host).toLowerCase().replace(/^www\./, '');
+  const query = async (siteUrl, body) =>
+    fetch(`${SEARCH_API}/${encodeURIComponent(siteUrl)}/searchAnalytics/query`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${await accessToken()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startDate, endDate, ...body }),
+    });
+  for (const siteUrl of [`sc-domain:${bare}`, `https://${host}/`]) {
+    const totals = await query(siteUrl, {});
+    if (!totals.ok) continue;
+    const row = (await totals.json()).rows?.[0];
+    const top = await query(siteUrl, { dimensions: ['query'], rowLimit: 250 });
+    const rows = top.ok ? (await top.json()).rows ?? [] : [];
+    return {
+      impressions: row?.impressions ?? 0,
+      clicks: row?.clicks ?? 0,
+      queries: rows
+        .sort((a, b) => b.impressions - a.impressions) // Google orders by clicks
+        .slice(0, 8)
+        .map((r) => ({ name: r.keys[0], value: r.impressions })),
+    };
+  }
+  return null;
+}
+
+module.exports = { isConfigured, serviceAccountEmail, normalisePropertyId, fetchGa4Analytics, fetchSearchConsole, Ga4AccessError };
