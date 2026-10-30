@@ -233,7 +233,8 @@ async function fetchGa4Analytics({ propertyId, sinceIso, untilIso, host = null }
  * Google Search Console totals and top searches for a host, or null when the
  * service account can't read either form of the site (a Domain property,
  * then a URL-prefix one) -- the dashboard just leaves search out then.
- * { impressions, clicks, queries: [{ name, value }] }, value = impressions.
+ * { impressions, clicks, daily: [{ date, impressions, clicks }],
+ * queries: [{ name, value }] }, value = impressions.
  */
 async function fetchSearchConsole({ host, startDate, endDate }) {
   const bare = String(host).toLowerCase().replace(/^www\./, '');
@@ -247,11 +248,24 @@ async function fetchSearchConsole({ host, startDate, endDate }) {
     const totals = await query(siteUrl, {});
     if (!totals.ok) continue;
     const row = (await totals.json()).rows?.[0];
-    const top = await query(siteUrl, { dimensions: ['query'], rowLimit: 250 });
+    const [top, byDate] = await Promise.all([
+      query(siteUrl, { dimensions: ['query'], rowLimit: 250 }),
+      query(siteUrl, { dimensions: ['date'], rowLimit: 500 }),
+    ]);
     const rows = top.ok ? (await top.json()).rows ?? [] : [];
+    const dayRows = new Map((byDate.ok ? (await byDate.json()).rows ?? [] : []).map((r) => [r.keys[0], r]));
+    // Every day on the axis, as for GA -- Search Console leaves out empty
+    // days, and its last two or three are always empty yet (reporting lag).
+    const daily = [];
+    for (let day = new Date(`${startDate}T00:00:00Z`); day <= new Date(`${endDate}T00:00:00Z`); day.setUTCDate(day.getUTCDate() + 1)) {
+      const date = day.toISOString().slice(0, 10);
+      const r = dayRows.get(date);
+      daily.push({ date, impressions: r?.impressions ?? 0, clicks: r?.clicks ?? 0 });
+    }
     return {
       impressions: row?.impressions ?? 0,
       clicks: row?.clicks ?? 0,
+      daily,
       queries: rows
         .sort((a, b) => b.impressions - a.impressions) // Google orders by clicks
         .slice(0, 8)
