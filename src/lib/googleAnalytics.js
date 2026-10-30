@@ -124,7 +124,14 @@ async function fetchGa4Analytics({ propertyId, sinceIso, untilIso, host = null }
   const res = await runReport(propertyId, {
     dateRanges: [{ startDate, endDate }],
     dimensions: [{ name: 'date' }],
-    metrics: [{ name: 'activeUsers' }, { name: 'screenPageViews' }],
+    // The last three only matter as totals (the tiles); per day they're ignored.
+    metrics: [
+      { name: 'activeUsers' },
+      { name: 'screenPageViews' },
+      { name: 'sessions' },
+      { name: 'engagementRate' },
+      { name: 'userEngagementDuration' },
+    ],
     metricAggregations: ['TOTAL'],
     orderBys: [{ dimension: { dimensionName: 'date' } }],
     ...hostFilter,
@@ -156,11 +163,47 @@ async function fetchGa4Analytics({ propertyId, sinceIso, untilIso, host = null }
     daily.push({ date, visitors, pageviews });
   }
   const totals = body.totals?.[0]?.metricValues ?? [];
+  const visitors = Number(totals[0]?.value ?? 0);
   const result = {
-    visitors: Number(totals[0]?.value ?? 0),
+    visitors,
     pageviews: Number(totals[1]?.value ?? 0),
+    sessions: Number(totals[2]?.value ?? 0),
+    engagement_rate: Number(totals[3]?.value ?? 0), // 0..1
+    // GA's "Average engagement time per active user", in seconds.
+    avg_engagement_seconds: visitors ? Number(totals[4]?.value ?? 0) / visitors : 0,
     daily,
   };
+
+  // Top-N lists for the Settings → Websites dashboard, in one batch call.
+  // Skipped on an empty range -- every list would be empty anyway.
+  if (visitors > 0) {
+    const top = (dimension, metric) => ({
+      dateRanges: [{ startDate, endDate }],
+      dimensions: [{ name: dimension }],
+      metrics: [{ name: metric }],
+      orderBys: [{ metric: { metricName: metric }, desc: true }],
+      limit: 8,
+      ...hostFilter,
+    });
+    const batch = await fetch(`${DATA_API}/properties/${propertyId}:batchRunReports`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${await accessToken()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requests: [
+          top('pagePath', 'screenPageViews'),
+          top('sessionDefaultChannelGroup', 'sessions'),
+          top('country', 'activeUsers'),
+          top('deviceCategory', 'activeUsers'),
+        ],
+      }),
+    });
+    if (batch.ok) {
+      const { reports = [] } = await batch.json();
+      const rows = (i) =>
+        (reports[i]?.rows ?? []).map((row) => ({ name: row.dimensionValues[0].value, value: Number(row.metricValues[0].value) }));
+      result.breakdowns = { pages: rows(0), channels: rows(1), countries: rows(2), devices: rows(3) };
+    }
+  }
 
   // Only paid for on an empty filtered result: one more report, by host,
   // to tell "this site had no visits" apart from "this property's visits
