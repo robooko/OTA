@@ -382,6 +382,68 @@ const {
       assert.equal((await one('SELECT rate_plan_terms FROM booking WHERE id = $1', [b.id])).rate_plan_terms.pay_at_hotel, true);
       assert.ok(sent.confirmation.includes(b.id));
     });
+
+    // ---- Task 8: cancellation policy ----
+    const paidBookingNear = (planId, days) => paidBooking(planId, dayFromToday(days), dayFromToday(days + 1));
+    const statusOf = async (id) => (await one('SELECT status FROM booking WHERE id = $1', [id])).status;
+    const REFUSAL = 'This booking can no longer be cancelled online. Please contact the hotel.';
+    await check('guest cancels Flex before the deadline: refunded', async () => {
+      const b = await paidBooking(FLEX_FULL, '2030-07-29', '2030-07-30');
+      const r = await api('DELETE', `/api/bookings/${b.id}`);
+      assert.equal(r.status, 200); assert.equal(r.body.status, 'cancelled');
+      assert.equal((await pi(b.id)).refunded, true);
+      assert.deepEqual((await paymentRows(b.id)).map((p) => p.status), ['refunded']);
+    });
+    await check('guest cannot cancel Saver or late Flex online', async () => {
+      const s = await paidBooking(SAVER, '2030-07-30', '2030-07-31');
+      const r = await api('DELETE', `/api/bookings/${s.id}`);
+      assert.equal(r.status, 409); assert.equal(r.body.error, REFUSAL); assert.equal(r.body.details, 'non-refundable');
+      assert.equal(await statusOf(s.id), 'confirmed');
+      const late = await paidBookingNear(FLEX_FULL, 1); // deadline (48 h before tomorrow's midnight) has passed
+      const l = await api('DELETE', `/api/bookings/${late.id}`);
+      assert.equal(l.status, 409); assert.equal(l.body.error, REFUSAL); assert.match(l.body.details, /^Free cancellation ended /);
+      assert.equal((await pi(late.id)).refunded, undefined);
+    });
+    await check('staff cancel never refunds; an uncaptured hold is released', async () => {
+      const s = await paidBooking(SAVER, '2030-07-25', '2030-07-26');
+      const r = await staff(bookings.cancelBooking, { params: { id: s.id } });
+      assert.equal(r.status, 200); assert.equal(r.body.status, 'cancelled');
+      assert.equal((await pi(s.id)).refunded, undefined);
+      assert.deepEqual((await paymentRows(s.id)).map((p) => p.status), ['completed']);
+      const h = await apiBookingNear(FLEX_HOLD, 6);
+      assert.equal((await api('POST', `/api/bookings/${h.id}/payment-intent`)).body.mode, 'hold');
+      (await pi(h.id)).status = 'requires_capture';
+      await api('POST', `/api/bookings/${h.id}/confirm-payment`);
+      assert.equal((await staff(bookings.cancelBooking, { params: { id: h.id } })).body.status, 'cancelled');
+      assert.equal((await pi(h.id)).status, 'canceled');
+    });
+    await check('cancelling pending_payment releases an open PI and refunds a just-succeeded one', async () => {
+      const open = await apiBooking(SAVER, '2030-07-22', '2030-07-23');
+      await api('POST', `/api/bookings/${open.id}/payment-intent`);
+      assert.equal((await api('DELETE', `/api/bookings/${open.id}`)).status, 200);
+      assert.equal((await pi(open.id)).status, 'canceled');
+      const b = await apiBooking(SAVER, '2030-07-21', '2030-07-22');
+      await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      await succeed(b.id);
+      const r = await api('DELETE', `/api/bookings/${b.id}`);
+      assert.equal(r.status, 200); assert.equal(r.body.status, 'cancelled');
+      assert.equal((await pi(b.id)).refunded, true);
+    });
+    await check('Stripe failure leaves the booking untouched', async () => {
+      const b = await paidBooking(FLEX_FULL, '2030-07-23', '2030-07-24');
+      fakeStripe.failNextRefund = true;
+      const r = await api('DELETE', `/api/bookings/${b.id}`);
+      assert.equal(r.status, 502);
+      assert.equal(await statusOf(b.id), 'confirmed');
+      assert.deepEqual((await paymentRows(b.id)).map((p) => p.status), ['completed']);
+    });
+    await check('no-plan booking cancels exactly as today', async () => {
+      const b = (await api('POST', '/api/bookings', { guest_id: G, room_type_id: PLAIN_RT, check_in: '2030-07-08', check_out: '2030-07-09' })).body;
+      const r = await api('DELETE', `/api/bookings/${b.id}`);
+      assert.equal(r.status, 200); assert.equal(r.body.status, 'cancelled');
+      assert.equal((await one('SELECT is_available FROM room_availability WHERE room_id = $1 AND date = $2', [b.room_id, '2030-07-08'])).is_available, true);
+      assert.equal((await api('DELETE', `/api/bookings/${b.id}`)).status, 404); // already cancelled
+    });
   } finally {
     const props = [P, Q];
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);

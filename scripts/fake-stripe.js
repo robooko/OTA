@@ -27,6 +27,12 @@ const fake = {
       pi.status = 'canceled'; return pi;
     },
   },
-  refunds: { async create({ payment_intent }) { store.get(payment_intent).refunded = true; return { id: 're_fake' }; } },
+  failNextRefund: false,
+  refunds: {
+    async create({ payment_intent }) {
+      if (fake.failNextRefund) { fake.failNextRefund = false; throw new Error('refund failed'); }
+      store.get(payment_intent).refunded = true; return { id: 're_fake' };
+    },
+  },
 };
 module.exports = fake;

@@ -2,7 +2,7 @@ const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
 const { publishNewBooking, publishBookingStatusChanged } = require('../lib/ably');
 const { computeFolio, toCents } = require('../lib/folio');
-const { applyAdjustment, termsSnapshot, PAY_WINDOW_MINUTES } = require('../lib/ratePlans');
+const { applyAdjustment, termsSnapshot, guestCancelDecision, PAY_WINDOW_MINUTES } = require('../lib/ratePlans');
 const roomEmails = require('../lib/roomBookingEmails');
 const roomPayments = require('../lib/roomPayments');
 const { fetchJoinedBooking } = roomPayments;
@@ -434,33 +434,47 @@ async function cancelBooking(req, res, next) {
   try {
     await client.query('BEGIN');
 
-    const { rows } = await client.query(
-      `UPDATE booking SET status = 'cancelled' WHERE id = $1 AND property_id = $2 AND status != 'cancelled' RETURNING *`,
-      [req.params.id, req.property_id]
-    );
-    if (!rows.length) {
+    const booking = await roomPayments.lockBooking(client, req.params.id, req.property_id);
+    if (!booking || booking.status === 'cancelled' || booking.status === 'expired') {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Booking not found or already cancelled' });
     }
 
-    const { room_id, check_in, check_out } = rows[0];
+    // Rate plan bookings (rate plans spec §9): a website cancelling for a
+    // guest gets the plan's terms; staff can always cancel, with no
+    // automatic refund. Stripe goes first, so a failure changes nothing.
+    let refundedPaymentIds = [];
+    if (booking.rate_plan_terms || booking.stripe_payment_intent_id) {
+      const decision = req.auth_method === 'api_key'
+        ? guestCancelDecision(booking, roomPayments.deadlineOf(booking), new Date())
+        : 'staff';
+      if (decision === 'refuse') {
+        await client.query('ROLLBACK');
+        const deadline = roomPayments.deadlineOf(booking);
+        return res.status(409).json({
+          error: 'This booking can no longer be cancelled online. Please contact the hotel.',
+          details: deadline ? `Free cancellation ended ${deadline.toISOString()}` : 'non-refundable',
+        });
+      }
+      try {
+        ({ refundedPaymentIds } = await roomPayments.stripeForCancel(booking, { refund: decision === 'refund' }));
+      } catch (err) {
+        await client.query('ROLLBACK');
+        return res.status(502).json({ error: 'Payment provider error; booking not cancelled', details: err.message });
+      }
+    }
 
-    // Restore availability
-    await client.query(
-      `UPDATE room_availability
-       SET is_available = true
-       WHERE room_id = $1 AND date >= $2 AND date < $3`,
-      [room_id, check_in, check_out]
+    const { rows } = await client.query(
+      `UPDATE booking SET status = 'cancelled', payment_due_at = NULL WHERE id = $1 RETURNING *`, [booking.id]
     );
+    if (refundedPaymentIds.length) {
+      await client.query(`UPDATE payment SET status = 'refunded' WHERE id = ANY($1)`, [refundedPaymentIds]);
+    }
+    await roomPayments.releaseAvailability(client, booking);
 
     await client.query('COMMIT');
 
-    // After COMMIT -- see the matching note in createBooking.
-    try {
-      await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
-    } catch (e) {
-      console.error('MV refresh failed after commit:', e.message);
-    }
+    await roomPayments.refreshAvailabilityView();
 
     // Full joined row -- see the matching note in updateBooking.
     const bookedFull = (await fetchJoinedBooking(rows[0].id)) ?? rows[0];
