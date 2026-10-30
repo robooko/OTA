@@ -1,6 +1,7 @@
 const pool = require('../db');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { resolveSiteProperty, siteSelectors } = require('../lib/propertyResolver');
+const { applyAdjustment, cancelDeadline, effectiveMode } = require('../lib/ratePlans');
 
 async function getRoomAvailability(req, res, next) {
   try {
@@ -107,7 +108,35 @@ async function searchAvailability(req, res, next) {
        ORDER BY from_rate ASC`,
       [property_id, check_in, check_out, parseInt(guests, 10)]
     );
-    res.json(rows);
+
+    // Each room type's active rate plans, priced off its from_rate. Additive:
+    // a room type with no plans gets plans: [].
+    const plansByType = {};
+    if (rows.length) {
+      const { rows: plans } = await pool.query(
+        `SELECT rp.*, p.timezone FROM rate_plan rp JOIN property p ON p.id = rp.property_id
+         WHERE rp.property_id = $1 AND rp.room_type_id = ANY($2) AND rp.status = 'active'
+         ORDER BY rp.sort_order, rp.name`,
+        [property_id, rows.map((r) => r.room_type_id)]
+      );
+      const now = new Date();
+      for (const plan of plans) {
+        const deadline = plan.refundable ? cancelDeadline(check_in, plan.timezone, plan.cancel_cutoff_hours) : null;
+        (plansByType[plan.room_type_id] ??= []).push({
+          id: plan.id,
+          name: plan.name,
+          adjustment_pct: Number(plan.adjustment_pct),
+          refundable: plan.refundable,
+          cancel_deadline: deadline ? deadline.toISOString() : null,
+          payment_mode: effectiveMode(plan, deadline, now),
+          deposit: plan.payment_mode === 'deposit' ? { kind: plan.deposit_kind, value: Number(plan.deposit_value) } : null,
+        });
+      }
+    }
+    res.json(rows.map((r) => ({
+      ...r,
+      plans: (plansByType[r.room_type_id] ?? []).map((p) => ({ ...p, from_rate: applyAdjustment(r.from_rate, p.adjustment_pct) })),
+    })));
   } catch (err) {
     next(err);
   }

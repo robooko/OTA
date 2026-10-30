@@ -270,6 +270,25 @@ const {
       assert.equal((await staff(bookings.updateBooking, { params: { id }, body: { status: 'pending_payment' } })).status, 400);
       await pool.query('DELETE FROM booking WHERE id = $1', [id]);
     });
+
+    // ---- Task 6: search returns plans ----
+    await check('search lists plans per room type; plain type has none', async () => {
+      await pool.query('REFRESH MATERIALIZED VIEW room_type_availability');
+      const r = await api('GET', '/api/availability/search?check_in=2030-07-20&check_out=2030-07-22&guests=1');
+      assert.equal(r.status, 200);
+      const rt = r.body.find((x) => x.room_type_id === RT); const plain = r.body.find((x) => x.room_type_id === PLAIN_RT);
+      const byName = Object.fromEntries(rt.plans.map((p) => [p.name, p]));
+      assert.deepEqual([byName.Saver.from_rate, byName.Saver.refundable], [88, false]);
+      assert.deepEqual([byName.Flex.from_rate, byName.Flex.refundable], [100, true]);
+      assert.ok(rt.plans.findIndex((p) => p.name === 'Saver') < rt.plans.findIndex((p) => p.name === 'Flex')); // sort_order
+      assert.equal(byName.Saver.cancel_deadline, null);
+      assert.equal(byName.Flex.cancel_deadline, '2030-07-17T23:00:00.000Z');
+      assert.equal(byName.Flex.payment_mode, 'full'); // hold, but deadline > 6 days away
+      assert.equal(byName.Saver.deposit, null);
+      assert.ok(!('Old' in byName)); // archived
+      assert.deepEqual(plain.plans, []);
+      assert.ok('from_rate' in rt && 'min_available' in rt); // existing fields untouched
+    });
   } finally {
     const props = [P, Q];
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);
