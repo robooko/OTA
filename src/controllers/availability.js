@@ -103,6 +103,7 @@ async function searchAvailability(req, res, next) {
          AND rta.date >= $2
          AND rta.date <  $3
          AND rt.max_occupancy >= $4
+         AND rt.status = 'active'
        GROUP BY rta.room_type_id, rt.name, rt.description, rt.max_occupancy
        HAVING MIN(rta.available_rooms) > 0
        ORDER BY from_rate ASC`,
