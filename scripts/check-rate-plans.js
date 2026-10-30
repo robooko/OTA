@@ -171,6 +171,33 @@ const {
       assert.equal((await staff(rp.createRatePlan, { params: { id: OTHER_RT }, body: { name: 'X', refundable: false, payment_mode: 'full' } })).status, 404);
       assert.equal((await staff(rp.updateRatePlan, { params: { id: RT, plan_id: crypto.randomUUID() }, body: { name: 'Y' } })).status, 404);
     });
+
+    // ---- Task 4: room booking emails ----
+    const roomEmails = require('../src/lib/roomBookingEmails');
+    const resend = require('../src/lib/resend');
+    await check('cancelTermsLine wording', async () => {
+      assert.equal(roomEmails.cancelTermsLine({ refundable: false }, null, 'Europe/London'), 'Non-refundable.');
+      assert.match(roomEmails.cancelTermsLine({ refundable: true }, new Date('2030-07-07T23:00:00Z'), 'Europe/London'), /^Free cancellation until .*8 Jul.* 2030/);
+    });
+    await check('bookingUrl fills {id}', async () => {
+      assert.equal(roomEmails.bookingUrl('https://h.test/stay/{id}', 'abc'), 'https://h.test/stay/abc');
+      assert.equal(roomEmails.bookingUrl(null, 'abc'), null);
+    });
+    await check('sendConfirmation assembles the guest, plan, money and link', async () => {
+      const id = await insertBooking({ room: R2, check_in: '2030-07-28', check_out: '2030-07-29', status: 'confirmed' });
+      await pool.query(`UPDATE booking SET rate_plan_terms = '{"name":"Flex","refundable":true,"cancel_cutoff_hours":48,"payment_mode":"full","pay_at_hotel":true}' WHERE id = $1`, [id]);
+      const real = resend.sendRoomConfirmation; const calls = [];
+      resend.sendRoomConfirmation = async (args) => { calls.push(args); return 'em_1'; };
+      try { await roomEmails.sendConfirmation(id); } finally { resend.sendRoomConfirmation = real; }
+      assert.equal(calls.length, 1);
+      const a = calls[0];
+      assert.equal(a.to, `ana-${tag}@example.test`); assert.equal(a.planName, 'Flex');
+      assert.equal(a.amountPaid, '0.00'); assert.equal(a.balanceDue, '100.00'); assert.equal(a.currency, 'GBP');
+      assert.equal(a.manageUrl, `https://hotel.test/stay/${id}`);
+      assert.match(a.cancelLine, /^Free cancellation until .*26 Jul.* 2030/);
+      assert.equal(a.stay.nights, 1); assert.equal(a.stay.room_type_name, 'Double');
+      await pool.query('DELETE FROM booking WHERE id = $1', [id]);
+    });
   } finally {
     const props = [P, Q];
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);

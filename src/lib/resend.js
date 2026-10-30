@@ -592,8 +592,72 @@ async function getReceivedEmail(emailId) {
   return data;
 }
 
+// Room bookings on a rate plan (Saver/Flex) -- see
+// docs/superpowers/specs/2026-10-30-room-rate-plans-design.md. Same skeleton
+// as sendReviewRequest. `stay` = { room_type_name, check_in, check_out, nights }.
+function roomStayLine(stay) {
+  return `${stay.room_type_name} · ${stay.check_in} to ${stay.check_out} (${stay.nights} night${stay.nights === 1 ? '' : 's'})`;
+}
+
+function roomEmailHtml({ branding, propertyName, greeting, lines, cta }) {
+  const ctaHtml = cta ? `<div style="margin:20px 0;">
+      <a href="${escapeHtml(cta.url)}" style="display:inline-block;background:${branding?.brand_color || '#1a1a1a'};color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:6px;">${escapeHtml(cta.label)}</a>
+    </div>` : '';
+  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;margin:0 auto;">
+      ${brandingHeaderHtml(branding, propertyName)}
+      <p style="margin:0 0 16px;">${escapeHtml(greeting)}</p>
+      ${lines.map((l) => `<p style="margin:0 0 8px;">${escapeHtml(l)}</p>`).join('\n      ')}
+      ${ctaHtml}
+    </div>`;
+}
+
+async function sendRoomPayRequest({ to, name, propertyName, branding, stay, planName, amountDue, currency, payBy, payUrl, idempotencyKey }) {
+  if (!client) throw new Error('Resend not configured');
+  const greeting = name ? `Hi ${name},` : 'Hi there,';
+  const lines = [
+    `Your booking at ${propertyName} is waiting for payment.`,
+    roomStayLine(stay),
+    `Rate: ${planName}`,
+    `Due now: ${formatMoney(Number(amountDue), currency)}`,
+    `Please pay by ${payBy}, or the booking will be released.`,
+  ];
+  const { data, error } = await client.emails.send({
+    from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
+    to,
+    subject: `Complete your booking at ${propertyName}`,
+    text: [greeting, '', ...lines, '', `Pay now: ${payUrl}`].join('\n'),
+    html: roomEmailHtml({ branding, propertyName, greeting, lines, cta: { label: 'Pay now', url: payUrl } }),
+  }, idempotencyKey ? { idempotencyKey } : undefined);
+  if (error) throw new Error(error.message);
+  return data.id;
+}
+
+async function sendRoomConfirmation({ to, name, propertyName, branding, stay, planName, amountPaid, balanceDue, currency, cancelLine, manageUrl, idempotencyKey }) {
+  if (!client) throw new Error('Resend not configured');
+  const greeting = name ? `Hi ${name},` : 'Hi there,';
+  const lines = [
+    `Your stay at ${propertyName} is confirmed.`,
+    roomStayLine(stay),
+    `Rate: ${planName}`,
+    `Paid: ${formatMoney(Number(amountPaid), currency)}`,
+    ...(Number(balanceDue) > 0 ? [`Due at the hotel: ${formatMoney(Number(balanceDue), currency)}`] : []),
+    cancelLine,
+  ];
+  const { data, error } = await client.emails.send({
+    from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
+    to,
+    subject: `Your stay at ${propertyName} is confirmed`,
+    text: [greeting, '', ...lines, ...(manageUrl ? ['', `Manage booking: ${manageUrl}`] : [])].join('\n'),
+    html: roomEmailHtml({ branding, propertyName, greeting, lines, cta: manageUrl ? { label: 'Manage booking', url: manageUrl } : null }),
+  }, idempotencyKey ? { idempotencyKey } : undefined);
+  if (error) throw new Error(error.message);
+  return data.id;
+}
+
 module.exports = {
   escapeHtml,
+  sendRoomPayRequest,
+  sendRoomConfirmation,
   formatAppointmentDate,
   brandingHeaderHtml,
   sendReply,
