@@ -16,10 +16,11 @@ const fake = {
       return pi;
     },
     async retrieve(id) { const pi = store.get(id); if (!pi) throw new Error('No such payment_intent'); return pi; },
+    async update(id, params) { const pi = store.get(id); Object.assign(pi, params); return pi; },
     async capture(id) {
       if (fake.failNextCapture) { fake.failNextCapture = false; throw new Error('capture failed'); }
       const pi = store.get(id); if (pi.status !== 'requires_capture') throw new Error(`cannot capture ${pi.status}`);
-      pi.status = 'succeeded'; return pi;
+      pi.status = 'succeeded'; pi.amount_received = pi.amount; return pi;
     },
     async cancel(id) {
       const pi = store.get(id); if (pi.status === 'succeeded') throw new Error('cannot cancel succeeded');

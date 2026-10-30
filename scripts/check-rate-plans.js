@@ -11,6 +11,9 @@ const crypto = require('crypto');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
 const pool = require('../src/db');
+const marinaStripe = require('../src/lib/marinaStripe');
+const fakeStripe = require('./fake-stripe');
+marinaStripe.stripeFor = () => fakeStripe;
 const {
   applyAdjustment, cancelDeadline, effectiveMode, chargeAmountCents, guestCancelDecision, validatePlan,
 } = require('../src/lib/ratePlans');
@@ -288,6 +291,96 @@ const {
       assert.ok(!('Old' in byName)); // archived
       assert.deepEqual(plain.plans, []);
       assert.ok('from_rate' in rt && 'min_available' in rt); // existing fields untouched
+    });
+
+    // ---- Task 7: card step ----
+    const roomPayments = require('../src/lib/roomPayments');
+    const plan = async (body) => (await staff(rp.createRatePlan, { params: { id: RT }, body: { sort_order: 5, ...body } })).body.id;
+    const DEPOSIT20 = await plan({ name: 'Deposit', refundable: true, cancel_cutoff_hours: 48, payment_mode: 'deposit', deposit_kind: 'percent', deposit_value: 20 });
+    const FLEX_FULL = await plan({ name: 'Flex Full', refundable: true, cancel_cutoff_hours: 48, payment_mode: 'full' });
+    const FLEX_HOLD = FLEX;
+    const EXTRA_25 = (await one("INSERT INTO extra (property_id, name, price) VALUES ($1, 'Breakfast', 25) RETURNING id", [P])).id;
+    const piOf = async (id) => (await one('SELECT stripe_payment_intent_id FROM booking WHERE id = $1', [id])).stripe_payment_intent_id;
+    const pi = async (id) => fakeStripe.store.get(await piOf(id));
+    const dayFromToday = (days) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+    const apiBooking = async (planId, check_in, check_out) => {
+      const r = await api('POST', '/api/bookings', { guest_id: G, room_type_id: RT, rate_plan_id: planId, check_in, check_out });
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      return r.body;
+    };
+    const apiBookingNear = (planId, days) => apiBooking(planId, dayFromToday(days), dayFromToday(days + 1));
+    const succeed = async (id) => { const p = await pi(id); Object.assign(p, { status: 'succeeded', amount_received: p.amount }); };
+    const paidBooking = async (planId, check_in, check_out) => {
+      const b = await apiBooking(planId, check_in, check_out);
+      assert.equal((await api('POST', `/api/bookings/${b.id}/payment-intent`)).status, 200);
+      await succeed(b.id);
+      const c = await api('POST', `/api/bookings/${b.id}/confirm-payment`);
+      assert.equal(c.body.status, 'confirmed');
+      return c.body;
+    };
+    const paymentRows = async (id) => (await pool.query('SELECT amount, status FROM payment WHERE booking_id = $1', [id])).rows;
+
+    await check('payment-intent: Saver full charge, idempotent', async () => {
+      const b = await apiBooking(SAVER, '2030-07-14', '2030-07-16'); // 176.00
+      const p1 = await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      const p2 = await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      assert.equal(p1.status, 200); assert.equal(p1.body.amount, '176.00'); assert.equal(p1.body.mode, 'full');
+      assert.equal(p1.body.publishable_key, 'pk_test_check');
+      assert.equal(p1.body.client_secret, p2.body.client_secret);
+      assert.equal((await pi(b.id)).capture_method, 'automatic'); assert.equal((await pi(b.id)).currency, 'gbp');
+    });
+    await check('payment-intent updates amount after an extra is added', async () => {
+      const b = await apiBooking(SAVER, '2030-07-17', '2030-07-18'); // 88.00
+      assert.equal((await api('POST', `/api/bookings/${b.id}/payment-intent`)).body.amount, '88.00');
+      assert.equal((await api('POST', `/api/extras/booking/${b.id}`, { extra_id: EXTRA_25 })).status, 201);
+      const p = await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      assert.equal(p.body.amount, '113.00'); assert.equal((await pi(b.id)).amount, 11300);
+    });
+    await check('deposit plan charges the deposit; confirm records a completed payment', async () => {
+      const b = await apiBooking(DEPOSIT20, '2030-07-24', '2030-07-26'); // 200.00, 20%
+      const p = await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      assert.equal(p.body.amount, '40.00'); assert.equal(p.body.mode, 'deposit');
+      await succeed(b.id);
+      const c = await api('POST', `/api/bookings/${b.id}/confirm-payment`);
+      assert.equal(c.status, 200); assert.equal(c.body.status, 'confirmed'); assert.equal(c.body.payment_due_at, null);
+      assert.deepEqual(await paymentRows(b.id), [{ amount: '40.00', status: 'completed' }]);
+      assert.equal((await api('POST', `/api/bookings/${b.id}/confirm-payment`)).status, 200); // idempotent
+      assert.equal((await paymentRows(b.id)).length, 1);
+      assert.ok(sent.confirmation.includes(b.id));
+    });
+    await check('hold within 6 days uses manual capture and no payment row', async () => {
+      const b = await apiBookingNear(FLEX_HOLD, 4);
+      const p = await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      assert.equal(p.body.mode, 'hold'); assert.equal((await pi(b.id)).capture_method, 'manual');
+      (await pi(b.id)).status = 'requires_capture';
+      assert.equal((await api('POST', `/api/bookings/${b.id}/confirm-payment`)).body.status, 'confirmed');
+      assert.equal((await paymentRows(b.id)).length, 0);
+      assert.equal((await one('SELECT rate_plan_terms FROM booking WHERE id = $1', [b.id])).rate_plan_terms.mode_used, 'hold');
+    });
+    await check('confirm-payment before the card succeeds is 409', async () => {
+      const b = await apiBooking(SAVER, '2030-07-19', '2030-07-20');
+      const none = await api('POST', `/api/bookings/${b.id}/confirm-payment`);
+      assert.equal(none.status, 409); assert.match(none.body.error, /No payment started/);
+      await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      const r = await api('POST', `/api/bookings/${b.id}/confirm-payment`);
+      assert.equal(r.status, 409); assert.equal(r.body.details, 'requires_payment_method');
+      assert.equal((await one('SELECT status FROM booking WHERE id = $1', [b.id])).status, 'pending_payment');
+    });
+    await check('payment-intent on a confirmed booking is 409', async () => {
+      const id = await insertBooking({ room: R2, check_in: '2030-07-30', check_out: '2030-07-31', status: 'confirmed' });
+      assert.equal((await api('POST', `/api/bookings/${id}/payment-intent`)).status, 409);
+      await pool.query('DELETE FROM booking WHERE id = $1', [id]);
+    });
+    await check('staff confirm by hand cancels the PI and marks pay_at_hotel', async () => {
+      const b = await apiBooking(SAVER, '2030-07-27', '2030-07-28');
+      await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      assert.equal((await staff(bookings.updateBooking, { params: { id: b.id }, body: { status: 'checked_in' } })).status, 409); // confirm or DELETE first
+      assert.equal((await staff(bookings.updateBooking, { params: { id: b.id }, body: { status: 'cancelled' } })).status, 409);
+      const r = await staff(bookings.updateBooking, { params: { id: b.id }, body: { status: 'confirmed' } });
+      assert.equal(r.status, 200); assert.equal(r.body.status, 'confirmed'); assert.equal(r.body.payment_due_at, null);
+      assert.equal((await pi(b.id)).status, 'canceled');
+      assert.equal((await one('SELECT rate_plan_terms FROM booking WHERE id = $1', [b.id])).rate_plan_terms.pay_at_hotel, true);
+      assert.ok(sent.confirmation.includes(b.id));
     });
   } finally {
     const props = [P, Q];

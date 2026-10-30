@@ -8,6 +8,9 @@ router.get('/:id', authenticateOrApiKey, ctrl.getBooking);
 router.post('/', authenticateOrApiKey, ctrl.createBooking);
 router.put('/:id', authenticate, ctrl.updateBooking);
 router.delete('/:id', authenticateOrApiKey, ctrl.cancelBooking);
+// Card payment for bookings on a rate plan -- see the room rate plans spec.
+router.post('/:id/payment-intent', authenticateOrApiKey, ctrl.createPaymentIntent);
+router.post('/:id/confirm-payment', authenticateOrApiKey, ctrl.confirmPayment);
 
 // Guest folio (see docs/superpowers/specs/2026-09-01-guest-folio-design.md)
 router.get('/:id/folio', authenticate, folio.getFolio);

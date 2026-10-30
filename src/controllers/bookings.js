@@ -4,30 +4,11 @@ const { publishNewBooking, publishBookingStatusChanged } = require('../lib/ably'
 const { computeFolio, toCents } = require('../lib/folio');
 const { applyAdjustment, termsSnapshot, PAY_WINDOW_MINUTES } = require('../lib/ratePlans');
 const roomEmails = require('../lib/roomBookingEmails');
+const roomPayments = require('../lib/roomPayments');
+const { fetchJoinedBooking } = roomPayments;
 
 function isValidMetadata(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-// Same JOINs as getBooking, minus the extras query -- used everywhere a
-// booking gets published to a live feed. Consumers (hotal-ui's
-// <live-room-bookings-feed>) upsert-by-replace on every event, so a payload
-// missing these fields blanks out the guest name / room line rather than
-// leaving it unchanged.
-async function fetchJoinedBooking(id) {
-  const { rows } = await pool.query(
-    `SELECT b.*,
-            g.first_name, g.last_name, g.email, g.phone,
-            r.room_number, r.floor, r.status AS room_status,
-            rt.id AS room_type_id, rt.name AS room_type_name, rt.base_rate
-     FROM booking b
-     JOIN guest     g  ON g.id  = b.guest_id
-     JOIN room      r  ON r.id  = b.room_id
-     JOIN room_type rt ON rt.id = r.room_type_id
-     WHERE b.id = $1`,
-    [id]
-  );
-  return rows[0];
 }
 
 async function listBookings(req, res, next) {
@@ -394,7 +375,23 @@ async function updateBooking(req, res, next) {
       req.property_id,
     ]);
     if (!beforeRes.rows.length) return res.status(404).json({ error: 'Booking not found' });
-    const statusBefore = beforeRes.rows[0].status;
+    let statusBefore = beforeRes.rows[0].status;
+
+    // An unpaid plan booking: staff confirming it settles the open card
+    // payment (rate plans spec §7); other status moves would leave the
+    // guest's card form live, so they go through confirm or DELETE first.
+    let nextStatus = status;
+    if (statusBefore === 'pending_payment' && status !== undefined) {
+      if (status !== 'confirmed') {
+        return res.status(409).json({ error: 'Confirm this unpaid booking first, or cancel it (DELETE) to release the card payment' });
+      }
+      const settled = await roomPayments.settleByHand(req.params.id, req.property_id);
+      if (settled.status !== 200 || (guests === undefined && metadata === undefined)) {
+        return res.status(settled.status).json(settled.body);
+      }
+      statusBefore = 'confirmed';
+      nextStatus = undefined;
+    }
 
     // Soft check-out gate: an outstanding folio balance blocks the
     // transition unless the caller explicitly forces it (comps/disputes
@@ -412,7 +409,7 @@ async function updateBooking(req, res, next) {
          guests   = COALESCE($2, guests),
          metadata = COALESCE($3::jsonb, metadata)
        WHERE id = $4 AND property_id = $5 RETURNING *`,
-      [status, guests, metadata ?? null, req.params.id, req.property_id]
+      [nextStatus, guests, metadata ?? null, req.params.id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
 
@@ -478,4 +475,23 @@ async function cancelBooking(req, res, next) {
   }
 }
 
-module.exports = { listBookings, getBooking, createBooking, updateBooking, cancelBooking };
+// The website's card step (rate plans spec §7).
+async function createPaymentIntent(req, res, next) {
+  try {
+    const r = await roomPayments.paymentIntentFor(req.params.id, req.property_id);
+    res.status(r.status).json(r.body);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function confirmPayment(req, res, next) {
+  try {
+    const r = await roomPayments.confirmPaid(req.params.id, req.property_id);
+    res.status(r.status).json(r.body);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listBookings, getBooking, createBooking, updateBooking, cancelBooking, createPaymentIntent, confirmPayment };
