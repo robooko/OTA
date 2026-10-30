@@ -198,6 +198,78 @@ const {
       assert.equal(a.stay.nights, 1); assert.equal(a.stay.room_type_name, 'Double');
       await pool.query('DELETE FROM booking WHERE id = $1', [id]);
     });
+
+    // ---- Task 5: creating bookings on a plan ----
+    const bookings = require('../src/controllers/bookings');
+    // Record guest emails instead of sending them, for the rest of the run.
+    const sent = { payRequest: [], confirmation: [] };
+    roomEmails.sendPayRequest = async (id) => { sent.payRequest.push(id); };
+    roomEmails.sendConfirmation = async (id) => { sent.confirmation.push(id); };
+    const dueInSecs = async (id) => Number((await one('SELECT EXTRACT(EPOCH FROM payment_due_at - now())::int AS s FROM booking WHERE id = $1', [id])).s);
+
+    await check('no plan on a room type without plans: exactly today', async () => {
+      const r = await api('POST', '/api/bookings', { guest_id: G, room_type_id: PLAIN_RT, check_in: '2030-07-02', check_out: '2030-07-04' });
+      assert.equal(r.status, 201); assert.equal(r.body.status, 'confirmed'); assert.equal(r.body.rate_plan_id, null);
+      assert.equal(r.body.total_price, '200.00'); assert.equal(r.body.rate_plan_terms, null); assert.equal(r.body.payment_due_at, null);
+    });
+    await check('api key cannot skip payment', async () => {
+      const missing = await api('POST', '/api/bookings', { guest_id: G, room_type_id: RT, check_in: '2030-07-06', check_out: '2030-07-07' });
+      assert.equal(missing.status, 400); assert.match(missing.body.error, /rate_plan_id is required/);
+      assert.equal((await api('POST', '/api/bookings', { guest_id: G, room_type_id: RT, rate_plan_id: SAVER, pay_at_hotel: true, check_in: '2030-07-06', check_out: '2030-07-07' })).status, 403);
+      assert.equal((await api('POST', '/api/bookings', { guest_id: G, room_id: R1, check_in: '2030-07-06', check_out: '2030-07-07' })).status, 400); // by room too
+    });
+    await check('pay_at_hotel needs a plan and a boolean', async () => {
+      assert.equal((await staff(bookings.createBooking, { body: { guest_id: G, room_type_id: PLAIN_RT, pay_at_hotel: true, check_in: '2030-07-06', check_out: '2030-07-07' } })).status, 400);
+      assert.equal((await staff(bookings.createBooking, { body: { guest_id: G, room_type_id: RT, rate_plan_id: SAVER, pay_at_hotel: 'yes', check_in: '2030-07-06', check_out: '2030-07-07' } })).status, 400);
+    });
+    await check('api key Saver booking: pending_payment, 30 min, adjusted price, snapshot', async () => {
+      const r = await api('POST', '/api/bookings', { guest_id: G, room_type_id: RT, rate_plan_id: SAVER, check_in: '2030-07-06', check_out: '2030-07-08' });
+      assert.equal(r.status, 201); assert.equal(r.body.status, 'pending_payment'); assert.equal(r.body.total_price, '176.00');
+      const secs = await dueInSecs(r.body.id); assert.ok(secs > 1700 && secs <= 1800, `due in ${secs}s`);
+      assert.equal(r.body.rate_plan_id, SAVER);
+      assert.deepEqual(r.body.rate_plan_terms, { name: 'Saver', adjustment_pct: -12, refundable: false, cancel_cutoff_hours: null, payment_mode: 'full', deposit_kind: null, deposit_value: null, pay_at_hotel: false });
+      assert.ok(!sent.payRequest.includes(r.body.id)); // the website takes the card itself
+    });
+    await check('plan from another room type is 400', async () => {
+      const r = await api('POST', '/api/bookings', { guest_id: G, room_type_id: PLAIN_RT, rate_plan_id: SAVER, check_in: '2030-07-06', check_out: '2030-07-07' });
+      assert.equal(r.status, 400); assert.match(r.body.error, /Rate plan not found/);
+      assert.equal((await api('POST', '/api/bookings', { guest_id: G, room_id: R3, rate_plan_id: SAVER, check_in: '2030-07-06', check_out: '2030-07-07' })).status, 400);
+    });
+    await check('staff plan booking: 24 h and a pay-request email; pay_at_hotel confirms with a confirmation email', async () => {
+      const pending = await staff(bookings.createBooking, { body: { guest_id: G, room_type_id: RT, rate_plan_id: FLEX, check_in: '2030-07-10', check_out: '2030-07-11' } });
+      assert.equal(pending.status, 201); assert.equal(pending.body.status, 'pending_payment'); assert.equal(pending.body.total_price, '100.00');
+      const secs = await dueInSecs(pending.body.id); assert.ok(secs > 86300 && secs <= 86400, `due in ${secs}s`);
+      assert.equal(sent.payRequest.at(-1), pending.body.id);
+      const pah = await staff(bookings.createBooking, { body: { guest_id: G, room_type_id: RT, rate_plan_id: FLEX, pay_at_hotel: true, check_in: '2030-07-12', check_out: '2030-07-13' } });
+      assert.equal(pah.body.status, 'confirmed'); assert.equal(pah.body.payment_due_at, null); assert.equal(pah.body.rate_plan_terms.pay_at_hotel, true);
+      assert.equal(sent.confirmation.at(-1), pah.body.id);
+    });
+    await check('preconditions: no Stripe keys / no room_booking_url are 409', async () => {
+      await pool.query('UPDATE property SET stripe_secret_key = NULL WHERE id = $1', [P]);
+      try {
+        const r = await api('POST', '/api/bookings', { guest_id: G, room_type_id: RT, rate_plan_id: SAVER, check_in: '2030-07-14', check_out: '2030-07-15' });
+        assert.equal(r.status, 409); assert.match(r.body.error, /Online payment is not set up/);
+        const pah = await staff(bookings.createBooking, { body: { guest_id: G, room_type_id: RT, rate_plan_id: SAVER, pay_at_hotel: true, check_in: '2030-07-14', check_out: '2030-07-15' } });
+        assert.equal(pah.status, 201); // pay at hotel needs no card
+        await pool.query('DELETE FROM booking WHERE id = $1', [pah.body.id]);
+        await pool.query('UPDATE room_availability SET is_available = true WHERE room_id = $1 AND date >= $2 AND date < $3', [pah.body.room_id, '2030-07-14', '2030-07-15']);
+      } finally {
+        await pool.query("UPDATE property SET stripe_secret_key = 'sk_test_check' WHERE id = $1", [P]);
+      }
+      await pool.query('UPDATE property SET room_booking_url = NULL WHERE id = $1', [P]);
+      try {
+        const r = await staff(bookings.createBooking, { body: { guest_id: G, room_type_id: RT, rate_plan_id: SAVER, check_in: '2030-07-14', check_out: '2030-07-15' } });
+        assert.equal(r.status, 409); assert.match(r.body.error, /room booking page/);
+      } finally {
+        await pool.query("UPDATE property SET room_booking_url = 'https://hotel.test/stay/{id}' WHERE id = $1", [P]);
+      }
+    });
+    await check('PUT cannot set system statuses', async () => {
+      const id = await insertBooking({ room: R2, check_in: '2030-07-30', check_out: '2030-07-31', status: 'confirmed' });
+      assert.equal((await staff(bookings.updateBooking, { params: { id }, body: { status: 'expired' } })).status, 400);
+      assert.equal((await staff(bookings.updateBooking, { params: { id }, body: { status: 'pending_payment' } })).status, 400);
+      await pool.query('DELETE FROM booking WHERE id = $1', [id]);
+    });
   } finally {
     const props = [P, Q];
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);
