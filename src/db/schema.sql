@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS property (
   -- branding/cancel_url (website booking, event_inquiry.branding) overrides.
   email_branding   JSONB, -- {logo_url, brand_color, header_bg}
   email_cancel_url TEXT,  -- may contain {id} (appointment id)
+  room_booking_url TEXT,  -- room pay/manage page; may contain {id} (room booking id)
   -- Prepaid platform-usage tokens -- see migrate-2026-09-01-property-token-billing.sql
   -- and lib/tokens.js. Changed only via spend()/credit(), which also write the ledger.
   token_balance      INT NOT NULL DEFAULT 0,
@@ -204,6 +205,31 @@ CREATE TABLE IF NOT EXISTS room_type_rate (
 
 CREATE INDEX IF NOT EXISTS idx_room_type_rate_property ON room_type_rate(property_id);
 
+-- Rate plans (Saver/Flex): the same room type sold with a price adjustment
+-- and its own payment/cancellation terms. Bookings snapshot the terms.
+CREATE TABLE IF NOT EXISTS rate_plan (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id         UUID          NOT NULL REFERENCES property(id),
+  room_type_id        UUID          NOT NULL REFERENCES room_type(id),
+  name                VARCHAR(100)  NOT NULL,           -- 'Saver', 'Flex'
+  adjustment_pct      NUMERIC(5,2)  NOT NULL DEFAULT 0, -- -12.00 = 12% off
+  refundable          BOOLEAN       NOT NULL,
+  cancel_cutoff_hours INT,                              -- hours before check-in day's local midnight
+  payment_mode        VARCHAR(10)   NOT NULL,           -- 'full' | 'deposit' | 'hold'
+  deposit_kind        VARCHAR(10),                      -- 'percent' | 'fixed'
+  deposit_value       NUMERIC(10,2),
+  sort_order          INT           NOT NULL DEFAULT 0,
+  status              VARCHAR(20)   NOT NULL DEFAULT 'active', -- 'active' | 'archived'
+  CONSTRAINT rate_plan_payment_mode_check CHECK (payment_mode IN ('full', 'deposit', 'hold')),
+  CONSTRAINT rate_plan_status_check CHECK (status IN ('active', 'archived')),
+  CONSTRAINT rate_plan_cutoff_check CHECK (refundable = (cancel_cutoff_hours IS NOT NULL) AND (cancel_cutoff_hours IS NULL OR cancel_cutoff_hours >= 0)),
+  CONSTRAINT rate_plan_deposit_check CHECK ((payment_mode = 'deposit') = (deposit_kind IS NOT NULL AND deposit_value IS NOT NULL)),
+  CONSTRAINT rate_plan_deposit_kind_check CHECK (deposit_kind IS NULL OR deposit_kind IN ('percent', 'fixed')),
+  CONSTRAINT rate_plan_hold_refundable_check CHECK (NOT (payment_mode = 'hold' AND NOT refundable)),
+  CONSTRAINT rate_plan_adjustment_check CHECK (adjustment_pct >= -100)
+);
+CREATE INDEX IF NOT EXISTS idx_rate_plan_room_type ON rate_plan(room_type_id);
+
 -- Rooms
 CREATE TABLE IF NOT EXISTS room (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -241,9 +267,15 @@ CREATE TABLE IF NOT EXISTS booking (
   total_price NUMERIC(10,2) NOT NULL,
   status      VARCHAR(20)   DEFAULT 'confirmed',
   metadata    JSONB         NOT NULL DEFAULT '{}',
+  rate_plan_id             UUID REFERENCES rate_plan(id),
+  rate_plan_terms          JSONB,        -- plan snapshot at booking time
+  payment_due_at           TIMESTAMPTZ,  -- set while pending_payment
+  stripe_payment_intent_id VARCHAR(255), -- the booking's card PI
   created_at  TIMESTAMPTZ   DEFAULT now(),
-  CONSTRAINT booking_no_overlap EXCLUDE USING gist (room_id WITH =, daterange(check_in, check_out) WITH &&) WHERE (status <> 'cancelled')
+  CONSTRAINT booking_no_overlap EXCLUDE USING gist (room_id WITH =, daterange(check_in, check_out) WITH &&) WHERE (status NOT IN ('cancelled', 'expired'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_booking_pending_due ON booking(payment_due_at) WHERE status = 'pending_payment';
 
 -- Payments
 CREATE TABLE IF NOT EXISTS payment (
@@ -653,7 +685,7 @@ SELECT * FROM (
          -- before then is the same visit
          (b.check_in + time '15:00') AT TIME ZONE p.timezone AS started_at
   FROM booking b JOIN guest g ON g.id = b.guest_id JOIN property p ON p.id = b.property_id
-  WHERE coalesce(b.status, 'confirmed') NOT IN ('cancelled', 'no_show')
+  WHERE coalesce(b.status, 'confirmed') NOT IN ('cancelled', 'no_show', 'expired', 'pending_payment')
   UNION ALL
   SELECT r.property_id, lower(trim(r.contact_email)), r.contact_name, 'restaurant_reservations', r.id,
          (r.reservation_date + r.end_time) AT TIME ZONE p.timezone, NULL::timestamptz

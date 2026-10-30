@@ -7,6 +7,7 @@
 delete process.env.RESEND_API_KEY;
 delete process.env.ABLY_API_KEY;
 const assert = require('node:assert/strict');
+const crypto = require('crypto');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
 const pool = require('../src/db');
@@ -73,6 +74,96 @@ const {
   });
 
   // ---- HTTP checks (Tasks 2+) ----
+  const app = require('../src/app');
+  const folioCtrl = require('../src/controllers/folio');
+  const guestsCtrl = require('../src/controllers/guests');
+  const propertyCtrl = require('../src/controllers/property');
+
+  const server = app.listen(0);
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const tag = crypto.randomBytes(4).toString('hex');
+  const KEY = `rate_plans_check_${tag}`;
+  const one = async (sql, p) => (await pool.query(sql, p)).rows[0];
+  const P = (await one(
+    `INSERT INTO property (name, api_key, api_key_enabled, timezone, currency, stripe_secret_key, stripe_publishable_key, room_booking_url)
+     VALUES ('Rate Plan Check', $1, true, 'Europe/London', 'GBP', 'sk_test_check', 'pk_test_check', 'https://hotel.test/stay/{id}') RETURNING id`, [KEY])).id;
+  const Q = (await one(`INSERT INTO property (name, api_key, api_key_enabled) VALUES ('Rate Plan Check Other', $1, true) RETURNING id`, [`${KEY}_other`])).id;
+
+  const api = async (method, path, body) => {
+    const r = await fetch(base + path, {
+      method, headers: { 'Content-Type': 'application/json', 'X-Api-Key': KEY }, body: body ? JSON.stringify(body) : undefined,
+    });
+    const text = await r.text();
+    return { status: r.status, body: text ? JSON.parse(text) : null };
+  };
+  // Staff = a controller called directly, as a signed-in (non-API-key) request.
+  const staff = async (fn, req) => {
+    const res = { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+    let error;
+    await fn({ property_id: P, params: {}, query: {}, body: {}, headers: {}, get: () => undefined, ...req }, res, (e) => { error = e; });
+    if (error) throw error;
+    return { status: res.statusCode, body: res.body };
+  };
+
+  const roomType = async (prop, name) => (await one(
+    'INSERT INTO room_type (property_id, name, max_occupancy, base_rate) VALUES ($1, $2, 2, 100) RETURNING id', [prop, name])).id;
+  const room = async (prop, rt, number) => (await one(
+    'INSERT INTO room (property_id, room_type_id, room_number) VALUES ($1, $2, $3) RETURNING id', [prop, rt, number])).id;
+  const RT = await roomType(P, 'Double');
+  const PLAIN_RT = await roomType(P, 'Single');
+  const OTHER_RT = await roomType(Q, 'Elsewhere');
+  const R1 = await room(P, RT, 'D1'); const R2 = await room(P, RT, 'D2');
+  const R3 = await room(P, PLAIN_RT, 'S1'); const R4 = await room(P, PLAIN_RT, 'S2');
+  // July 2030 plus the next 10 days, every room.
+  await pool.query(
+    `INSERT INTO room_availability (property_id, room_id, date)
+     SELECT $1, r, d::date FROM unnest($2::uuid[]) r,
+       (SELECT generate_series('2030-07-01'::date, '2030-07-31'::date, '1 day') d
+        UNION SELECT generate_series(current_date, current_date + 10, '1 day')) days
+     ON CONFLICT DO NOTHING`, [P, [R1, R2, R3, R4]]);
+  const G = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'Ana', 'Guest', $2) RETURNING id`, [P, `ana-${tag}@example.test`])).id;
+  const insertBooking = async ({ room: r, check_in, check_out, status }) => (await one(
+    `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price, status)
+     VALUES ($1, $2, $3, $4, $5, 100, $6) RETURNING id`, [P, G, r, check_in, check_out, status])).id;
+
+  try {
+    // ---- Task 2: schema, expired status, room_booking_url ----
+    let expiredId;
+    await check('expired booking frees the room for an overlapping booking', async () => {
+      expiredId = await insertBooking({ room: R1, check_in: '2030-07-02', check_out: '2030-07-04', status: 'expired' });
+      const b = await insertBooking({ room: R1, check_in: '2030-07-03', check_out: '2030-07-05', status: 'confirmed' }); // must not throw 23P01
+      assert.ok(expiredId && b);
+    });
+    await check('folio refuses payment on an expired booking', async () => {
+      const r = await staff(folioCtrl.createFolioPaymentIntent, { params: { id: expiredId } });
+      assert.equal(r.status, 409); assert.match(r.body.error, /expired/);
+    });
+    await check('guest stats count expired', async () => {
+      const r = await staff(guestsCtrl.getGuestSummary, { params: { id: G } });
+      assert.equal(Number(r.body.expired), 1);
+    });
+    await check('room_booking_url round-trips through branding settings', async () => {
+      const bad = await staff(propertyCtrl.updateEmailBranding, { body: { room_booking_url: 'not a url' } });
+      assert.equal(bad.status, 400); assert.match(bad.body.error, /room_booking_url/);
+      const r = await staff(propertyCtrl.updateEmailBranding, { body: { room_booking_url: 'https://hotel.test/stay/{id}' } });
+      assert.equal(r.body.room_booking_url, 'https://hotel.test/stay/{id}');
+      assert.equal((await staff(propertyCtrl.getEmailBranding, {})).body.room_booking_url, 'https://hotel.test/stay/{id}');
+    });
+  } finally {
+    const props = [P, Q];
+    await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);
+    await pool.query('DELETE FROM booking_extra WHERE booking_id IN (SELECT id FROM booking WHERE property_id = ANY($1))', [props]);
+    await pool.query('DELETE FROM booking WHERE property_id = ANY($1)', [props]);
+    await pool.query('DELETE FROM room_availability WHERE property_id = ANY($1)', [props]);
+    await pool.query('DELETE FROM rate_plan WHERE property_id = ANY($1)', [props]);
+    await pool.query('DELETE FROM room WHERE property_id = ANY($1)', [props]);
+    await pool.query('DELETE FROM extra WHERE property_id = ANY($1)', [props]);
+    await pool.query('DELETE FROM room_type WHERE property_id = ANY($1)', [props]);
+    await pool.query('DELETE FROM guest WHERE property_id = ANY($1)', [props]);
+    await pool.query('DELETE FROM property WHERE id = ANY($1)', [props]);
+    await pool.query('REFRESH MATERIALIZED VIEW room_type_availability').catch(() => {});
+    server.close();
+  }
 
   await pool.end();
   console.log(failed ? `\n${failed} FAILED` : '\nall passed');

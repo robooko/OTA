@@ -259,7 +259,7 @@ async function createOrder(req, res, next) {
 
       if (booking_id) {
         const { rows: bookings } = await client.query(
-          `SELECT id FROM booking WHERE id = $1 AND property_id = $2 AND status NOT IN ('cancelled')`,
+          `SELECT id FROM booking WHERE id = $1 AND property_id = $2 AND status NOT IN ('cancelled', 'expired')`,
           [booking_id, req.property_id]
         );
         if (!bookings.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Booking not found or cancelled' }); }

@@ -132,6 +132,7 @@ async function getGuestSummary(req, res, next) {
          MAX(b.check_in)                                    AS last_stay,
          COUNT(*) FILTER (WHERE b.status = 'confirmed')     AS confirmed,
          COUNT(*) FILTER (WHERE b.status = 'cancelled')     AS cancelled,
+         COUNT(*) FILTER (WHERE b.status = 'expired')       AS expired,
          COALESCE((
            SELECT SUM(be.quantity * be.unit_price)
            FROM booking_extra be

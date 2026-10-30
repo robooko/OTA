@@ -85,7 +85,7 @@ async function createFolioPaymentIntent(req, res, next) {
     const booking = await loadBookingForPayment(req.params.id, req.property_id);
     if (!booking) return res.status(404).json({ error: 'Booking not found' });
     if (!booking.stripe_secret_key) return res.status(409).json({ error: 'No Stripe secret key configured for this property' });
-    if (booking.status === 'cancelled') return res.status(409).json({ error: 'Booking is cancelled' });
+    if (['cancelled', 'expired'].includes(booking.status)) return res.status(409).json({ error: `Booking is ${booking.status}` });
 
     const folio = await computeFolio(req.params.id, req.property_id);
     const balanceCents = toCents(folio.balance);

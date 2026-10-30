@@ -646,7 +646,7 @@ async function updateAiReplySettings(req, res, next) {
 // object for the API/UI; stored as email_branding JSONB + email_cancel_url.
 
 const BRANDING_KEYS = ['logo_url', 'brand_color', 'header_bg'];
-const REVIEW_REQUEST_FIELDS = 'email_branding, email_cancel_url, review_request_enabled, review_url, review_request_delay_mins, review_request_cooldown_days, basket_reminder_enabled, basket_reminder_delay_mins';
+const REVIEW_REQUEST_FIELDS = 'email_branding, email_cancel_url, room_booking_url, review_request_enabled, review_url, review_request_delay_mins, review_request_cooldown_days, basket_reminder_enabled, basket_reminder_delay_mins';
 
 function emailBrandingResponse(row) {
   const b = row.email_branding ?? {};
@@ -655,6 +655,8 @@ function emailBrandingResponse(row) {
     brand_color: b.brand_color ?? null,
     header_bg: b.header_bg ?? null,
     cancel_url: row.email_cancel_url ?? null,
+    // Room bookings' pay/manage page -- see the room rate plans spec. {id} = room booking id.
+    room_booking_url: row.room_booking_url ?? null,
     // Post-visit Google review request (spa module) -- see
     // migrate-2026-09-03-spa-review-requests.sql. Off until review_url is set.
     review_request_enabled: row.review_request_enabled,
@@ -763,6 +765,14 @@ async function updateEmailBranding(req, res, next) {
       if (cancelUrlError) return res.status(400).json({ error: cancelUrlError });
     }
 
+    let roomBookingUrl = current.room_booking_url;
+    if (body.room_booking_url !== undefined) {
+      const value = typeof body.room_booking_url === 'string' ? body.room_booking_url.trim() : body.room_booking_url;
+      roomBookingUrl = value === null || value === '' ? null : value;
+      const roomBookingUrlError = validateCancelUrl(roomBookingUrl);
+      if (roomBookingUrlError) return res.status(400).json({ error: roomBookingUrlError.replace('cancel_url', 'room_booking_url') });
+    }
+
     let reviewUrl = current.review_url;
     if (body.review_url !== undefined) {
       const value = typeof body.review_url === 'string' ? body.review_url.trim() : body.review_url;
@@ -816,7 +826,8 @@ async function updateEmailBranding(req, res, next) {
       `UPDATE property SET email_branding = $1, email_cancel_url = $2,
               review_request_enabled = $3, review_url = $4,
               review_request_delay_mins = $5, review_request_cooldown_days = $6,
-              basket_reminder_enabled = $7, basket_reminder_delay_mins = $8
+              basket_reminder_enabled = $7, basket_reminder_delay_mins = $8,
+              room_booking_url = $10
        WHERE id = $9
        RETURNING ${REVIEW_REQUEST_FIELDS}`,
       [
@@ -829,6 +840,7 @@ async function updateEmailBranding(req, res, next) {
         basketEnabled,
         basketDelayMins,
         req.property_id,
+        roomBookingUrl,
       ]
     );
     res.json(emailBrandingResponse(rows[0]));
