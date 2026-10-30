@@ -2,6 +2,7 @@ const pool = require('../db');
 const marinaStripe = require('./marinaStripe');
 const q = require('./marinaQueries');
 const { toCents } = require('./folio');
+const { toStripeAmount } = require('./stripeAmount');
 const { pickTemplate } = require('./marinaContracts');
 const { nightsBetween } = require('./marinaPricing');
 const { publishMarinaBooking, publishMarinaGuestUpdate } = require('./ably');
@@ -75,7 +76,7 @@ const stripeOf = (row) => marinaStripe.stripeFor(row.stripe_secret_key);
 function piMatches(pi, row) {
   return pi.id === row.stripe_payment_intent_id
     && pi.metadata?.marina_booking_id === row.id
-    && pi.amount === toCents(row.total_price)
+    && pi.amount === toStripeAmount(toCents(row.total_price), row.currency)
     && String(pi.currency).toLowerCase() === String(row.currency).toLowerCase()
     && pi.status === 'requires_capture';
 }

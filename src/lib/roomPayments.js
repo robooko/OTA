@@ -8,6 +8,7 @@
 const pool = require('../db');
 const marinaStripe = require('./marinaStripe');
 const { computeFolio, toCents, fromCents } = require('./folio');
+const { toStripeAmount, fromStripeAmount } = require('./stripeAmount');
 const { cancelDeadline, effectiveMode, chargeAmountCents } = require('./ratePlans');
 const { publishBookingStatusChanged } = require('./ably');
 const roomEmails = require('./roomBookingEmails');
@@ -84,7 +85,7 @@ async function confirmPaidLocked(client, b, pi) {
     await client.query(
       `INSERT INTO payment (property_id, booking_id, amount, method, status, paid_at, stripe_payment_intent_id)
        VALUES ($1, $2, $3, 'card', 'completed', now(), $4)`,
-      [b.property_id, b.id, fromCents(pi.amount_received ?? pi.amount), pi.id]
+      [b.property_id, b.id, fromCents(fromStripeAmount(pi.amount_received ?? pi.amount, pi.currency)), pi.id]
     );
   }
 }
@@ -159,13 +160,14 @@ async function paymentIntentFor(bookingId, propertyId) {
     const terms = b.rate_plan_terms;
     const mode = terms.mode_used ?? effectiveMode(terms, deadlineOf(b), new Date());
     const amount = chargeAmountCents(mode, terms, toCents(folio.charges_total), balanceCents);
+    const stripeAmount = toStripeAmount(amount, b.currency);
 
     try {
       if (pi) {
-        if (pi.amount !== amount && OPEN.includes(pi.status)) pi = await stripe.paymentIntents.update(pi.id, { amount });
+        if (pi.amount !== stripeAmount && OPEN.includes(pi.status)) pi = await stripe.paymentIntents.update(pi.id, { amount: stripeAmount });
       } else {
         pi = await stripe.paymentIntents.create({
-          amount,
+          amount: stripeAmount,
           currency: b.currency.toLowerCase(),
           capture_method: mode === 'hold' ? 'manual' : 'automatic',
           payment_method_types: ['card'],
@@ -183,7 +185,7 @@ async function paymentIntentFor(bookingId, propertyId) {
     );
     return {
       status: 200,
-      body: { client_secret: pi.client_secret, publishable_key: b.stripe_publishable_key, amount: fromCents(pi.amount), mode },
+      body: { client_secret: pi.client_secret, publishable_key: b.stripe_publishable_key, amount: fromCents(fromStripeAmount(pi.amount, pi.currency)), mode },
     };
   });
 }
@@ -386,7 +388,7 @@ async function captureHoldsOnce() {
         await client.query(
           `INSERT INTO payment (property_id, booking_id, amount, method, status, paid_at, stripe_payment_intent_id)
            VALUES ($1, $2, $3, 'card', 'completed', now(), $4)`,
-          [b.property_id, b.id, fromCents(pi.amount_received ?? pi.amount), pi.id]
+          [b.property_id, b.id, fromCents(fromStripeAmount(pi.amount_received ?? pi.amount, pi.currency)), pi.id]
         );
         return { status: 200, outcome: 'captured' };
       });

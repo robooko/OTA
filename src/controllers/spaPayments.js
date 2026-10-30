@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { toStripeAmount } = require('../lib/stripeAmount');
 
 // Loads an appointment with everything the payment endpoints need, scoped
 // the way every spa route is: through the therapist's spa and the
@@ -32,6 +33,7 @@ async function createAppointmentPaymentIntent(req, res, next) {
     const stripe = require('stripe')(appt.stripe_secret_key);
     const amount = treatmentPriceCents(appt.price);
     if (amount <= 0) return res.status(409).json({ error: 'Nothing to pay on this appointment' });
+    const stripeAmount = toStripeAmount(amount, appt.currency);
 
     // Idempotency: a retry (e.g. a failed tap) reuses the pending intent
     // rather than minting a second charge -- same rules as
@@ -47,7 +49,7 @@ async function createAppointmentPaymentIntent(req, res, next) {
       // settle with the charge that already exists instead, applying the
       // same amount check confirm-payment would.
       if (existing.status === 'succeeded') {
-        if (existing.amount !== amount) {
+        if (existing.amount !== stripeAmount) {
           return res.status(409).json({ error: 'A payment already succeeded for a different amount', payment_intent_id: existing.id });
         }
         await pool.query(`UPDATE spa_appointment SET payment_status = 'paid', paid_at = now() WHERE id = $1`, [appt.id]);
@@ -57,14 +59,14 @@ async function createAppointmentPaymentIntent(req, res, next) {
     }
 
     const intent = await stripe.paymentIntents.create({
-      amount,
+      amount: stripeAmount,
       currency: appt.currency.toLowerCase(),
       payment_method_types: ['card_present'],
       capture_method: 'automatic',
       metadata: { spa_appointment_id: appt.id, spa_id: req.params.spa_id },
     });
     await pool.query(`UPDATE spa_appointment SET stripe_payment_intent_id = $1 WHERE id = $2`, [intent.id, appt.id]);
-    res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount });
+    res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount: stripeAmount });
   } catch (err) {
     if (err.type?.startsWith('Stripe')) {
       return res.status(502).json({ error: `Stripe error: ${err.message}` });
@@ -90,7 +92,7 @@ async function confirmAppointmentPayment(req, res, next) {
     const stripe = require('stripe')(appt.stripe_secret_key);
     const intent = await stripe.paymentIntents.retrieve(stripe_payment_intent_id);
     if (intent.status !== 'succeeded') return res.status(409).json({ error: 'Payment has not succeeded' });
-    if (intent.amount !== treatmentPriceCents(appt.price)) {
+    if (intent.amount !== toStripeAmount(treatmentPriceCents(appt.price), intent.currency)) {
       return res.status(409).json({ error: 'Payment amount does not match the treatment price' });
     }
 

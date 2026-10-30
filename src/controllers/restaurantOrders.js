@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { toStripeAmount } = require('../lib/stripeAmount');
 const {
   publishNewOrder,
   publishOrderStatusChanged,
@@ -573,6 +574,7 @@ async function createOrderPaymentIntent(req, res, next) {
 
     const stripe = require('stripe')(property.stripe_secret_key);
     const amount = await orderTotalCents(order);
+    const stripeAmount = toStripeAmount(amount, property.currency);
 
     // Idempotency: a retry (page refresh, a dropped connection after Stripe
     // confirmed) shouldn't create a second charge for the same order.
@@ -582,7 +584,7 @@ async function createOrderPaymentIntent(req, res, next) {
         return res.json({ client_secret: existing.client_secret, payment_intent_id: existing.id, amount: existing.amount });
       }
       if (existing.status === 'succeeded') {
-        if (existing.amount !== amount) {
+        if (existing.amount !== stripeAmount) {
           return res.status(409).json({ error: 'A payment already succeeded for a different amount', payment_intent_id: existing.id });
         }
         const { rows: paidRows } = await pool.query(
@@ -600,7 +602,7 @@ async function createOrderPaymentIntent(req, res, next) {
     }
 
     const intent = await stripe.paymentIntents.create({
-      amount,
+      amount: stripeAmount,
       currency: property.currency.toLowerCase(),
       automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
       capture_method: 'automatic',
@@ -608,7 +610,7 @@ async function createOrderPaymentIntent(req, res, next) {
     });
 
     await pool.query(`UPDATE restaurant_order SET stripe_payment_intent_id = $1 WHERE id = $2`, [intent.id, order.id]);
-    res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount });
+    res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount: stripeAmount });
   } catch (err) {
     if (err.type?.startsWith('Stripe')) return res.status(502).json({ error: `Stripe error: ${err.message}` });
     next(err);
@@ -635,7 +637,7 @@ async function confirmOrderPayment(req, res, next) {
     if (intent.status !== 'succeeded') {
       return res.status(409).json({ error: `Payment has not succeeded (status: ${intent.status})` });
     }
-    const expected = await orderTotalCents(order);
+    const expected = toStripeAmount(await orderTotalCents(order), intent.currency);
     if (intent.amount !== expected) {
       return res.status(409).json({ error: 'Payment amount does not match the order total' });
     }

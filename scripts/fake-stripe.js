@@ -9,7 +9,7 @@ const fake = {
   paymentIntents: {
     async create(params, { idempotencyKey } = {}) {
       if (fake.failNextCreate) { fake.failNextCreate = false; throw new Error('card setup failed'); }
-      const existing = [...store.values()].find((p) => p._key === idempotencyKey);
+      const existing = idempotencyKey && [...store.values()].find((p) => p._key === idempotencyKey);
       if (existing) return existing;
       const pi = { id: `pi_fake_${++n}`, client_secret: `pi_fake_${n}_secret`, status: 'requires_payment_method', ...params, _key: idempotencyKey };
       store.set(pi.id, pi);

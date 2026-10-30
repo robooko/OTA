@@ -241,6 +241,20 @@ const { bookingToken } = require('../src/lib/marinaToken');
       const pi = fake.store.get(row.stripe_payment_intent_id);
       assert.equal(pi.amount, Math.round(row.total_price * 100)); assert.equal(pi.currency, 'eur'); assert.equal(pi.capture_method, 'manual');
     });
+    await check('XPF: the marina hold is in whole francs and still confirms', async () => {
+      await pool.query("UPDATE property SET currency = 'XPF' WHERE id = $1", [P]);
+      try {
+        const b = await cardBooking();
+        const row = await one('SELECT stripe_payment_intent_id, total_price FROM marina_booking WHERE id = $1', [b.booking.id]);
+        const pi = fake.store.get(row.stripe_payment_intent_id);
+        assert.equal(pi.amount, Math.round(Number(row.total_price))); assert.equal(pi.currency, 'xpf');
+        pi.status = 'requires_capture';
+        const ok = await api('POST', `${G}/bookings/${b.booking.id}/confirm-payment`, { headers: tokenHdr(b.booking_token) });
+        assert.equal(ok.status, 200); assert.equal(ok.body.booking.payment_status, 'held');
+      } finally {
+        await pool.query("UPDATE property SET currency = 'eur' WHERE id = $1", [P]);
+      }
+    });
     await check('confirm-payment before authorisation → 409; after → pending + held', async () => {
       const b = await cardBooking();
       const path = `${G}/bookings/${b.booking.id}/confirm-payment`;

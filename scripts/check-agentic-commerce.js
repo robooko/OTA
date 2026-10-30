@@ -175,6 +175,13 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       });
       assert.deepEqual(lines, [{ item_id: BURGEE.id, item_name: 'Burgee', unit_price: 21, quantity: 2, subtotal: 42 }]);
     });
+    await check('orders: XPF session amounts are whole francs', async () => {
+      const { order, lines } = agentic.sessionToOrder(session({
+        currency: 'xpf', amount_total: 6200, amount_subtotal: 4200, total_details: { amount_shipping: 2000, amount_tax: 0 },
+      }), byFeed);
+      assert.equal(order.total_price, 6200); assert.equal(order.items_subtotal, 4200); assert.equal(order.shipping_cost, 2000);
+      assert.equal(lines[0].unit_price, 2100); assert.equal(lines[0].subtotal, 4200);
+    });
     await check('orders: no line matches this shop = not ours (null)', async () => {
       assert.equal(agentic.sessionToOrder(session({ line_items: { data: [{ description: 'Gift card', quantity: 1, price: { unit_amount: 500, external_reference: null } }] } }), byFeed), null);
       assert.equal(agentic.sessionToOrder(session({ line_items: { data: [] } }), byFeed), null);

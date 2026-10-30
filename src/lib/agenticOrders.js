@@ -6,12 +6,14 @@ const pool = require('../db');
 const { allocateOrderReference } = require('./orderReference');
 const { publishNewProshopOrder } = require('./ably');
 const { feedId } = require('./agenticFeed');
+const { fromStripeAmount } = require('./stripeAmount');
 
 // The seller guide expands line items with this preview version to get
 // price.external_reference (the feed id).
 const SESSION_API_VERSION = '2025-12-15.preview';
 const LOOKBACK_SECONDS = 24 * 60 * 60;
-const cents = (n) => (n ?? 0) / 100; // ponytail: 2-decimal currencies only; WillyT is USD
+// Stripe amount -> price in the session's currency (zero-decimal aware).
+const money = (n, currency) => fromStripeAmount(n ?? 0, currency) / 100;
 const cap = (s, n) => (s == null ? s : String(s).slice(0, n));
 
 function formatAddress(details) {
@@ -22,6 +24,7 @@ function formatAddress(details) {
 
 // Pure. null = no line is one of this property's feed items (not ours).
 function sessionToOrder(session, itemsByFeedId) {
+  const cents = (n) => money(n, session.currency);
   const lines = (session.line_items?.data ?? []).map((li) => {
     const item = itemsByFeedId.get(li.price?.external_reference);
     const unit = cents(li.price?.unit_amount);

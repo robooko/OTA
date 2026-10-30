@@ -13,6 +13,7 @@ const { bookingToken, bookingTokenMatches } = require('../lib/marinaToken');
 const marinaStripe = require('../lib/marinaStripe');
 const { createInquiryCore } = require('./eventInquiries');
 const { toCents } = require('../lib/folio');
+const { toStripeAmount } = require('../lib/stripeAmount');
 const { createSubscribeTokenRequest } = require('../lib/ably');
 const storage = require('../lib/marinaStorage');
 
@@ -238,7 +239,7 @@ async function createGuestBooking(req, res, next) {
     const price = priceStay({ berth, tiers, arrival: v.arrival, departure: v.departure, boatLengthM: v.boat_length_m, boatBeamM: v.boat_beam_m });
     const { rows: [prop] } = await client.query('SELECT upper(currency) AS currency, stripe_secret_key, stripe_publishable_key FROM property WHERE id = $1', [req.property_id]);
     // Stripe refuses a zero amount, so a free stay confirms by email like an unpriced one.
-    const cardPath = price.total_price != null && toCents(price.total_price) > 0 && prop.stripe_secret_key && prop.stripe_publishable_key;
+    const cardPath = price.total_price != null && toStripeAmount(toCents(price.total_price), prop.currency) > 0 && prop.stripe_secret_key && prop.stripe_publishable_key;
     // A signed-in sailor's email is already verified: no confirm link.
     const confirmToken = cardPath || req.sailor ? null : crypto.randomBytes(32).toString('base64url');
 
@@ -259,7 +260,7 @@ async function createGuestBooking(req, res, next) {
       try {
         const stripe = marinaStripe.stripeFor(prop.stripe_secret_key);
         const pi = await stripe.paymentIntents.create({
-          amount: toCents(price.total_price), currency: prop.currency.toLowerCase(), capture_method: 'manual',
+          amount: toStripeAmount(toCents(price.total_price), prop.currency), currency: prop.currency.toLowerCase(), capture_method: 'manual',
           payment_method_types: ['card'], metadata: { property_id: req.property_id, marina_booking_id: row.id },
         }, { idempotencyKey: `marina-booking-${row.id}` });
         await pool.query('UPDATE marina_booking SET stripe_payment_intent_id = $1 WHERE id = $2', [pi.id, row.id]);

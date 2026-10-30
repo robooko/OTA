@@ -1,5 +1,6 @@
 const pool = require('../db');
 const { computeFolio, toCents, fromCents } = require('../lib/folio');
+const { toStripeAmount, fromStripeAmount } = require('../lib/stripeAmount');
 
 async function getFolio(req, res, next) {
   try {
@@ -93,6 +94,7 @@ async function createFolioPaymentIntent(req, res, next) {
     const amount = requested != null ? toCents(requested) : balanceCents;
     if (!Number.isFinite(amount) || amount <= 0) return res.status(409).json({ error: 'Nothing to pay on this booking' });
     if (amount > balanceCents) return res.status(409).json({ error: 'Amount exceeds the outstanding balance', balance: folio.balance });
+    const stripeAmount = toStripeAmount(amount, booking.currency);
 
     const stripe = require('stripe')(booking.stripe_secret_key);
 
@@ -104,11 +106,11 @@ async function createFolioPaymentIntent(req, res, next) {
     if (pending) {
       const existing = await stripe.paymentIntents.retrieve(pending.stripe_payment_intent_id);
       if (['requires_payment_method', 'requires_confirmation', 'requires_capture', 'requires_action'].includes(existing.status)) {
-        if (existing.amount !== amount) {
-          await stripe.paymentIntents.update(existing.id, { amount });
+        if (existing.amount !== stripeAmount) {
+          await stripe.paymentIntents.update(existing.id, { amount: stripeAmount });
           await pool.query('UPDATE payment SET amount = $1 WHERE id = $2', [fromCents(amount), pending.id]);
         }
-        return res.json({ client_secret: existing.client_secret, payment_intent_id: existing.id, amount });
+        return res.json({ client_secret: existing.client_secret, payment_intent_id: existing.id, amount: stripeAmount });
       }
       // Crash-window recovery: the tap landed but the app died before
       // confirm-payment. Settle with the charge that already exists,
@@ -116,13 +118,13 @@ async function createFolioPaymentIntent(req, res, next) {
       if (existing.status === 'succeeded') {
         await pool.query(
           `UPDATE payment SET status = 'completed', paid_at = now(), amount = $1 WHERE id = $2`,
-          [fromCents(existing.amount), pending.id]
+          [fromCents(fromStripeAmount(existing.amount, existing.currency)), pending.id]
         );
         return res.json({ already_paid: true, payment_intent_id: existing.id });
       }
       // canceled -> mint a fresh intent onto the same pending row
       const intent = await stripe.paymentIntents.create({
-        amount,
+        amount: stripeAmount,
         currency: booking.currency.toLowerCase(),
         payment_method_types: ['card_present'],
         capture_method: 'automatic',
@@ -132,11 +134,11 @@ async function createFolioPaymentIntent(req, res, next) {
         'UPDATE payment SET stripe_payment_intent_id = $1, amount = $2 WHERE id = $3',
         [intent.id, fromCents(amount), pending.id]
       );
-      return res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount });
+      return res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount: stripeAmount });
     }
 
     const intent = await stripe.paymentIntents.create({
-      amount,
+      amount: stripeAmount,
       currency: booking.currency.toLowerCase(),
       payment_method_types: ['card_present'],
       capture_method: 'automatic',
@@ -147,7 +149,7 @@ async function createFolioPaymentIntent(req, res, next) {
        VALUES ($1, $2, $3, 'card', 'pending', $4)`,
       [req.property_id, booking.id, fromCents(amount), intent.id]
     );
-    res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount });
+    res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount: stripeAmount });
   } catch (err) {
     if (err.type?.startsWith('Stripe')) {
       return res.status(502).json({ error: `Stripe error: ${err.message}` });
@@ -174,7 +176,7 @@ async function confirmFolioPayment(req, res, next) {
     const stripe = require('stripe')(booking.stripe_secret_key);
     const intent = await stripe.paymentIntents.retrieve(stripe_payment_intent_id);
     if (intent.status !== 'succeeded') return res.status(409).json({ error: 'Payment has not succeeded' });
-    if (intent.amount !== toCents(pending.amount)) {
+    if (intent.amount !== toStripeAmount(toCents(pending.amount), intent.currency)) {
       return res.status(409).json({ error: 'Payment amount does not match the pending payment' });
     }
 

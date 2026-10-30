@@ -14,6 +14,8 @@ const pool = require('../src/db');
 const marinaStripe = require('../src/lib/marinaStripe');
 const fakeStripe = require('./fake-stripe');
 marinaStripe.stripeFor = () => fakeStripe;
+require.cache[require.resolve('stripe')] = { id: 'stripe', filename: require.resolve('stripe'), loaded: true, exports: () => fakeStripe };
+const { toStripeAmount, fromStripeAmount } = require('../src/lib/stripeAmount');
 const {
   applyAdjustment, cancelDeadline, effectiveMode, chargeAmountCents, guestCancelDecision, validatePlan,
 } = require('../src/lib/ratePlans');
@@ -74,6 +76,16 @@ const {
     assert.match(validatePlan({ ...ok, adjustment_pct: -101 }), /adjustment_pct/);
     assert.match(validatePlan({ ...ok, name: '' }), /name/);
     assert.match(validatePlan({ ...ok, status: 'deleted' }), /status/);
+  });
+
+  await check('Stripe amounts: zero-decimal currencies are whole units', async () => {
+    assert.equal(toStripeAmount(15300000, 'XPF'), 153000);
+    assert.equal(toStripeAmount(15300000, 'xpf'), 153000);
+    assert.equal(toStripeAmount(500000, 'jpy'), 5000);
+    assert.equal(toStripeAmount(12345, 'GBP'), 12345);
+    assert.equal(toStripeAmount(10000, 'ugx'), 10000); // Stripe takes UGX/ISK as two-decimal
+    assert.equal(fromStripeAmount(153000, 'xpf'), 15300000);
+    assert.equal(fromStripeAmount(12345, 'gbp'), 12345);
   });
 
   // ---- HTTP checks (Tasks 2+) ----
@@ -548,12 +560,62 @@ const {
       assert.equal((await pi(h.id)).status, 'succeeded');
       await pool.query("DELETE FROM booking WHERE stripe_payment_intent_id = 'pi_not_due' AND property_id = $1", [P]);
     });
+
+    // ---- Zero-decimal currencies (XPF) ----
+    await check('XPF: room payment, hold capture and folio charge whole francs', async () => {
+      await pool.query("UPDATE property SET currency = 'XPF' WHERE id = $1", [P]);
+      try {
+        const b = await apiBooking(SAVER, '2030-07-31', '2030-08-01'); // 88 XPF
+        const p = await api('POST', `/api/bookings/${b.id}/payment-intent`);
+        assert.equal(p.body.amount, '88.00');
+        assert.equal((await pi(b.id)).amount, 88); assert.equal((await pi(b.id)).currency, 'xpf');
+        await succeed(b.id);
+        assert.equal((await api('POST', `/api/bookings/${b.id}/confirm-payment`)).body.status, 'confirmed');
+        assert.deepEqual(await paymentRows(b.id), [{ amount: '88.00', status: 'completed' }]);
+
+        const h = await apiBookingNear(FLEX_HOLD, 6); // 100 XPF hold
+        assert.equal((await api('POST', `/api/bookings/${h.id}/payment-intent`)).body.mode, 'hold');
+        assert.equal((await pi(h.id)).amount, 100);
+        (await pi(h.id)).status = 'requires_capture';
+        await api('POST', `/api/bookings/${h.id}/confirm-payment`);
+        await pool.query("UPDATE booking SET rate_plan_terms = jsonb_set(rate_plan_terms, '{cancel_cutoff_hours}', '500') WHERE id = $1", [h.id]);
+        await roomPayments.captureHoldsOnce();
+        assert.deepEqual(await paymentRows(h.id), [{ amount: '100.00', status: 'completed' }]);
+
+        const f = await insertBooking({ room: R3, check_in: '2030-07-20', check_out: '2030-07-21', status: 'confirmed' }); // 100 XPF
+        const fp = await staff(folioCtrl.createFolioPaymentIntent, { params: { id: f } });
+        assert.equal(fp.status, 200, JSON.stringify(fp.body));
+        const fpi = fakeStripe.store.get(fp.body.payment_intent_id);
+        assert.equal(fpi.amount, 100); assert.equal(fpi.currency, 'xpf'); assert.equal(fp.body.amount, 100); // response amount = the Stripe amount
+        fpi.status = 'succeeded';
+        const fc = await staff(folioCtrl.confirmFolioPayment, { params: { id: f }, body: { stripe_payment_intent_id: fpi.id } });
+        assert.equal(fc.status, 200, JSON.stringify(fc.body)); assert.equal(fc.body.amount, '100.00');
+
+        // Spa Tap to Pay: 4,500 XPF treatment
+        const spaCtrl = require('../src/controllers/spaPayments');
+        const spaId = (await one("INSERT INTO spa (property_id, name) VALUES ($1, 'Spa') RETURNING id", [P])).id;
+        const th = (await one("INSERT INTO spa_therapist (property_id, spa_id, name) VALUES ($1, $2, 'Tia') RETURNING id", [P, spaId])).id;
+        const tr = (await one("INSERT INTO spa_treatment (property_id, spa_id, name, duration_mins, price) VALUES ($1, $2, 'Massage', 60, 4500) RETURNING id", [P, spaId])).id;
+        const ap = (await one(
+          `INSERT INTO spa_appointment (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time, contact_name, price)
+           VALUES ($1, $2, $3, '2030-07-15', '10:00', '11:00', 'Ana', 4500) RETURNING id`, [P, tr, th])).id;
+        const sp = await staff(spaCtrl.createAppointmentPaymentIntent, { params: { id: ap, spa_id: spaId } });
+        assert.equal(sp.status, 200, JSON.stringify(sp.body));
+        const spi = fakeStripe.store.get(sp.body.payment_intent_id);
+        assert.equal(spi.amount, 4500); assert.equal(spi.currency, 'xpf'); assert.equal(sp.body.amount, 4500);
+        spi.status = 'succeeded';
+        assert.equal((await staff(spaCtrl.confirmAppointmentPayment, { params: { id: ap, spa_id: spaId }, body: { stripe_payment_intent_id: spi.id } })).status, 200);
+      } finally {
+        await pool.query("UPDATE property SET currency = 'GBP' WHERE id = $1", [P]);
+      }
+    });
   } finally {
     const props = [P, Q];
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);
     await pool.query('DELETE FROM booking_extra WHERE booking_id IN (SELECT id FROM booking WHERE property_id = ANY($1))', [props]);
     await pool.query('DELETE FROM booking WHERE property_id = ANY($1)', [props]);
     await pool.query('DELETE FROM room_availability WHERE property_id = ANY($1)', [props]);
+    for (const t of ['spa_appointment', 'spa_treatment', 'spa_therapist', 'spa']) await pool.query(`DELETE FROM ${t} WHERE property_id = ANY($1)`, [props]);
     await pool.query('DELETE FROM rate_plan WHERE property_id = ANY($1)', [props]);
     await pool.query('DELETE FROM room WHERE property_id = ANY($1)', [props]);
     await pool.query('DELETE FROM extra WHERE property_id = ANY($1)', [props]);

@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { toStripeAmount } = require('../lib/stripeAmount');
 const { publishTableSessionOpened, publishTableSessionClosed, client: ablyClient } = require('../lib/ably');
 const { generateJoinCode, sanitizeSession, verifyJoinCode } = require('../lib/joinCode');
 
@@ -122,7 +123,7 @@ async function createSessionPaymentIntent(req, res, next) {
       // twice -- instead, settle the session with the charge that already
       // landed, applying the same checks close-with-payment would.
       if (existing.status === 'succeeded') {
-        const expected = await sessionTotalCents(session.id);
+        const expected = toStripeAmount(await sessionTotalCents(session.id), existing.currency);
         if (existing.amount !== expected) {
           return res.status(409).json({
             error: 'A payment already succeeded for a different amount',
@@ -152,8 +153,9 @@ async function createSessionPaymentIntent(req, res, next) {
 
     const amount = await sessionTotalCents(session.id);
     if (amount <= 0) return res.status(409).json({ error: 'Nothing to pay on this session' });
+    const stripeAmount = toStripeAmount(amount, session.currency);
     const intent = await stripe.paymentIntents.create({
-      amount,
+      amount: stripeAmount,
       currency: session.currency.toLowerCase(),
       ...(channel === 'online'
         ? { automatic_payment_methods: { enabled: true } }
@@ -163,7 +165,7 @@ async function createSessionPaymentIntent(req, res, next) {
     });
 
     await pool.query(`UPDATE restaurant_table_session SET stripe_payment_intent_id = $1 WHERE id = $2`, [intent.id, session.id]);
-    res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount, channel });
+    res.json({ client_secret: intent.client_secret, payment_intent_id: intent.id, amount: stripeAmount, channel });
   } catch (err) {
     if (err.type?.startsWith('Stripe')) {
       return res.status(502).json({ error: `Stripe error: ${err.message}` });
@@ -371,7 +373,7 @@ async function closeSession(req, res, next) {
       if (intent.status !== 'succeeded') {
         return res.status(409).json({ error: `Payment has not succeeded (status: ${intent.status})` });
       }
-      const expectedAmount = await sessionTotalCents(req.params.id);
+      const expectedAmount = toStripeAmount(await sessionTotalCents(req.params.id), intent.currency);
       if (intent.amount !== expectedAmount) {
         return res.status(409).json({ error: 'Payment amount does not match the current session total' });
       }
