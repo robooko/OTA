@@ -252,7 +252,126 @@ async function stripeForCancel(b, { refund }) {
   return { refundedPaymentIds };
 }
 
+// Unpaid bookings past their pay-by time expire and release the room -- unless
+// the card went through and confirm-payment never arrived (tab closed), in
+// which case the booking is confirmed instead. Each row under its own lock.
+async function expireOnce() {
+  const { rows } = await pool.query(
+    `SELECT id FROM booking WHERE status = 'pending_payment' AND payment_due_at < now()
+     ORDER BY payment_due_at LIMIT 200`
+  );
+  let expired = 0;
+  let confirmed = 0;
+  for (const { id } of rows) {
+    try {
+      const r = await inTransaction(async (client) => {
+        const b = await lockBooking(client, id, null);
+        if (!b || b.status !== 'pending_payment' || new Date(b.payment_due_at) > new Date()) return { status: 409 };
+        if (b.stripe_payment_intent_id && b.stripe_secret_key) {
+          const stripe = stripeOf(b.stripe_secret_key);
+          const pi = await stripe.paymentIntents.retrieve(b.stripe_payment_intent_id);
+          if (PAID.includes(pi.status)) {
+            await confirmPaidLocked(client, b, pi);
+            return { status: 200, outcome: 'confirmed', after: () => afterConfirmed(b.id, b.property_id) };
+          }
+          if (pi.status !== 'canceled') await stripe.paymentIntents.cancel(pi.id);
+        }
+        await client.query(`UPDATE booking SET status = 'expired', payment_due_at = NULL WHERE id = $1`, [b.id]);
+        await releaseAvailability(client, b);
+        return {
+          status: 200,
+          outcome: 'expired',
+          after: async () => {
+            const joined = await fetchJoinedBooking(b.id);
+            publishBookingStatusChanged(b.property_id, joined).catch((err) => console.error('Ably publish failed:', err.message));
+            return joined;
+          },
+        };
+      });
+      if (r.outcome === 'expired') expired++;
+      if (r.outcome === 'confirmed') confirmed++;
+    } catch (err) {
+      console.error(`Room booking expiry failed for ${id}:`, err.message);
+    }
+  }
+  if (expired) await refreshAvailabilityView();
+  return { expired, confirmed };
+}
+
+// Card holds are captured once the free-cancellation deadline passes. A
+// failed capture is marked (capture_failed) and left to staff: the amount
+// stays on the folio and the check-out gate catches it. No retry loop.
+async function captureHoldsOnce() {
+  const { rows } = await pool.query(
+    `SELECT b.id, b.check_in, b.rate_plan_terms, p.timezone
+     FROM booking b JOIN property p ON p.id = b.property_id
+     WHERE b.status IN ('confirmed', 'checked_in')
+       AND b.rate_plan_terms->>'mode_used' = 'hold'
+       AND b.stripe_payment_intent_id IS NOT NULL
+       AND NOT (b.rate_plan_terms ? 'capture_failed')
+       AND NOT EXISTS (SELECT 1 FROM payment pm
+                       WHERE pm.booking_id = b.id AND pm.stripe_payment_intent_id = b.stripe_payment_intent_id)
+     LIMIT 200`
+  );
+  const now = new Date();
+  let captured = 0;
+  let failed = 0;
+  for (const row of rows) {
+    const deadline = deadlineOf(row);
+    if (deadline && deadline > now) continue;
+    try {
+      const r = await inTransaction(async (client) => {
+        const b = await lockBooking(client, row.id, null);
+        const markFailed = async (reason) => {
+          console.error(`Room hold capture failed for ${b.id}: ${reason}`);
+          await client.query(
+            `UPDATE booking SET rate_plan_terms = jsonb_set(rate_plan_terms, '{capture_failed}', to_jsonb(now())) WHERE id = $1`, [b.id]
+          );
+          return { status: 200, outcome: 'failed' };
+        };
+        if (!b.stripe_secret_key) return markFailed('no Stripe key configured');
+        const stripe = stripeOf(b.stripe_secret_key);
+        let pi;
+        try {
+          pi = await stripe.paymentIntents.retrieve(b.stripe_payment_intent_id);
+          if (pi.status === 'requires_capture') pi = await stripe.paymentIntents.capture(pi.id);
+        } catch (err) {
+          return markFailed(err.message);
+        }
+        if (pi.status !== 'succeeded') return markFailed(`payment is ${pi.status}`);
+        await client.query(
+          `INSERT INTO payment (property_id, booking_id, amount, method, status, paid_at, stripe_payment_intent_id)
+           VALUES ($1, $2, $3, 'card', 'completed', now(), $4)`,
+          [b.property_id, b.id, fromCents(pi.amount_received ?? pi.amount), pi.id]
+        );
+        return { status: 200, outcome: 'captured' };
+      });
+      if (r.outcome === 'captured') captured++;
+      if (r.outcome === 'failed') failed++;
+    } catch (err) {
+      console.error(`Room hold capture failed for ${row.id}:`, err.message);
+    }
+  }
+  return { captured, failed };
+}
+
+function startRoomPaymentJobs() {
+  const run = async () => {
+    try {
+      const e = await expireOnce();
+      if (e.expired || e.confirmed) console.log(`Room bookings: expired ${e.expired}, confirmed ${e.confirmed}`);
+      const c = await captureHoldsOnce();
+      if (c.captured || c.failed) console.log(`Room holds: captured ${c.captured}, failed ${c.failed}`);
+    } catch (err) {
+      console.error('Room payment sweep failed:', err.message);
+    }
+  };
+  run();
+  setInterval(run, 60 * 1000).unref();
+}
+
 module.exports = {
   fetchJoinedBooking, releaseAvailability, refreshAvailabilityView, lockBooking, deadlineOf,
   confirmPaidLocked, afterConfirmed, paymentIntentFor, confirmPaid, settleByHand, stripeForCancel,
+  expireOnce, captureHoldsOnce, startRoomPaymentJobs,
 };

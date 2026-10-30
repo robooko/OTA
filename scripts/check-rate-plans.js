@@ -444,6 +444,50 @@ const {
       assert.equal((await one('SELECT is_available FROM room_availability WHERE room_id = $1 AND date = $2', [b.room_id, '2030-07-08'])).is_available, true);
       assert.equal((await api('DELETE', `/api/bookings/${b.id}`)).status, 404); // already cancelled
     });
+
+    // ---- Task 9: expiry and hold-capture jobs ----
+    const overdue = (id) => pool.query("UPDATE booking SET payment_due_at = now() - interval '1 minute' WHERE id = $1", [id]);
+    await check('expiry: unpaid booking expires and frees the room', async () => {
+      const b = await apiBooking(SAVER, '2030-07-03', '2030-07-04');
+      await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      await overdue(b.id);
+      const out = await roomPayments.expireOnce();
+      assert.equal(out.expired, 1);
+      assert.equal(await statusOf(b.id), 'expired');
+      assert.equal((await pi(b.id)).status, 'canceled');
+      const again = await api('POST', '/api/bookings', { guest_id: G, room_id: b.room_id, rate_plan_id: SAVER, check_in: '2030-07-03', check_out: '2030-07-04' });
+      assert.equal(again.status, 201);
+    });
+    await check('expiry confirms a paid-but-unconfirmed booking', async () => {
+      const b = await apiBooking(SAVER, '2030-07-05', '2030-07-06');
+      await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      await succeed(b.id);
+      await overdue(b.id);
+      assert.deepEqual(await roomPayments.expireOnce(), { expired: 0, confirmed: 1 });
+      assert.equal(await statusOf(b.id), 'confirmed');
+      assert.deepEqual((await paymentRows(b.id)).map((p) => p.amount), ['88.00']);
+    });
+    await check('hold captured once the deadline passes; failure marked, not retried', async () => {
+      const heldBooking = async (days) => {
+        const h = await apiBookingNear(FLEX_HOLD, days);
+        assert.equal((await api('POST', `/api/bookings/${h.id}/payment-intent`)).body.mode, 'hold');
+        (await pi(h.id)).status = 'requires_capture';
+        assert.equal((await api('POST', `/api/bookings/${h.id}/confirm-payment`)).body.status, 'confirmed');
+        return h;
+      };
+      // The snapshot is what's enforced: a long cutoff puts the deadline in the past.
+      const pastDeadline = (id) => pool.query("UPDATE booking SET rate_plan_terms = jsonb_set(rate_plan_terms, '{cancel_cutoff_hours}', '500') WHERE id = $1", [id]);
+      const b = await heldBooking(3);
+      assert.deepEqual(await roomPayments.captureHoldsOnce(), { captured: 0, failed: 0 }); // deadline still ahead
+      await pastDeadline(b.id);
+      assert.deepEqual(await roomPayments.captureHoldsOnce(), { captured: 1, failed: 0 });
+      assert.equal((await pi(b.id)).status, 'succeeded');
+      assert.deepEqual(await paymentRows(b.id), [{ amount: '100.00', status: 'completed' }]);
+      const c = await heldBooking(5); await pastDeadline(c.id); fakeStripe.failNextCapture = true;
+      assert.deepEqual(await roomPayments.captureHoldsOnce(), { captured: 0, failed: 1 });
+      assert.deepEqual(await roomPayments.captureHoldsOnce(), { captured: 0, failed: 0 }); // not retried
+      assert.ok((await one('SELECT rate_plan_terms FROM booking WHERE id = $1', [c.id])).rate_plan_terms.capture_failed);
+    });
   } finally {
     const props = [P, Q];
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);
