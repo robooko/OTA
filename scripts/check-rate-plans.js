@@ -149,6 +149,28 @@ const {
       assert.equal(r.body.room_booking_url, 'https://hotel.test/stay/{id}');
       assert.equal((await staff(propertyCtrl.getEmailBranding, {})).body.room_booking_url, 'https://hotel.test/stay/{id}');
     });
+
+    // ---- Task 3: rate plan management ----
+    const rp = require('../src/controllers/ratePlans');
+    let SAVER; let FLEX;
+    await check('staff create Saver and Flex; api key lists active only', async () => {
+      const saver = await staff(rp.createRatePlan, { params: { id: RT }, body: { name: 'Saver', adjustment_pct: -12, refundable: false, payment_mode: 'full', sort_order: 1 } });
+      assert.equal(saver.status, 201); SAVER = saver.body.id;
+      const flex = await staff(rp.createRatePlan, { params: { id: RT }, body: { name: 'Flex', refundable: true, cancel_cutoff_hours: 48, payment_mode: 'hold', sort_order: 2 } });
+      assert.equal(flex.status, 201); FLEX = flex.body.id;
+      const old = await staff(rp.createRatePlan, { params: { id: RT }, body: { name: 'Old', refundable: false, payment_mode: 'full' } });
+      assert.equal((await staff(rp.updateRatePlan, { params: { id: RT, plan_id: old.body.id }, body: { status: 'archived' } })).body.status, 'archived');
+      const listed = await api('GET', `/api/room-types/${RT}/rate-plans`);
+      assert.equal(listed.status, 200);
+      assert.deepEqual(listed.body.map((p) => p.name), ['Saver', 'Flex']);
+      assert.equal((await staff(rp.listRatePlans, { params: { id: RT } })).body.length, 3); // staff see archived too
+    });
+    await check('invalid plans are 400; other property room type is 404', async () => {
+      assert.equal((await staff(rp.createRatePlan, { params: { id: RT }, body: { name: 'Bad', refundable: false, payment_mode: 'hold' } })).status, 400);
+      assert.equal((await staff(rp.updateRatePlan, { params: { id: RT, plan_id: SAVER }, body: { payment_mode: 'deposit' } })).status, 400); // merged plan lacks deposit fields
+      assert.equal((await staff(rp.createRatePlan, { params: { id: OTHER_RT }, body: { name: 'X', refundable: false, payment_mode: 'full' } })).status, 404);
+      assert.equal((await staff(rp.updateRatePlan, { params: { id: RT, plan_id: crypto.randomUUID() }, body: { name: 'Y' } })).status, 404);
+    });
   } finally {
     const props = [P, Q];
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);
