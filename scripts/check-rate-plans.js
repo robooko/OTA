@@ -488,6 +488,66 @@ const {
       assert.deepEqual(await roomPayments.captureHoldsOnce(), { captured: 0, failed: 0 }); // not retried
       assert.ok((await one('SELECT rate_plan_terms FROM booking WHERE id = $1', [c.id])).rate_plan_terms.capture_failed);
     });
+
+    // ---- Final review fixes ----
+    await check('extras need a positive whole quantity (a guest cannot zero the bill)', async () => {
+      const b = await apiBooking(SAVER, '2030-07-09', '2030-07-10'); // 88.00
+      for (const quantity of [-4, 0, 1.5, '-1', 'abc']) {
+        assert.equal((await api('POST', `/api/extras/booking/${b.id}`, { extra_id: EXTRA_25, quantity })).status, 400, `quantity ${quantity}`);
+      }
+      const p = await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      assert.equal(p.body.amount, '88.00'); assert.equal(await statusOf(b.id), 'pending_payment');
+    });
+    await check('expiry settles a booking paid at the desk instead of expiring it', async () => {
+      const s = await staff(bookings.createBooking, { body: { guest_id: G, room_type_id: RT, rate_plan_id: SAVER, check_in: '2030-07-15', check_out: '2030-07-16' } });
+      await pool.query(`INSERT INTO payment (property_id, booking_id, amount, method, status, paid_at) VALUES ($1, $2, 88, 'card', 'completed', now())`, [P, s.body.id]);
+      await overdue(s.body.id);
+      assert.deepEqual(await roomPayments.expireOnce(), { expired: 0, confirmed: 1 });
+      assert.equal(await statusOf(s.body.id), 'confirmed');
+      assert.equal((await one('SELECT rate_plan_terms FROM booking WHERE id = $1', [s.body.id])).rate_plan_terms.pay_at_hotel, true);
+    });
+    await check('zero balance cancels the open card form before confirming', async () => {
+      const b = await apiBooking(SAVER, '2030-07-18', '2030-07-19');
+      await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      await pool.query(`INSERT INTO payment (property_id, booking_id, amount, method, status, paid_at) VALUES ($1, $2, 88, 'cash', 'completed', now())`, [P, b.id]);
+      const r = await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      assert.equal(r.status, 200); assert.equal(r.body.status, 'confirmed');
+      assert.equal((await pi(b.id)).status, 'canceled');
+    });
+    await check('payment-intent on an already-paid PI confirms instead of re-serving the form', async () => {
+      const b = await apiBooking(SAVER, '2030-07-20', '2030-07-21');
+      await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      await succeed(b.id);
+      const r = await api('POST', `/api/bookings/${b.id}/payment-intent`);
+      assert.equal(r.status, 200); assert.equal(r.body.status, 'confirmed');
+      assert.equal((await paymentRows(b.id)).length, 1);
+    });
+    await check('overlapping capture sweeps record one payment', async () => {
+      const h = await apiBookingNear(FLEX_HOLD, 7);
+      assert.equal((await api('POST', `/api/bookings/${h.id}/payment-intent`)).body.mode, 'hold');
+      (await pi(h.id)).status = 'requires_capture';
+      await api('POST', `/api/bookings/${h.id}/confirm-payment`);
+      await pool.query("UPDATE booking SET rate_plan_terms = jsonb_set(rate_plan_terms, '{cancel_cutoff_hours}', '500') WHERE id = $1", [h.id]);
+      await Promise.all([roomPayments.captureHoldsOnce(), roomPayments.captureHoldsOnce()]);
+      assert.equal((await paymentRows(h.id)).length, 1);
+    });
+    await check('a due hold is captured even behind 200 not-yet-due holds', async () => {
+      // 202 confirmed holds far ahead (deadline not reached), inserted first.
+      await pool.query(
+        `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price, status, stripe_payment_intent_id, rate_plan_terms)
+         SELECT $1, $2, r, d::date, d::date + 1, 100, 'confirmed', 'pi_not_due',
+                '{"refundable":true,"cancel_cutoff_hours":48,"payment_mode":"hold","mode_used":"hold"}'
+         FROM unnest($3::uuid[]) r, generate_series('2031-01-01'::date, '2031-04-11'::date, '1 day') d`,
+        [P, G, [R3, R4]]);
+      const h = await apiBookingNear(FLEX_HOLD, 8);
+      (await api('POST', `/api/bookings/${h.id}/payment-intent`));
+      (await pi(h.id)).status = 'requires_capture';
+      await api('POST', `/api/bookings/${h.id}/confirm-payment`);
+      await pool.query("UPDATE booking SET rate_plan_terms = jsonb_set(rate_plan_terms, '{cancel_cutoff_hours}', '500') WHERE id = $1", [h.id]);
+      await roomPayments.captureHoldsOnce();
+      assert.equal((await pi(h.id)).status, 'succeeded');
+      await pool.query("DELETE FROM booking WHERE stripe_payment_intent_id = 'pi_not_due' AND property_id = $1", [P]);
+    });
   } finally {
     const props = [P, Q];
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);

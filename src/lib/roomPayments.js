@@ -125,9 +125,34 @@ async function paymentIntentFor(bookingId, propertyId) {
     if (b.status !== 'pending_payment') return { status: 409, body: { error: 'Booking is not awaiting payment', details: b.status } };
     if (!b.stripe_secret_key || !b.stripe_publishable_key) return { status: 409, body: { error: 'Online payment is not set up for this property' } };
 
+    const stripe = stripeOf(b.stripe_secret_key);
+    let pi = null;
+    if (b.stripe_payment_intent_id) {
+      try {
+        pi = await stripe.paymentIntents.retrieve(b.stripe_payment_intent_id);
+      } catch (err) {
+        return stripeFailure('Card payment could not be set up; please try again', err);
+      }
+      // Already paid (a retry after confirm-payment was lost): confirm, don't
+      // hand the guest a card form for a payment that went through.
+      if (PAID.includes(pi.status)) {
+        await confirmPaidLocked(client, b, pi);
+        return { status: 200, after: () => afterConfirmed(b.id, b.property_id) };
+      }
+    }
+
     const folio = await computeFolio(b.id, b.property_id);
     const balanceCents = toCents(folio.balance);
     if (balanceCents <= 0) {
+      // Settled another way (desk payment, comp): close the guest's card form
+      // so it can't take a second payment.
+      if (pi && OPEN.includes(pi.status)) {
+        try {
+          await stripe.paymentIntents.cancel(pi.id);
+        } catch (err) {
+          return stripeFailure('Payment provider error', err);
+        }
+      }
       await confirmPaidLocked(client, b, null);
       return { status: 200, after: () => afterConfirmed(b.id, b.property_id) };
     }
@@ -135,11 +160,8 @@ async function paymentIntentFor(bookingId, propertyId) {
     const mode = terms.mode_used ?? effectiveMode(terms, deadlineOf(b), new Date());
     const amount = chargeAmountCents(mode, terms, toCents(folio.charges_total), balanceCents);
 
-    let pi;
     try {
-      const stripe = stripeOf(b.stripe_secret_key);
-      if (b.stripe_payment_intent_id) {
-        pi = await stripe.paymentIntents.retrieve(b.stripe_payment_intent_id);
+      if (pi) {
         if (pi.amount !== amount && OPEN.includes(pi.status)) pi = await stripe.paymentIntents.update(pi.id, { amount });
       } else {
         pi = await stripe.paymentIntents.create({
@@ -276,6 +298,20 @@ async function expireOnce() {
           }
           if (pi.status !== 'canceled') await stripe.paymentIntents.cancel(pi.id);
         }
+        // Paid another way (desk terminal via the folio, cash recorded by
+        // staff) without a confirm: settle as pay-at-hotel, never expire.
+        const { rows: [paid] } = await client.query(
+          `SELECT count(*)::int AS n FROM payment WHERE booking_id = $1 AND status = 'completed'`, [b.id]
+        );
+        if (paid.n > 0) {
+          await client.query(
+            `UPDATE booking SET status = 'confirmed', payment_due_at = NULL,
+                    rate_plan_terms = jsonb_set(rate_plan_terms, '{pay_at_hotel}', 'true')
+             WHERE id = $1`,
+            [b.id]
+          );
+          return { status: 200, outcome: 'confirmed', after: () => afterConfirmed(b.id, b.property_id) };
+        }
         await client.query(`UPDATE booking SET status = 'expired', payment_due_at = NULL WHERE id = $1`, [b.id]);
         await releaseAvailability(client, b);
         return {
@@ -311,17 +347,25 @@ async function captureHoldsOnce() {
        AND NOT (b.rate_plan_terms ? 'capture_failed')
        AND NOT EXISTS (SELECT 1 FROM payment pm
                        WHERE pm.booking_id = b.id AND pm.stripe_payment_intent_id = b.stripe_payment_intent_id)
+       AND (b.check_in::timestamp AT TIME ZONE p.timezone)
+           - make_interval(hours => (b.rate_plan_terms->>'cancel_cutoff_hours')::int) <= now()
+     ORDER BY b.check_in
      LIMIT 200`
   );
-  const now = new Date();
   let captured = 0;
   let failed = 0;
   for (const row of rows) {
-    const deadline = deadlineOf(row);
-    if (deadline && deadline > now) continue;
     try {
       const r = await inTransaction(async (client) => {
         const b = await lockBooking(client, row.id, null);
+        // Re-check under the lock: an overlapping sweep (two instances during
+        // a deploy, or a slow run) may have captured or marked it already.
+        if (!b || !['confirmed', 'checked_in'].includes(b.status) || b.rate_plan_terms?.mode_used !== 'hold'
+            || b.rate_plan_terms?.capture_failed || !b.stripe_payment_intent_id) return { status: 409 };
+        const { rows: recorded } = await client.query(
+          'SELECT 1 FROM payment WHERE booking_id = $1 AND stripe_payment_intent_id = $2', [b.id, b.stripe_payment_intent_id]
+        );
+        if (recorded.length) return { status: 409 };
         const markFailed = async (reason) => {
           console.error(`Room hold capture failed for ${b.id}: ${reason}`);
           await client.query(

@@ -67,6 +67,13 @@ async function addBookingExtra(req, res, next) {
     const { booking_id } = req.params;
     const { extra_id, quantity } = req.body;
     if (!extra_id) return res.status(400).json({ error: 'extra_id is required' });
+    // Websites forward guest input here, and a rate-plan card payment is
+    // worked out from the bill: a zero, negative or fractional quantity
+    // would cut what the guest pays.
+    const qty = quantity == null || quantity === '' ? 1 : Number(quantity);
+    if (!Number.isInteger(qty) || qty < 1 || qty > 999) {
+      return res.status(400).json({ error: 'quantity must be a whole number from 1 to 999' });
+    }
 
     const extraRes = await pool.query(
       "SELECT * FROM extra WHERE id = $1 AND status = 'active' AND property_id = $2",
@@ -80,7 +87,6 @@ async function addBookingExtra(req, res, next) {
     if (!bookingRes.rows.length) return res.status(404).json({ error: 'Booking not found' });
 
     const unit_price = extraRes.rows[0].price;
-    const qty = quantity || 1;
 
     const { rows } = await pool.query(
       `INSERT INTO booking_extra (booking_id, extra_id, quantity, unit_price)
