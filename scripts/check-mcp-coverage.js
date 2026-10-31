@@ -19,6 +19,7 @@ const EXCLUDE = [
   /opt-out|confirm-booking|^\S+ \/api\/cleanliness\//, // public guest email links
   /^\S+ \/api\/organization\/api-keys?\b/,             // key management stays with humans
   /^\S+ \/api\/housekeeping\/(jobs\/:p\/|booking-extras\/|photos)/, // cleaning is staff-app only
+  /^DELETE \/api\/guests\/:p$/,                        // irreversible, dashboard only
 ];
 
 const BASELINE = path.join(__dirname, 'mcp-coverage-baseline.json');

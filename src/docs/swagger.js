@@ -4,6 +4,9 @@ const INCLUDE_INACTIVE = { name: 'include_inactive', in: 'query', schema: { type
 // Every courses route takes a staff session or a site API key.
 const COURSE_AUTH = [{ bearerAuth: [] }, { apiKeyAuth: [] }];
 
+// Staff, or a FULL api key (MCP, scripts); a scoped key gets 403.
+const STAFF_OR_FULL_KEY = [{ bearerAuth: [] }, { apiKeyAuth: [] }];
+
 // Named permissions (src/lib/permissions.js). A route that needs one says so;
 // admins and full API keys pass every check.
 const { PERMISSIONS } = require('../lib/permissions');
@@ -385,6 +388,7 @@ const swaggerSpec = {
       get: {
         tags: ['Guests'],
         summary: 'List all guests',
+        security: STAFF_OR_FULL_KEY,
         responses: { 200: { description: 'Array of guests' } },
       },
       post: {
@@ -416,12 +420,12 @@ const swaggerSpec = {
       get: { tags: ['Guests'], summary: 'Look up guest by email', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'email', in: 'query', required: true, schema: { type: 'string', format: 'email' } }, { name: 'property_id', in: 'query', schema: { type: 'string', format: 'uuid' }, description: 'Ignored. The property is determined by which per-property X-Api-Key or Bearer token authenticated the request — this field has no effect even if sent.' }], responses: { 200: { description: 'Guest found' }, 404: { description: 'Guest not found' } } },
     },
     '/api/guests/{id}': {
-      get: { tags: ['Guests'], summary: 'Get guest by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Guest' }, 404: { description: 'Not found' } } },
-      put: { tags: ['Guests'], summary: 'Update guest', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { first_name: { type: 'string' }, last_name: { type: 'string' }, email: { type: 'string' }, phone: { type: 'string' } } } } } }, responses: { 200: { description: 'Updated guest' } } },
+      get: { tags: ['Guests'], summary: 'Get guest by ID', security: STAFF_OR_FULL_KEY, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Guest' }, 404: { description: 'Not found' } } },
+      put: { tags: ['Guests'], summary: 'Update guest', security: STAFF_OR_FULL_KEY, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { first_name: { type: 'string' }, last_name: { type: 'string' }, email: { type: 'string' }, phone: { type: 'string' } } } } } }, responses: { 200: { description: 'Updated guest' } } },
       delete: { tags: ['Guests'], summary: 'Delete guest', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Deleted' } } },
     },
     '/api/guests/{id}/summary': {
-      get: { tags: ['Guests'], summary: "Guest lifetime stats", description: 'Aggregates across all of the guest\'s room bookings: total_stays, total_spent, avg_nights, total_nights, last_stay, confirmed/cancelled/expired counts (expired = never paid), and total_extras_spent.', security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Summary stats object' }, 404: { description: 'Guest not found' } } },
+      get: { tags: ['Guests'], summary: "Guest lifetime stats", description: 'Aggregates across all of the guest\'s room bookings: total_stays, total_spent, avg_nights, total_nights, last_stay, confirmed/cancelled/expired counts (expired = never paid), and total_extras_spent.', security: STAFF_OR_FULL_KEY, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Summary stats object' }, 404: { description: 'Guest not found' } } },
     },
 
     // ── Room Types ───────────────────────────────────────────────────────────
@@ -483,7 +487,7 @@ const swaggerSpec = {
     },
     '/api/bookings/{id}': {
       get: { tags: ['Bookings'], summary: 'Get booking by ID', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Booking with guest and room details' } } },
-      put: { tags: ['Bookings'], summary: 'Update booking', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['confirmed', 'cancelled', 'checked_in', 'checked_out'], description: 'pending_payment/expired are system-set (400). On a pending_payment booking only confirmed is allowed (409 otherwise): it cancels the open card payment and marks the booking pay-at-hotel; cancel unpaid bookings with DELETE.' }, guests: { type: 'integer' }, metadata: { type: 'object', additionalProperties: true, example: { pickup_location: 'Conrad Base' } }, force: { type: 'boolean', description: 'Override the folio-balance check-out gate, and the housekeeping room-not-ready check-in gate' } } } } } }, responses: { 200: { description: 'Updated' }, 409: { description: "Outstanding folio balance blocks checked_out; on housekeeping properties { error: 'Room not ready', housekeeping_status } blocks checked_in (pass force: true to override either)" } } },
+      put: { tags: ['Bookings'], summary: 'Update booking', security: STAFF_OR_FULL_KEY, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['confirmed', 'cancelled', 'checked_in', 'checked_out'], description: 'pending_payment/expired are system-set (400). On a pending_payment booking only confirmed is allowed (409 otherwise): it cancels the open card payment and marks the booking pay-at-hotel; cancel unpaid bookings with DELETE.' }, guests: { type: 'integer' }, metadata: { type: 'object', additionalProperties: true, example: { pickup_location: 'Conrad Base' } }, force: { type: 'boolean', description: 'Override the folio-balance check-out gate, and the housekeeping room-not-ready check-in gate' } } } } } }, responses: { 200: { description: 'Updated' }, 409: { description: "Outstanding folio balance blocks checked_out; on housekeeping properties { error: 'Room not ready', housekeeping_status } blocks checked_in (pass force: true to override either)" } } },
       delete: { tags: ['Bookings'], summary: 'Cancel booking — restores availability', description: "Bookings on a rate plan: an unpaid one releases its card payment. On an API key (a guest via the website) the plan's terms apply: refundable and before the deadline → cancelled and card payments refunded; otherwise 409. Staff can always cancel; nothing is refunded automatically (an uncaptured hold is released).", parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Cancelled' }, 404: { description: 'Not found or already cancelled/expired' }, 409: { description: '{ error: "This booking can no longer be cancelled online. Please contact the hotel.", details: "non-refundable" | "Free cancellation ended <ISO>" }' }, 502: { description: 'Stripe failed; booking unchanged' } } },
     },
     '/api/bookings/{id}/payment-intent': {
@@ -495,24 +499,24 @@ const swaggerSpec = {
 
     // ── Payments ─────────────────────────────────────────────────────────────
     '/api/payments/booking/{booking_id}': {
-      get: { tags: ['Payments'], summary: 'List payments for a booking', parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of payments' } } },
+      get: { tags: ['Payments'], summary: 'List payments for a booking', security: STAFF_OR_FULL_KEY, parameters: [{ name: 'booking_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Array of payments' } } },
     },
     '/api/payments': {
-      post: { tags: ['Payments'], summary: 'Record a payment', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['booking_id', 'amount', 'method'], properties: { booking_id: { type: 'string', format: 'uuid' }, amount: { type: 'number' }, method: { type: 'string', enum: ['card', 'cash', 'bank_transfer'] } } } } } }, responses: { 201: { description: 'Payment recorded' } } },
+      post: { tags: ['Payments'], summary: 'Record a payment', security: STAFF_OR_FULL_KEY, requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['booking_id', 'amount', 'method'], properties: { booking_id: { type: 'string', format: 'uuid' }, amount: { type: 'number' }, method: { type: 'string', enum: ['card', 'cash', 'bank_transfer'] } } } } } }, responses: { 201: { description: 'Payment recorded' } } },
     },
     '/api/payments/{id}': {
-      put: { tags: ['Payments'], summary: 'Update payment status', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'completed', 'refunded'] } } } } } }, responses: { 200: { description: 'Updated' } } },
+      put: { tags: ['Payments'], summary: 'Update payment status', security: STAFF_OR_FULL_KEY, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'completed', 'refunded'] } } } } } }, responses: { 200: { description: 'Updated' } } },
     },
 
     // ── Folio ────────────────────────────────────────────────────────────────
     '/api/bookings/{id}/folio': {
-      get: { tags: ['Folio'], summary: "The booking's folio: computed line items (room, extras, room service, adjustments), payments, and balance", security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'items, charges_total, payments, payments_total, balance (completed payments only reduce the balance)' }, 404: { description: 'Booking not found' } } },
+      get: { tags: ['Folio'], summary: "The booking's folio: computed line items (room, extras, room service, adjustments), payments, and balance", security: STAFF_OR_FULL_KEY, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'items, charges_total, payments, payments_total, balance (completed payments only reduce the balance)' }, 404: { description: 'Booking not found' } } },
     },
     '/api/bookings/{id}/folio/adjustments': {
-      post: { tags: ['Folio'], summary: 'Add a manual folio line (positive = charge, negative = credit/comp)', security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['description', 'amount'], properties: { description: { type: 'string', maxLength: 200 }, amount: { type: 'number', description: 'Non-zero; negative for credits' } } } } } }, responses: { 201: { description: 'Adjustment created' }, 400: { description: 'Missing description or zero amount' }, 404: { description: 'Booking not found' } } },
+      post: { tags: ['Folio'], summary: 'Add a manual folio line (positive = charge, negative = credit/comp)', security: STAFF_OR_FULL_KEY, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['description', 'amount'], properties: { description: { type: 'string', maxLength: 200 }, amount: { type: 'number', description: 'Non-zero; negative for credits' } } } } } }, responses: { 201: { description: 'Adjustment created' }, 400: { description: 'Missing description or zero amount' }, 404: { description: 'Booking not found' } } },
     },
     '/api/bookings/{id}/folio/adjustments/{adjustment_id}': {
-      delete: { tags: ['Folio'], summary: 'Remove a manual folio line', security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'adjustment_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 204: { description: 'Removed' }, 404: { description: 'Adjustment not found on this booking' } } },
+      delete: { tags: ['Folio'], summary: 'Remove a manual folio line', security: STAFF_OR_FULL_KEY, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'adjustment_id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 204: { description: 'Removed' }, 404: { description: 'Adjustment not found on this booking' } } },
     },
     '/api/bookings/{id}/folio/payment-intent': {
       post: { tags: ['Folio'], summary: 'Create (or reuse) a Tap to Pay PaymentIntent for the folio balance', description: "Amount defaults to the outstanding balance; must be > 0 and ≤ balance. Retries reuse the booking's pending card payment row and its intent; a succeeded-but-unconfirmed intent settles that row instead of charging twice.", security: [{ bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { amount: { type: 'number', description: 'Optional partial amount; defaults to the full balance' } } } } } }, responses: { 200: { description: 'client_secret, payment_intent_id, amount — or already_paid: true after crash-window recovery' }, 404: { description: 'Booking not found' }, 409: { description: 'No Stripe key, cancelled booking, nothing to pay, or amount exceeds balance' }, 502: { description: 'Stripe API error' } } },
