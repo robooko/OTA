@@ -913,6 +913,7 @@ function createTools(apiRequest) {
       label: z.string().nullable().optional(),
       vercel_project_id: z.string().nullable().optional(),
       ga4_property_id: z.string().nullable().optional().describe('Numeric GA4 property id (GA Admin > Property details), not the G- measurement id'),
+      competitors: z.array(z.string()).max(5).optional().describe('Rival domains the competitor report compares against; omit to compare the top 3 DataForSEO discovers'),
     },
     run: (args) => apiRequest('POST', '/api/property/websites', { body: args }),
   },
@@ -926,6 +927,7 @@ function createTools(apiRequest) {
       status: z.enum(['active', 'inactive']).optional(),
       vercel_project_id: z.string().nullable().optional(),
       ga4_property_id: z.string().nullable().optional().describe('Numeric GA4 property id, or null to clear'),
+      competitors: z.array(z.string()).max(5).nullable().optional().describe('Rival domains for the competitor report (replaces the list); [] or null clears'),
     },
     run: ({ id, ...body }) => apiRequest('PUT', `/api/property/websites/${id}`, { body }),
   },
@@ -950,7 +952,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'refresh_website_competitors',
-    description: "Fetch a new competitor report from DataForSEO and save it (paid, roughly $0.05; at most once per website every 10 minutes). Without competitors, the top 3 discovered rivals are compared.",
+    description: "Fetch a new competitor report from DataForSEO and save it (paid, roughly $0.05; at most once per website every 10 minutes). Compares the given competitors, else the website's saved ones (update_website), else the top 3 discovered rivals.",
     inputSchema: {
       id: z.string().uuid(),
       competitors: z.array(z.string()).max(20).optional().describe("Rival domains to compare, e.g. from the site's brief; the first 5 are used"),

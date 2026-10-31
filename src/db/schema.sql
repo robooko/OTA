@@ -155,6 +155,9 @@ CREATE TABLE IF NOT EXISTS property_website (
   -- Google Analytics alternative; wins over vercel_project_id when set -- see
   -- migrate-2026-09-21-website-ga4.sql and src/lib/googleAnalytics.js.
   ga4_property_id    VARCHAR(20),
+  -- Rival domains for the competitor report (max 5); empty = DataForSEO's
+  -- discovered top 3 -- see migrate-2026-10-31-website-competitors.sql.
+  competitors        TEXT[]      NOT NULL DEFAULT '{}',
   status             VARCHAR(20) DEFAULT 'active',
   created_at         TIMESTAMPTZ DEFAULT now()
 );

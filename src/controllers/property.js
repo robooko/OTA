@@ -175,7 +175,7 @@ async function enableApiKey(req, res, next) {
   }
 }
 
-const WEBSITE_FIELDS = 'id, url, label, status, vercel_project_id, ga4_property_id';
+const WEBSITE_FIELDS = 'id, url, label, status, vercel_project_id, ga4_property_id, competitors';
 
 // ga4_property_id: undefined = not supplied, null/'' = clear, otherwise a
 // numeric GA4 property id ("properties/123" accepted). Returns
@@ -185,6 +185,18 @@ function parseGa4PropertyId(raw) {
   if (raw === null || raw === '') return { value: null };
   const id = googleAnalytics.normalisePropertyId(raw);
   return id ? { value: id } : { error: 'ga4_property_id must be the numeric GA4 property id (GA Admin > Property details), not the G- measurement id' };
+}
+
+// Rival domains for the competitor report: URLs or domains in, bare unique
+// domains out. null clears. Returns { value } or { error }.
+function parseCompetitors(raw) {
+  if (raw === undefined) return { value: undefined };
+  if (raw === null) return { value: [] };
+  const domains = Array.isArray(raw) ? raw.map((c) => typeof c === 'string' && dataForSeo.bareDomain(c)) : null;
+  if (!domains || domains.some((d) => !d)) return { error: 'competitors must be an array of domains' };
+  const unique = [...new Set(domains)];
+  if (unique.length > dataForSeo.MAX_COMPETITORS) return { error: `competitors takes at most ${dataForSeo.MAX_COMPETITORS} domains` };
+  return { value: unique };
 }
 
 async function listWebsites(req, res, next) {
@@ -206,10 +218,12 @@ async function createWebsite(req, res, next) {
     if (!isValidUrl(url)) return res.status(400).json({ error: 'url must be a valid http(s) URL' });
     const ga4 = parseGa4PropertyId(req.body.ga4_property_id);
     if (ga4.error) return res.status(400).json({ error: ga4.error });
+    const competitors = parseCompetitors(req.body.competitors);
+    if (competitors.error) return res.status(400).json({ error: competitors.error });
     const { rows } = await pool.query(
-      `INSERT INTO property_website (property_id, url, label, vercel_project_id, ga4_property_id)
-       VALUES ($1, $2, $3, $4, $5) RETURNING ${WEBSITE_FIELDS}`,
-      [req.property_id, url, label ?? null, vercel_project_id || null, ga4.value ?? null]
+      `INSERT INTO property_website (property_id, url, label, vercel_project_id, ga4_property_id, competitors)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${WEBSITE_FIELDS}`,
+      [req.property_id, url, label ?? null, vercel_project_id || null, ga4.value ?? null, competitors.value ?? []]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -229,6 +243,8 @@ async function updateWebsite(req, res, next) {
     }
     const ga4 = parseGa4PropertyId(req.body.ga4_property_id);
     if (ga4.error) return res.status(400).json({ error: ga4.error });
+    const competitors = parseCompetitors(req.body.competitors);
+    if (competitors.error) return res.status(400).json({ error: competitors.error });
     const setVercel = req.body.vercel_project_id !== undefined;
     const setGa4 = ga4.value !== undefined;
     const { rows } = await pool.query(
@@ -237,9 +253,10 @@ async function updateWebsite(req, res, next) {
          label             = COALESCE($2, label),
          status            = COALESCE($3, status),
          vercel_project_id = CASE WHEN $4::boolean THEN $5 ELSE vercel_project_id END,
-         ga4_property_id   = CASE WHEN $6::boolean THEN $7 ELSE ga4_property_id END
+         ga4_property_id   = CASE WHEN $6::boolean THEN $7 ELSE ga4_property_id END,
+         competitors       = COALESCE($10, competitors)
        WHERE id = $8 AND property_id = $9 RETURNING ${WEBSITE_FIELDS}`,
-      [url, label, status, setVercel, req.body.vercel_project_id || null, setGa4, ga4.value ?? null, req.params.id, req.property_id]
+      [url, label, status, setVercel, req.body.vercel_project_id || null, setGa4, ga4.value ?? null, req.params.id, req.property_id, competitors.value ?? null]
     );
     if (!rows.length) return res.status(404).json({ error: 'Website not found' });
     res.json(rows[0]);
@@ -385,7 +402,7 @@ const SEO_LOCATION = /^[A-Za-z .'-]+(,[A-Za-z .'-]+){0,3}$/;
 async function findWebsite(req) {
   if (!isValidUuid(req.params.id)) return null;
   const { rows } = await pool.query(
-    "SELECT id, url FROM property_website WHERE id = $1 AND property_id = $2 AND status = 'active'",
+    "SELECT id, url, competitors FROM property_website WHERE id = $1 AND property_id = $2 AND status = 'active'",
     [req.params.id, req.property_id]
   );
   return rows[0] ?? null;
@@ -411,9 +428,9 @@ async function getWebsiteCompetitors(req, res, next) {
   }
 }
 
-// Fetches a new report from DataForSEO and appends it. competitors (the
-// brief's named rivals) and location come with the request, not stored --
-// OTA keeps only the reports themselves.
+// Fetches a new report from DataForSEO and appends it. Compares the
+// request's competitors if it names any, else the website's saved ones,
+// else the top 3 DataForSEO discovers. location comes per request.
 async function refreshWebsiteCompetitors(req, res, next) {
   try {
     const { competitors = [], location = 'United Kingdom' } = req.body ?? {};
@@ -437,7 +454,7 @@ async function refreshWebsiteCompetitors(req, res, next) {
 
     let report;
     try {
-      report = await dataForSeo.competitorReport({ domain, competitors, location });
+      report = await dataForSeo.competitorReport({ domain, competitors: competitors.length ? competitors : website.competitors, location });
     } catch (err) {
       return res.status(502).json({ error: err.message });
     }
