@@ -197,6 +197,64 @@ const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toI
     await check('board rejects a bad date', async () => {
       assert.equal((await call(ctrl.board, { property_id: P, user: staffA, query: { date: '10/03/2031' } })).statusCode, 400);
     });
+
+    // ── Task 3: claim, start, finish ────────────────────────────────────────
+    const jobId = async (roomId, kind, date = D) => (await one('SELECT id FROM hk_job WHERE room_id = $1 AND date = $2 AND kind = $3', [roomId, date, kind])).id;
+    const act = (fn, user, id, body = {}) => call(fn, { property_id: P, user, params: { id }, body });
+    const roomStatus = async (id) => (await one('SELECT housekeeping_status FROM room WHERE id = $1', [id])).housekeeping_status;
+    const J101 = await jobId(room['101'], 'checkout');
+    await check('claim: someone else\'s claim is 409 unless forced', async () => {
+      const a = await act(ctrl.claimJob, staffA, J101);
+      assert.equal(a.statusCode, 200); assert.equal(a.body.claimed_by, staffA.id); assert.equal(a.body.claimed_by_name, `Name ${staffA.id}`);
+      const b = await act(ctrl.claimJob, staffB, J101);
+      assert.equal(b.statusCode, 409); assert.equal(b.body.claimed_by_name, `Name ${staffA.id}`);
+      const f = await act(ctrl.claimJob, staffB, J101, { force: true });
+      assert.equal(f.statusCode, 200); assert.equal(f.body.claimed_by, staffB.id);
+    });
+    await check('unclaim: only the claimer or an admin', async () => {
+      assert.equal((await act(ctrl.unclaimJob, staffA, J101)).statusCode, 403);
+      const r = await act(ctrl.unclaimJob, staffB, J101);
+      assert.equal(r.statusCode, 200); assert.equal(r.body.status, 'open'); assert.equal(r.body.claimed_by, null);
+    });
+    await check('start: room cleaning, one attempt, claimed by the starter', async () => {
+      const r = await act(ctrl.startJob, staffA, J101);
+      assert.equal(r.statusCode, 200); assert.equal(r.body.status, 'in_progress'); assert.equal(r.body.claimed_by, staffA.id);
+      assert.equal(r.body.attempts.length, 1); assert.equal(r.body.attempts[0].cleaner_id, staffA.id);
+      assert.equal(await roomStatus(room['101']), 'cleaning');
+      assert.equal((await act(ctrl.startJob, staffA, J101)).statusCode, 409); // already in progress
+    });
+    await check('finish: cleaner only, booleans validated', async () => {
+      assert.equal((await act(ctrl.finishJob, staffB, J101, { sheets_changed: true, towels_changed: true })).statusCode, 403);
+      assert.equal((await act(ctrl.finishJob, staffA, J101, { sheets_changed: 'yes', towels_changed: true })).statusCode, 400);
+      assert.equal((await act(ctrl.finishJob, staffA, J101, { sheets_changed: true, towels_changed: true, comments: 'x'.repeat(2001) })).statusCode, 400);
+    });
+    await check('finish without inspection required: done, room ready', async () => {
+      const r = await act(ctrl.finishJob, staffA, J101, { sheets_changed: true, towels_changed: false, comments: 'stain on rug' });
+      assert.equal(r.statusCode, 200); assert.equal(r.body.status, 'done');
+      assert.ok(r.body.attempts[0].finished_at); assert.equal(r.body.attempts[0].sheets_changed, true);
+      assert.equal(r.body.attempts[0].towels_changed, false); assert.equal(r.body.attempts[0].comments, 'stain on rug');
+      assert.equal(await roomStatus(room['101']), 'ready');
+      assert.equal((await act(ctrl.startJob, staffA, J101)).statusCode, 409); // done
+    });
+    const room105 = (await one(`INSERT INTO room (property_id, room_type_id, room_number, floor) VALUES ($1, $2, '105', 1) RETURNING id`, [P, RT])).id;
+    await book(room105, addDays(D, -2), D, 'checked_in');
+    await board();
+    const J105 = await jobId(room105, 'checkout');
+    const J102 = await jobId(room['102'], 'stayover');
+    await check('finish with inspection required: checkout waits at clean, stayover ready', async () => {
+      await pool.query('UPDATE property SET hk_inspection_required = true WHERE id = $1', [P]);
+      await act(ctrl.startJob, staffA, J105);
+      assert.equal((await act(ctrl.finishJob, staffA, J105, { sheets_changed: true, towels_changed: true })).body.status, 'done');
+      assert.equal(await roomStatus(room105), 'clean');
+      await act(ctrl.startJob, staffB, J102);
+      await act(ctrl.finishJob, staffB, J102, { sheets_changed: false, towels_changed: true });
+      assert.equal(await roomStatus(room['102']), 'ready');
+      assert.ok(published.some((e) => e.event === 'job-updated' && e.payload.id === J105 && e.payload.status === 'done'));
+    });
+    await check('unknown or foreign job is 404', async () => {
+      assert.equal((await act(ctrl.claimJob, staffA, crypto.randomUUID())).statusCode, 404);
+      assert.equal((await act(ctrl.startJob, staffA, 'not-a-uuid')).statusCode, 404);
+    });
   } finally {
     await cleanup(props);
     await pool.end();

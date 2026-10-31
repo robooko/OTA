@@ -121,4 +121,133 @@ async function putRoomStatus(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { board, getSettings, putSettings, putOverride, deleteOverride, putRoomStatus };
+// ── Cleaning: claim, start, finish ──────────────────────────────────────────
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function loadJob(db, id, propertyId) {
+  if (!UUID_RE.test(String(id))) return null;
+  const { rows } = await db.query('SELECT * FROM hk_job WHERE id = $1 AND property_id = $2', [id, propertyId]);
+  return rows[0] ?? null;
+}
+
+// Sends the board row for a job and tells every open board about it.
+async function respondJob(req, res, jobId, status = 200) {
+  const job = await hk.fetchJob(pool, jobId, req.property_id);
+  hk.publish(req.property_id, 'job-updated', job);
+  res.status(status).json(job);
+}
+
+const isAdmin = (req) => req.user?.role === 'admin';
+
+async function claimJob(req, res, next) {
+  try {
+    const job = await loadJob(pool, req.params.id, req.property_id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const me = req.user?.id;
+    if (job.status === 'claimed' && job.claimed_by !== me && req.body?.force !== true) {
+      return res.status(409).json({ error: 'Already claimed', claimed_by: job.claimed_by, claimed_by_name: job.claimed_by_name });
+    }
+    const name = await hk.staffName(me);
+    const { rows } = await pool.query(
+      `UPDATE hk_job SET status = 'claimed', claimed_by = $1, claimed_by_name = $2
+       WHERE id = $3 AND status IN ('open', 'claimed') RETURNING id`,
+      [me, name, job.id]
+    );
+    if (!rows.length) return res.status(409).json({ error: `Job is ${job.status}` });
+    await respondJob(req, res, job.id);
+  } catch (err) { next(err); }
+}
+
+async function unclaimJob(req, res, next) {
+  try {
+    const job = await loadJob(pool, req.params.id, req.property_id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (job.status !== 'claimed') return res.status(409).json({ error: `Job is ${job.status}` });
+    if (job.claimed_by !== req.user?.id && !isAdmin(req)) return res.status(403).json({ error: 'Only the person who claimed it (or an admin) can release it' });
+    const { rows } = await pool.query(
+      `UPDATE hk_job SET status = 'open', claimed_by = NULL, claimed_by_name = NULL
+       WHERE id = $1 AND status = 'claimed' RETURNING id`,
+      [job.id]
+    );
+    if (!rows.length) return res.status(409).json({ error: 'Job changed, try again' });
+    await respondJob(req, res, job.id);
+  } catch (err) { next(err); }
+}
+
+// Starting takes the job (the board is shared; claims don't lock anyone out)
+// and opens a new attempt -- a failed inspection's redo is another attempt.
+async function startJob(req, res, next) {
+  const client = await pool.connect();
+  try {
+    const job = await loadJob(client, req.params.id, req.property_id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const me = req.user?.id;
+    const name = await hk.staffName(me);
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `UPDATE hk_job SET status = 'in_progress', claimed_by = $1, claimed_by_name = $2
+       WHERE id = $3 AND status IN ('open', 'claimed', 'failed') RETURNING id`,
+      [me, name, job.id]
+    );
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `Job is ${job.status}` });
+    }
+    await client.query('INSERT INTO hk_clean (job_id, cleaner_id, cleaner_name) VALUES ($1, $2, $3)', [job.id, me, name]);
+    await client.query('COMMIT');
+    await hk.setRoomStatus(pool, req.property_id, job.room_id, 'cleaning');
+    await respondJob(req, res, job.id);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
+async function finishJob(req, res, next) {
+  const client = await pool.connect();
+  try {
+    const { sheets_changed, towels_changed, comments } = req.body;
+    const job = await loadJob(client, req.params.id, req.property_id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (job.status !== 'in_progress') return res.status(409).json({ error: `Job is ${job.status}` });
+    const attempt = (await client.query(
+      'SELECT * FROM hk_clean WHERE job_id = $1 AND finished_at IS NULL ORDER BY started_at DESC LIMIT 1', [job.id]
+    )).rows[0];
+    if (!attempt) return res.status(409).json({ error: 'No clean in progress' });
+    if (attempt.cleaner_id !== req.user?.id && !isAdmin(req)) return res.status(403).json({ error: 'Only the cleaner (or an admin) can finish this clean' });
+    if (typeof sheets_changed !== 'boolean' || typeof towels_changed !== 'boolean') {
+      return res.status(400).json({ error: 'sheets_changed and towels_changed must be true or false' });
+    }
+    if (comments != null && (typeof comments !== 'string' || comments.length > 2000)) {
+      return res.status(400).json({ error: 'comments must be text up to 2000 characters' });
+    }
+    await client.query('BEGIN');
+    const done = await client.query(`UPDATE hk_job SET status = 'done' WHERE id = $1 AND status = 'in_progress' RETURNING id`, [job.id]);
+    if (!done.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Job changed, try again' });
+    }
+    await client.query(
+      `UPDATE hk_clean SET finished_at = now(), sheets_changed = $1, towels_changed = $2, comments = $3 WHERE id = $4`,
+      [sheets_changed, towels_changed, comments ?? null, attempt.id]
+    );
+    const { hk_inspection_required } = (await client.query('SELECT hk_inspection_required FROM property WHERE id = $1', [req.property_id])).rows[0];
+    await client.query('COMMIT');
+    await hk.setRoomStatus(pool, req.property_id, job.room_id, hk.statusAfterFinish(job.kind, hk_inspection_required));
+    await respondJob(req, res, job.id);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = {
+  board, getSettings, putSettings, putOverride, deleteOverride, putRoomStatus,
+  claimJob, unclaimJob, startJob, finishJob,
+  loadJob, respondJob, isAdmin, UUID_RE,
+};

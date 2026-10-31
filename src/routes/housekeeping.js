@@ -16,4 +16,9 @@ router.delete('/overrides/:room_id/:date', authenticateOrApiKey, ctrl.deleteOver
 
 router.put('/rooms/:room_id/status', authenticateOrApiKey, ctrl.putRoomStatus);
 
+router.post('/jobs/:id/claim', authenticateOrApiKey, ctrl.claimJob);
+router.delete('/jobs/:id/claim', authenticateOrApiKey, ctrl.unclaimJob);
+router.post('/jobs/:id/start', authenticateOrApiKey, ctrl.startJob);
+router.post('/jobs/:id/finish', authenticateOrApiKey, ctrl.finishJob);
+
 module.exports = router;
