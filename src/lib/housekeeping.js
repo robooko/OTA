@@ -214,7 +214,7 @@ const JOB_SQL = `
                               'check_in', b.check_in, 'check_out', b.check_out, 'rate_plan_id', b.rate_plan_id)
        FROM booking b JOIN guest g ON g.id = b.guest_id WHERE b.id = j.booking_id) AS booking,
     (SELECT json_build_object('booking_id', b.id, 'guest_name', g.first_name || ' ' || g.last_name,
-                              'arrival_time', b.metadata->>'arrival_time', 'check_out', b.check_out)
+                              'arrival_time', b.metadata->>'arrival_time', 'check_out', b.check_out, 'rate_plan_id', b.rate_plan_id)
        FROM booking b JOIN guest g ON g.id = b.guest_id WHERE b.id = j.arriving_booking_id) AS arriving,
     COALESCE((SELECT json_agg(json_build_object('booking_extra_id', be.id, 'name', e.name, 'quantity', be.quantity,
                                                 'placed_at', be.placed_at, 'placed_by', be.placed_by) ORDER BY e.name)
@@ -263,9 +263,24 @@ function shapeJob(row) {
   };
 }
 
+// The minibar to check/stock: the departing or in-house guest's room type
+// and rate plan, else the arriving guest's.
+async function withMinibar(db, jobs) {
+  const { resolveList } = require('./minibar');
+  const lists = new Map();
+  for (const job of jobs) {
+    const guest = job.booking ?? job.arriving;
+    if (!guest) continue;
+    const key = `${job.room.room_type_id}:${guest.rate_plan_id ?? ''}`;
+    if (!lists.has(key)) lists.set(key, await resolveList(db, job.room.room_type_id, guest.rate_plan_id ?? null));
+    job.minibar = lists.get(key);
+  }
+  return jobs;
+}
+
 async function fetchJob(db, jobId, propertyId) {
   const { rows } = await db.query(`${JOB_SQL} WHERE j.id = $1 AND j.property_id = $2`, [jobId, propertyId]);
-  return rows[0] ? shapeJob(rows[0]) : null;
+  return rows[0] ? (await withMinibar(db, [shapeJob(rows[0])]))[0] : null;
 }
 
 // Dirty/unfinished rooms with someone arriving first, then by kind and room.
@@ -275,7 +290,7 @@ async function listJobs(db, propertyId, date) {
      ORDER BY (j.arriving_booking_id IS NOT NULL AND r.housekeeping_status <> 'ready') DESC, ${KIND_ORDER}, r.room_number`,
     [propertyId, date]
   );
-  return rows.map(shapeJob);
+  return withMinibar(db, rows.map(shapeJob));
 }
 
 // A guest left: the room needs cleaning, and today's board gets its job

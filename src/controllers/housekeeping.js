@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const pool = require('../db');
 const hk = require('../lib/housekeeping');
+const minibar = require('../lib/minibar');
 
 // Room housekeeping for the staff app -- see
 // docs/superpowers/specs/2026-10-31-housekeeping-design.md. Library calls go
@@ -272,6 +273,127 @@ async function placeExtra(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// ── Minibar ─────────────────────────────────────────────────────────────────
+
+const isPrice = (v) => v !== null && v !== '' && Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) < 1e8;
+
+function minibarItemError({ name, price, description, image_url, status }, partial) {
+  if (!(partial && name === undefined) && (typeof name !== 'string' || !name.trim() || name.length > 100)) return 'name is required (up to 100 characters)';
+  if (!(partial && price === undefined) && !isPrice(price)) return 'price must be 0 or more';
+  if (description != null && typeof description !== 'string') return 'description must be text';
+  if (image_url != null && (typeof image_url !== 'string' || !/^https:\/\//.test(image_url))) return 'image_url must be an https URL';
+  if (status !== undefined && !['active', 'archived'].includes(status)) return "status must be 'active' or 'archived'";
+  return null;
+}
+
+async function listMinibarItems(req, res, next) {
+  try {
+    const { rows } = await pool.query(`SELECT * FROM minibar_item WHERE property_id = $1 AND status = 'active' ORDER BY name`, [req.property_id]);
+    res.json(rows);
+  } catch (err) { next(err); }
+}
+
+async function createMinibarItem(req, res, next) {
+  try {
+    const err = minibarItemError(req.body, false);
+    if (err) return res.status(400).json({ error: err });
+    const { name, price, description, image_url } = req.body;
+    const { rows } = await pool.query(
+      'INSERT INTO minibar_item (property_id, name, price, description, image_url) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [req.property_id, name.trim(), price, description ?? null, image_url ?? null]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) { next(err); }
+}
+
+async function updateMinibarItem(req, res, next) {
+  try {
+    const err = minibarItemError(req.body, true);
+    if (err) return res.status(400).json({ error: err });
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Minibar item not found' });
+    const { name, price, description, image_url, status } = req.body;
+    const { rows } = await pool.query(
+      `UPDATE minibar_item SET name = COALESCE($1, name), price = COALESCE($2, price),
+         description = COALESCE($3, description), image_url = COALESCE($4, image_url), status = COALESCE($5, status)
+       WHERE id = $6 AND property_id = $7 RETURNING *`,
+      [name?.trim() ?? null, price ?? null, description ?? null, image_url ?? null, status ?? null, req.params.id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Minibar item not found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
+// Replaces one list: the room type's (rate_plan_id null) or a rate plan's.
+async function putMinibarList(req, res, next) {
+  const client = await pool.connect();
+  try {
+    const { room_type_id, rate_plan_id = null, items } = req.body;
+    if (!UUID_RE.test(String(room_type_id))) return res.status(400).json({ error: 'room_type_id is required' });
+    if (rate_plan_id !== null && !UUID_RE.test(String(rate_plan_id))) return res.status(400).json({ error: 'rate_plan_id must be an id or null' });
+    if (!Array.isArray(items)) return res.status(400).json({ error: 'items must be an array' });
+    for (const i of items) {
+      if (!UUID_RE.test(String(i?.minibar_item_id))) return res.status(400).json({ error: 'Each item needs a minibar_item_id' });
+      if (!Number.isInteger(i.quantity) || i.quantity < 1 || i.quantity > 99) return res.status(400).json({ error: 'quantity must be a whole number 1 to 99' });
+      if (typeof i.included !== 'boolean') return res.status(400).json({ error: 'included must be true or false' });
+    }
+    const rt = await client.query('SELECT 1 FROM room_type WHERE id = $1 AND property_id = $2', [room_type_id, req.property_id]);
+    if (!rt.rows.length) return res.status(400).json({ error: 'Unknown room_type_id' });
+    if (rate_plan_id) {
+      const rp = await client.query('SELECT 1 FROM rate_plan WHERE id = $1 AND room_type_id = $2 AND property_id = $3', [rate_plan_id, room_type_id, req.property_id]);
+      if (!rp.rows.length) return res.status(400).json({ error: 'Unknown rate_plan_id for this room type' });
+    }
+    const ids = [...new Set(items.map((i) => i.minibar_item_id))];
+    if (ids.length !== items.length) return res.status(400).json({ error: 'Each item may appear once' });
+    const known = await client.query('SELECT count(*)::int AS n FROM minibar_item WHERE property_id = $1 AND id = ANY($2::uuid[])', [req.property_id, ids]);
+    if (known.rows[0].n !== ids.length) return res.status(400).json({ error: 'Unknown minibar_item_id' });
+
+    await client.query('BEGIN');
+    await client.query('DELETE FROM minibar_list_item WHERE room_type_id = $1 AND rate_plan_id IS NOT DISTINCT FROM $2', [room_type_id, rate_plan_id]);
+    for (const i of items) {
+      await client.query(
+        'INSERT INTO minibar_list_item (room_type_id, rate_plan_id, minibar_item_id, quantity, included) VALUES ($1, $2, $3, $4, $5)',
+        [room_type_id, rate_plan_id, i.minibar_item_id, i.quantity, i.included]
+      );
+    }
+    await client.query('COMMIT');
+    res.json((await client.query(
+      `SELECT li.*, m.name FROM minibar_list_item li JOIN minibar_item m ON m.id = li.minibar_item_id
+       WHERE li.room_type_id = $1 AND li.rate_plan_id IS NOT DISTINCT FROM $2 ORDER BY m.name`,
+      [room_type_id, rate_plan_id]
+    )).rows);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
+// For the booking site: what's in the minibar for a room type and plan.
+async function getMinibarList(req, res, next) {
+  try {
+    const { room_type_id, rate_plan_id } = req.query;
+    if (!UUID_RE.test(String(room_type_id))) return res.status(400).json({ error: 'room_type_id is required' });
+    if (rate_plan_id !== undefined && !UUID_RE.test(String(rate_plan_id))) return res.status(400).json({ error: 'rate_plan_id must be an id' });
+    const rt = await pool.query('SELECT 1 FROM room_type WHERE id = $1 AND property_id = $2', [room_type_id, req.property_id]);
+    if (!rt.rows.length) return res.status(404).json({ error: 'Room type not found' });
+    res.json(await minibar.resolveList(pool, room_type_id, rate_plan_id ?? null));
+  } catch (err) { next(err); }
+}
+
+async function recordMinibar(req, res, next) {
+  try {
+    const job = await loadJob(pool, req.params.id, req.property_id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (!job.booking_id) return res.status(400).json({ error: 'This job has no staying or departing guest to charge' });
+    const out = await minibar.recordUsage(pool, { propertyId: req.property_id, job, items: req.body?.items, userId: req.user?.id });
+    if (out.error) return res.status(400).json({ error: out.error });
+    const row = await hk.fetchJob(pool, job.id, req.property_id);
+    hk.publish(req.property_id, 'minibar-recorded', row);
+    res.json({ job: row, usage: out.rows });
+  } catch (err) { next(err); }
+}
+
 // ── Inspection ──────────────────────────────────────────────────────────────
 
 function checkItemError({ name, pass_mark, sort_order, status }, partial) {
@@ -404,6 +526,7 @@ module.exports = {
   board, getSettings, putSettings, putOverride, deleteOverride, putRoomStatus,
   claimJob, unclaimJob, startJob, finishJob,
   placeExtra,
+  listMinibarItems, createMinibarItem, updateMinibarItem, putMinibarList, getMinibarList, recordMinibar,
   listCheckItems, createCheckItem, updateCheckItem, uploadPhoto, inspectJob,
   loadJob, respondJob, isAdmin, UUID_RE,
 };

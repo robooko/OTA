@@ -26,7 +26,7 @@ async function computeFolio(bookingId, propertyId) {
   if (!bookingRes.rows.length) return null;
   const booking = bookingRes.rows[0];
 
-  const [extrasRes, ordersRes, adjustmentsRes, paymentsRes] = await Promise.all([
+  const [extrasRes, ordersRes, adjustmentsRes, paymentsRes, minibarRes] = await Promise.all([
     pool.query(
       `SELECT be.id, be.quantity, be.unit_price, e.name
        FROM booking_extra be
@@ -56,6 +56,15 @@ async function computeFolio(bookingId, propertyId) {
        ORDER BY paid_at DESC NULLS LAST, id`,
       [bookingId]
     ),
+    // Housekeeping's minibar count; included items are priced 0 and never
+    // reach the folio.
+    pool.query(
+      `SELECT id, item_name, quantity, unit_price, created_at
+       FROM minibar_usage
+       WHERE booking_id = $1 AND unit_price > 0
+       ORDER BY created_at, item_name`,
+      [bookingId]
+    ),
   ]);
 
   const items = [
@@ -83,6 +92,13 @@ async function computeFolio(bookingId, propertyId) {
       description: a.description,
       amount: a.amount,
       created_at: a.created_at,
+    })),
+    ...minibarRes.rows.map((m) => ({
+      type: 'minibar',
+      source_id: m.id,
+      description: m.quantity > 1 ? `${m.item_name} × ${m.quantity}` : m.item_name,
+      amount: fromCents(toCents(m.unit_price) * m.quantity),
+      created_at: m.created_at,
     })),
   ];
 

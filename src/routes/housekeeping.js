@@ -26,6 +26,14 @@ router.post('/jobs/:id/inspections', authenticateOrApiKey, inspect, ctrl.inspect
 
 router.post('/booking-extras/:id/placed', authenticateOrApiKey, ctrl.placeExtra);
 
+router.get('/minibar/items', authenticateOrApiKey, ctrl.listMinibarItems);
+router.post('/minibar/items', authenticateOrApiKey, manage, ctrl.createMinibarItem);
+router.put('/minibar/items/:id', authenticateOrApiKey, manage, ctrl.updateMinibarItem);
+router.put('/minibar/lists', authenticateOrApiKey, manage, ctrl.putMinibarList);
+// The booking site markets this list with its property key: no permission.
+router.get('/minibar/list', authenticateOrApiKey, ctrl.getMinibarList);
+router.put('/jobs/:id/minibar', authenticateOrApiKey, ctrl.recordMinibar);
+
 router.get('/check-items', authenticateOrApiKey, ctrl.listCheckItems);
 router.post('/check-items', authenticateOrApiKey, manage, ctrl.createCheckItem);
 router.put('/check-items/:id', authenticateOrApiKey, manage, ctrl.updateCheckItem);

@@ -397,6 +397,99 @@ const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toI
       assert.equal((await call(ctrl.placeExtra, { property_id: R, user: staffA, params: { id: BE3 } })).statusCode, 404);
       assert.equal((await call(ctrl.placeExtra, { property_id: P, user: staffA, params: { id: 'nope' } })).statusCode, 404);
     });
+
+    // ── Task 6: minibar ──────────────────────────────────────────────────────
+    const minibar = require('../src/lib/minibar');
+    const { computeFolio } = require('../src/lib/folio');
+    const apiKeys = require('../src/lib/apiKeys');
+    const plan = async (name) => (await one(
+      `INSERT INTO rate_plan (property_id, room_type_id, name, refundable, cancel_cutoff_hours, payment_mode) VALUES ($1, $2, $3, true, 48, 'full') RETURNING id`,
+      [P, RT, name])).id;
+    const FLEX = await plan('Flex'); const SAVER = await plan('Saver');
+    const mkItem = async (name, price) => (await call(ctrl.createMinibarItem, { property_id: P, user: admin, body: { name, price } })).body.id;
+    const putList = (body, property = P) => call(ctrl.putMinibarList, { property_id: property, user: admin, body });
+    let PROSECCO, CHOC;
+    await check('minibar catalogue and lists validate', async () => {
+      assert.equal((await call(ctrl.createMinibarItem, { property_id: P, user: admin, body: { name: 'X', price: -1 } })).statusCode, 400);
+      PROSECCO = await mkItem('Prosecco', 30); CHOC = await mkItem('Chocolate', 4);
+      assert.equal((await call(ctrl.listMinibarItems, { property_id: P, user: staffA })).body.length, 2);
+      assert.equal((await putList({ room_type_id: RT, rate_plan_id: null, items: [{ minibar_item_id: PROSECCO, quantity: 0, included: false }] })).statusCode, 400);
+      assert.equal((await putList({ room_type_id: RT, rate_plan_id: null, items: [{ minibar_item_id: PROSECCO, quantity: 1, included: 'no' }] })).statusCode, 400);
+      const foreignItem = (await one(`INSERT INTO minibar_item (property_id, name, price) VALUES ($1, 'Foreign', 1) RETURNING id`, [R])).id;
+      assert.equal((await putList({ room_type_id: RT, rate_plan_id: null, items: [{ minibar_item_id: foreignItem, quantity: 1, included: true }] })).statusCode, 400);
+      assert.equal((await putList({ room_type_id: rtR, rate_plan_id: null, items: [] })).statusCode, 400); // other property's room type
+      const r = await putList({ room_type_id: RT, rate_plan_id: null, items: [
+        { minibar_item_id: PROSECCO, quantity: 1, included: false }, { minibar_item_id: CHOC, quantity: 2, included: true }] });
+      assert.equal(r.statusCode, 200); assert.equal(r.body.length, 2);
+      assert.equal((await putList({ room_type_id: RT, rate_plan_id: FLEX, items: [{ minibar_item_id: PROSECCO, quantity: 1, included: true }] })).statusCode, 200);
+    });
+    await check('resolveList: a plan list replaces the room type list; no plan list falls back', async () => {
+      const base = await minibar.resolveList(pool, RT, null);
+      assert.deepEqual(base.map((i) => [i.name, i.included, i.quantity]), [['Chocolate', true, 2], ['Prosecco', false, 1]]);
+      assert.deepEqual((await minibar.resolveList(pool, RT, FLEX)).map((i) => [i.name, i.included]), [['Prosecco', true]]);
+      assert.equal((await minibar.resolveList(pool, RT, SAVER)).length, 2);
+    });
+    const room107 = (await one(`INSERT INTO room (property_id, room_type_id, room_number, floor) VALUES ($1, $2, '107', 1) RETURNING id`, [P, RT])).id;
+    const room108 = (await one(`INSERT INTO room (property_id, room_type_id, room_number, floor) VALUES ($1, $2, '108', 1) RETURNING id`, [P, RT])).id;
+    const BS = await book(room107, addDays(D, -2), D, 'checked_in', { rate_plan_id: SAVER });
+    const BF = await book(room108, addDays(D, -2), D, 'checked_in', { rate_plan_id: FLEX });
+    await board();
+    const J107 = await jobId(room107, 'checkout'); const J108 = await jobId(room108, 'checkout');
+    const minibarLines = async (bookingId) => (await computeFolio(bookingId, P)).items.filter((i) => i.type === 'minibar');
+    const record = (id, items) => call(ctrl.recordMinibar, { property_id: P, user: staffA, params: { id }, body: { items } });
+    await check('board shows the minibar list for the booking\'s plan', async () => {
+      const row = jobFor(await board(), room108)[0];
+      assert.deepEqual(row.minibar.map((i) => i.name), ['Prosecco']);
+      assert.equal(jobFor(await board(), room107)[0].minibar.length, 2);
+    });
+    await check('charged items go on the folio, included never do', async () => {
+      const r = await record(J107, [{ minibar_item_id: PROSECCO, quantity: 2 }, { minibar_item_id: CHOC, quantity: 5 }]);
+      assert.equal(r.statusCode, 200);
+      const lines = await minibarLines(BS);
+      assert.equal(lines.length, 1); assert.equal(lines[0].description, 'Prosecco × 2'); assert.equal(lines[0].amount, '60.00');
+      assert.ok(published.some((e) => e.event === 'minibar-recorded' && e.payload.id === J107));
+    });
+    await check('re-recording a job replaces its usage', async () => {
+      await record(J107, [{ minibar_item_id: PROSECCO, quantity: 1 }]);
+      const lines = await minibarLines(BS);
+      assert.equal(lines.length, 1); assert.equal(lines[0].amount, '30.00'); assert.equal(lines[0].description, 'Prosecco');
+    });
+    await check('included on the plan: no folio charge at any quantity', async () => {
+      await record(J108, [{ minibar_item_id: PROSECCO, quantity: 3 }]);
+      assert.equal((await minibarLines(BF)).length, 0);
+      assert.equal((await one('SELECT count(*)::int AS n FROM minibar_usage WHERE booking_id = $1', [BF])).n, 1); // still counted for restock
+    });
+    await check('a charge found after checkout raises the balance', async () => {
+      await pool.query(`UPDATE booking SET status = 'checked_out' WHERE id = $1`, [BS]);
+      const before = Number((await computeFolio(BS, P)).balance);
+      await record(J107, [{ minibar_item_id: PROSECCO, quantity: 3 }]);
+      assert.equal(Number((await computeFolio(BS, P)).balance), before + 60);
+    });
+    await check('minibar recording refusals', async () => {
+      assert.equal((await record(J103, [{ minibar_item_id: PROSECCO, quantity: 1 }])).statusCode, 400); // arrival job: no guest yet
+      assert.equal((await record(J107, [{ minibar_item_id: PROSECCO, quantity: -1 }])).statusCode, 400);
+      assert.equal((await record(J107, [{ minibar_item_id: crypto.randomUUID(), quantity: 1 }])).statusCode, 400);
+      assert.equal((await record(J107, 'lots')).statusCode, 400);
+    });
+    const app = require('../src/app');
+    const server = app.listen(0);
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const KEY = `hk_key_${run}`;
+      await apiKeys.create(pool, { property_id: P }, { key: KEY });
+      await check('public minibar list over the property key', async () => {
+        const r = await fetch(`${base}/api/housekeeping/minibar/list?room_type_id=${RT}&rate_plan_id=${FLEX}`, { headers: { 'x-api-key': KEY } });
+        assert.equal(r.status, 200);
+        const body = await r.json();
+        assert.deepEqual(body.map((i) => [i.name, i.included, i.price]), [['Prosecco', true, '30.00']]);
+        const none = await fetch(`${base}/api/housekeeping/minibar/list?room_type_id=${RT}`);
+        assert.equal(none.status, 401);
+        const bad = await fetch(`${base}/api/housekeeping/minibar/list?room_type_id=nope`, { headers: { 'x-api-key': KEY } });
+        assert.equal(bad.status, 400);
+      });
+    } finally {
+      server.close();
+    }
   } finally {
     await cleanup(props);
     await pool.end();
