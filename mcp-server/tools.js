@@ -34,8 +34,60 @@ const DOC_REQUIREMENT_FIELDS = {
   mandatory: z.boolean().optional(), sort_order: z.number().int().optional(), status: z.enum(['active', 'inactive']).optional(),
 };
 
+// Marina catalogue children with plain list/create/update routes (the TABLES
+// loop in src/controllers/marinaCatalogue.js). Berths and doc requirements
+// have hand-written tools. All fields optional on update; `required` on create.
+const num = z.number().nullable().optional();
+const nonNeg = z.number().min(0).nullable().optional();
+const STATUS = z.enum(['active', 'inactive']).optional().describe('inactive hides it');
+const MARINA_CHILDREN = [
+  { kind: 'pontoons', one: 'pontoon', about: 'pontoons (docks): name, map SVG and its bounds', required: ['name'], fields: {
+    name: z.string().max(100), svg_data: z.string().nullable().optional().describe('Pontoon drawing SVG; berths marked data-berth-id="<label>"'),
+    sw_lat: num, sw_lng: num, ne_lat: num, ne_lng: num, rotation: num, sort_order: z.number().int().optional(), status: STATUS } },
+  { kind: 'seasons', one: 'season', about: 'seasons: named date ranges price tiers can hang off (valid_to inclusive)', required: ['name', 'valid_from', 'valid_to'], fields: {
+    name: z.string().max(100), valid_from: z.string().describe('YYYY-MM-DD'), valid_to: z.string().describe('YYYY-MM-DD, inclusive'),
+    repeats_yearly: z.boolean().optional().describe('Applies every year on the same dates (must be shorter than a year)'), status: STATUS } },
+  { kind: 'price-tiers', one: 'price tier', about: 'price tiers: nightly/monthly/yearly price for boats up to a length (and beam), within a season or their own dates', required: ['max_length_m', 'price_per_night'], fields: {
+    season_id: z.string().nullable().optional().describe('A season of this marina; else give valid_from and valid_to'),
+    valid_from: z.string().nullable().optional(), valid_to: z.string().nullable().optional(),
+    max_length_m: z.number().min(0), max_beam_m: nonNeg, price_per_night: z.number().min(0), price_per_month: nonNeg, price_per_year: nonNeg, status: STATUS } },
+  { kind: 'contract-templates', one: 'contract template', about: 'berth contract templates (markdown) sailors agree to, picked by min_nights', required: ['name', 'body_markdown'], fields: {
+    name: z.string().max(100), body_markdown: z.string().max(200000), min_nights: z.number().int().optional(), status: STATUS } },
+  { kind: 'pois', one: 'point of interest', about: 'map points of interest (fuel, showers, office...)', required: ['label', 'lat', 'lng'], fields: {
+    label: z.string().max(100), type: z.string().max(30).nullable().optional(), lat: z.number(), lng: z.number(), status: STATUS } },
+  { kind: 'images', one: 'image', about: 'gallery images (by URL)', required: ['url'], fields: {
+    url: z.string().url(), description: z.string().nullable().optional(), sort_order: z.number().int().optional(), status: STATUS } },
+];
+const snake = (s) => s.replace(/[- ]/g, '_');
+const optionalAll = (fields) => Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v.optional()]));
+const createShape = (c) => Object.fromEntries(Object.entries(c.fields).map(([k, v]) => [k, c.required.includes(k) ? v : v.optional()]));
+
+function marinaChildTools(apiRequest) {
+  return MARINA_CHILDREN.flatMap((c) => [
+    {
+      name: `list_marina_${snake(c.kind)}`,
+      description: `A marina's ${c.about}. Active only unless include_inactive.`,
+      inputSchema: { marina_id: z.string(), include_inactive: z.boolean().optional() },
+      run: ({ marina_id, include_inactive }) => apiRequest('GET', `/api/marina/marinas/${marina_id}/${c.kind}`, { query: include_inactive ? { include_inactive: 1 } : {} }),
+    },
+    {
+      name: `create_marina_${snake(c.one)}`,
+      description: `Add a ${c.one} to a marina. Required: ${c.required.join(', ')}.`,
+      inputSchema: { marina_id: z.string(), ...createShape(c) },
+      run: ({ marina_id, ...body }) => apiRequest('POST', `/api/marina/marinas/${marina_id}/${c.kind}`, { body }),
+    },
+    {
+      name: `update_marina_${snake(c.one)}`,
+      description: `Update a marina ${c.one}. Omit a field to leave it; status inactive removes it (active restores).`,
+      inputSchema: { marina_id: z.string(), id: z.string(), ...optionalAll(c.fields) },
+      run: ({ marina_id, id, ...body }) => apiRequest('PUT', `/api/marina/marinas/${marina_id}/${c.kind}/${id}`, { body }),
+    },
+  ]);
+}
+
 function createTools(apiRequest) {
   return [
+  ...marinaChildTools(apiRequest),
   {
     name: 'search_availability',
     description: 'Search available room types for a date range and party size',
@@ -1322,6 +1374,118 @@ function createTools(apiRequest) {
     description: 'Set the number the AI phone receptionist puts callers through to when they ask for a person, in international format e.g. +441234567890 (null clears it, so the AI only takes messages)',
     inputSchema: { transfer_number: z.string().nullable() },
     run: ({ transfer_number }) => apiRequest('PUT', '/api/property/voice/transfer-number', { body: { transfer_number } }),
+  },
+  {
+    name: 'get_reminder_settings',
+    description: 'Pre-visit reminder settings (spa appointments and restaurant reservations): on/off, email and SMS channels, hours before',
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/property/reminders'),
+  },
+  {
+    name: 'update_reminder_settings',
+    description: 'Change booking reminder settings; omitted fields are unchanged. Admin or full API key.',
+    inputSchema: {
+      reminder_enabled: z.boolean().optional(), reminder_email_enabled: z.boolean().optional(), reminder_sms_enabled: z.boolean().optional(),
+      reminder_hours_before: z.number().int().min(1).max(168).optional(),
+    },
+    run: (body) => apiRequest('PUT', '/api/property/reminders', { body }),
+  },
+  {
+    name: 'get_stripe_status',
+    description: 'Whether the property has its Stripe secret and publishable keys set (online payments need both). Keys are set on the dashboard only.',
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/property/stripe/status'),
+  },
+  {
+    name: 'get_vercel_status',
+    description: "Whether the property's Vercel account is connected (for website analytics and deploys)",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/property/vercel/status'),
+  },
+  {
+    name: 'list_vercel_projects',
+    description: "Projects in the property's connected Vercel account, to pick a vercel_project_id for a website",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/property/vercel/projects'),
+  },
+  {
+    name: 'get_vercel_project_analytics',
+    description: 'Visitor analytics for one Vercel project (default: the last 30 days)',
+    inputSchema: { project_id: z.string(), since: z.string().optional().describe('YYYY-MM-DD'), until: z.string().optional().describe('YYYY-MM-DD') },
+    run: ({ project_id, ...query }) => apiRequest('GET', `/api/property/vercel/projects/${project_id}/analytics`, { query }),
+  },
+  {
+    name: 'get_google_analytics_setup',
+    description: 'The service account email a venue must add as Viewer on its GA4 property before ga4_property_id charts work, and whether GA is configured on this server',
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/property/analytics/google'),
+  },
+  {
+    name: 'list_restaurant_orders',
+    description: 'Restaurant and room service orders, newest first, with items',
+    inputSchema: {
+      restaurant_id: z.string().optional(), booking_id: z.string().optional(), table_id: z.string().optional(), guest_id: z.string().optional(),
+      status: z.enum(['pending', 'confirmed', 'preparing', 'delivered', 'cancelled']).optional(),
+      date_from: z.string().optional().describe('YYYY-MM-DD'), date_to: z.string().optional().describe('YYYY-MM-DD'),
+      skip: z.number().int().min(0).optional(), take: z.number().int().min(1).optional(),
+    },
+    run: (query) => apiRequest('GET', '/api/restaurant-orders', { query }),
+  },
+  {
+    name: 'get_restaurant_order',
+    description: 'One restaurant or room service order with its items',
+    inputSchema: { id: z.string() },
+    run: ({ id }) => apiRequest('GET', `/api/restaurant-orders/${id}`),
+  },
+  {
+    name: 'create_restaurant_order',
+    description: 'Place an order. booking_id = room service charged to the room folio; table_id = a table tab; neither = a pickup order paid upfront by card. item_id comes from the restaurant menu.',
+    inputSchema: {
+      restaurant_id: z.string(),
+      items: z.array(z.object({ item_id: z.string(), quantity: z.number().int().min(1).optional(), variant: z.string().optional() })).min(1),
+      booking_id: z.string().optional(), table_id: z.string().optional(), guest_id: z.string().optional(),
+      notes: z.string().optional(), scheduled_for: z.string().optional().describe('ISO time for a later delivery/pickup'),
+      contact_name: z.string().optional(), contact_email: z.string().optional(), contact_phone: z.string().optional(),
+      force: z.boolean().optional().describe('Open a walk-in table session even if the table has an unseated reservation'),
+    },
+    run: (body) => apiRequest('POST', '/api/restaurant-orders', { body }),
+  },
+  {
+    name: 'update_restaurant_order',
+    description: "Change an order's contact details or notes",
+    inputSchema: { id: z.string(), contact_name: z.string().optional(), contact_email: z.string().optional(), contact_phone: z.string().optional(), notes: z.string().optional() },
+    run: ({ id, ...body }) => apiRequest('PUT', `/api/restaurant-orders/${id}`, { body }),
+  },
+  {
+    name: 'set_restaurant_order_status',
+    description: 'Move an order through pending, confirmed, preparing, delivered, or cancel it. Orders on an open table tab with a join code need staff (the code is asked of API keys).',
+    inputSchema: { id: z.string(), status: z.enum(['pending', 'confirmed', 'preparing', 'delivered', 'cancelled']) },
+    run: ({ id, status }) => apiRequest('PUT', `/api/restaurant-orders/${id}/status`, { body: { status } }),
+  },
+  {
+    name: 'create_marina_berth',
+    description: 'Add one berth to a marina (bulk_upsert_marina_berths for many). label is required; pontoon_id must be a pontoon of this marina.',
+    inputSchema: {
+      marina_id: z.string(), label: z.string().max(30), pontoon_id: z.string().nullable().optional(),
+      lat: num, lng: num, rotation: num,
+      length_m: nonNeg, min_length_m: nonNeg, beam_m: nonNeg, depth_m: nonNeg,
+      price_per_night: nonNeg, price_mode: z.enum(['per_metre', 'fixed']).optional(),
+      status: z.enum(['active', 'maintenance', 'inactive']).optional(), notes: z.string().nullable().optional(),
+      dock_side: z.enum(['end', 'far_end', 'left', 'right']).nullable().optional(),
+    },
+    run: ({ marina_id, ...body }) => apiRequest('POST', `/api/marina/marinas/${marina_id}/berths`, { body }),
+  },
+  {
+    name: 'delete_marina_doc_requirement',
+    description: 'Delete a document requirement nobody has uploaded against (409 otherwise; deactivate it with update_marina_doc_requirement instead)',
+    inputSchema: { marina_id: z.string(), requirement_id: z.string() },
+    run: ({ marina_id, requirement_id }) => apiRequest('DELETE', `/api/marina/marinas/${marina_id}/doc-requirements/${requirement_id}`),
+  },
+  {
+    name: 'send_marina_guest_link',
+    description: "Email the sailor their booking page link (documents, contract, payment). Needs a contact email on the booking and the marina's booking_url set; pending or confirmed bookings only.",
+    inputSchema: { booking_id: z.string() },
+    run: ({ booking_id }) => apiRequest('POST', `/api/marina/bookings/${booking_id}/send-guest-link`),
   },
   {
     name: 'list_spas',

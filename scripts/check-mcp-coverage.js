@@ -20,6 +20,13 @@ const EXCLUDE = [
   /^\S+ \/api\/organization\/api-keys?\b/,             // key management stays with humans
   /^\S+ \/api\/housekeeping\/(jobs\/:p\/|booking-extras\/|photos)/, // cleaning is staff-app only
   /^DELETE \/api\/guests\/:p$/,                        // irreversible, dashboard only
+  /^\S+ \/api\/property\/(api-keys?|staff)\b/,         // keys and staff permission grants
+  /\/(stripe\/(publishable-)?key|vercel\/pat|marina\/key)(\/clear)?$|\/vercel\/disconnect$/, // secrets and connections, dashboard only
+  /^PUT \/api\/property\/(ai-replies|voice)$/,         // mode/auto-send stay admin; tools use the narrow voice routes
+  /^\S+ \/api\/marina\/(guest|sailor|public)\b/,       // guest site and sailor app rails
+  /sailor-versions/,                                   // shared passport docs: bearer only, records who decided
+  /\/images\/upload$/,                                 // raw file upload
+  /^\S+ \/api\/restaurant-table-sessions\b/,           // the table QR app (guest devices)
 ];
 
 const BASELINE = path.join(__dirname, 'mcp-coverage-baseline.json');
@@ -34,10 +41,20 @@ const routes = new Set();
   }
 })(app._router.stack, '');
 
+// Every tool runs once with every argument 'X1'; a route is covered when a
+// tool called it with 'X1' in each :param slot. Catches generated paths
+// (`/marinas/${id}/${kind}`) the source scan below can't read.
+const traced = new Set();
+const dummy = new Proxy({}, { get: (_, k) => (typeof k === 'string' ? 'X1' : undefined) });
+for (const tool of require('../mcp-server/tools').createTools((method, p) => { traced.add(`${method} ${p.split('?')[0].replace(/(.)\/$/, '$1')}`); return Promise.resolve({}); })) {
+  try { Promise.resolve(tool.run(dummy)).catch(() => {}); } catch { /* the source scan still sees it */ }
+}
+// Fallback for tools that throw on dummy args.
 const toolsSrc = fs.readFileSync(path.join(__dirname, '../mcp-server/tools.js'), 'utf8');
-const covered = new Set([...toolsSrc.matchAll(/apiRequest\(\s*'(\w+)',\s*[`'"]([^`'"?]+)/g)].map((m) => `${m[1]} ${norm(m[2])}`));
+const scanned = new Set([...toolsSrc.matchAll(/apiRequest\(\s*'(\w+)',\s*[`'"]([^`'"?]+)/g)].map((m) => `${m[1]} ${norm(m[2].replace(/\$\{[^}]*$/, ''))}`)); // drop a cut-off `${q ? '?..' : ''}`
+const isCovered = (r) => scanned.has(r) || traced.has(r.replace(/:p/g, 'X1'));
 
-const gaps = [...routes].filter((r) => !covered.has(r) && !EXCLUDE.some((re) => re.test(r))).sort();
+const gaps = [...routes].filter((r) => !isCovered(r) && !EXCLUDE.some((re) => re.test(r))).sort();
 
 if (process.argv.includes('--update')) {
   fs.writeFileSync(BASELINE, JSON.stringify(gaps, null, 2) + '\n');
@@ -48,7 +65,7 @@ if (process.argv.includes('--update')) {
 const baseline = new Set(JSON.parse(fs.readFileSync(BASELINE, 'utf8')));
 const fresh = gaps.filter((r) => !baseline.has(r));
 const stale = [...baseline].filter((r) => !gaps.includes(r));
-console.log(`${routes.size} routes, ${covered.size} tool paths, ${gaps.length} known gaps`);
+console.log(`${routes.size} routes, ${traced.size} tool paths, ${gaps.length} known gaps`);
 if (stale.length) console.log(`no longer gaps (run --update to drop):\n  ${stale.join('\n  ')}`);
 if (fresh.length) {
   console.error(`routes with no MCP tool -- add one to mcp-server/tools.js or an EXCLUDE rule:\n  ${fresh.join('\n  ')}`);

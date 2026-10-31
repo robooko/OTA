@@ -14,6 +14,9 @@ const { authenticate, authenticateOrApiKey, requireRole, requireRoleOrApiKey } =
 router.get('/me', authenticateOrApiKey, ctrl.getCurrentProperty);
 router.put('/me', authenticateOrApiKey, ctrl.updateCurrentProperty);
 
+// Reads and low-risk settings: staff, or a FULL api key (MCP, scripts).
+const staffOrFullKey = [authenticateOrApiKey, requireRoleOrApiKey('admin', 'staff')];
+
 // The property's main ('Default') key, old shapes kept for the dashboard.
 router.get('/api-key', authenticate, requireRole('admin'), apiKeys.getLegacy);
 router.post('/api-key/rotate', authenticate, requireRole('admin'), apiKeys.rotateLegacy);
@@ -28,16 +31,16 @@ router.delete('/api-keys/:id', authenticate, requireRole('admin'), apiKeys.remov
 router.get('/staff', authenticate, requireRole('admin'), staff.listStaff);
 router.put('/staff/:clerk_user_id/permissions', authenticate, requireRole('admin'), staff.setStaffPermissions);
 
-router.get('/vercel/projects', authenticate, ctrl.listVercelProjects);
+router.get('/vercel/projects', staffOrFullKey, ctrl.listVercelProjects);
 router.get('/vercel/projects/:projectId/analytics', authenticateOrApiKey, ctrl.getVercelProjectAnalytics);
 router.get('/vercel/connect', authenticate, ctrl.getVercelConnectUrl);
 router.get('/vercel/callback', ctrl.vercelConnectCallback);
-router.get('/vercel/status', authenticate, ctrl.getVercelConnectionStatus);
+router.get('/vercel/status', staffOrFullKey, ctrl.getVercelConnectionStatus);
 router.post('/vercel/disconnect', authenticate, ctrl.disconnectVercel);
 router.put('/vercel/pat', authenticate, requireRole('admin'), ctrl.setVercelPat);
 router.post('/vercel/pat/clear', authenticate, requireRole('admin'), ctrl.clearVercelPat);
 
-router.get('/stripe/status', authenticate, ctrl.getStripeStatus);
+router.get('/stripe/status', staffOrFullKey, ctrl.getStripeStatus);
 router.put('/stripe/key', authenticate, requireRole('admin'), ctrl.setStripeKey);
 router.post('/stripe/key/clear', authenticate, requireRole('admin'), ctrl.clearStripeKey);
 router.put('/stripe/publishable-key', authenticate, requireRole('admin'), ctrl.setStripePublishableKey);
@@ -76,8 +79,8 @@ router.put('/email-branding', authenticateOrApiKey, requireRoleOrApiKey('admin')
 router.get('/agentic-commerce', authenticateOrApiKey, ctrl.getAgenticCommerce);
 router.put('/agentic-commerce', authenticate, requireRole('admin'), ctrl.updateAgenticCommerce);
 
-router.get('/reminders', authenticate, ctrl.getReminderSettings);
-router.put('/reminders', authenticate, requireRole('admin'), ctrl.updateReminderSettings);
+router.get('/reminders', staffOrFullKey, ctrl.getReminderSettings);
+router.put('/reminders', authenticateOrApiKey, requireRoleOrApiKey('admin'), ctrl.updateReminderSettings);
 
 // Writes on the API-key rail too (MCP create/update_website): a website row
 // is just a URL plus which analytics source the dashboard chart reads.

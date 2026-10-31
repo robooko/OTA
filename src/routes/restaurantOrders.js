@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/restaurantOrders');
-const { authenticate, authenticateOrApiKey } = require('../middleware/auth');
+const { authenticate, authenticateOrApiKey, requireRoleOrApiKey } = require('../middleware/auth');
 
 // Menu items
 router.get('/menu', authenticateOrApiKey, ctrl.listMenuItems);
@@ -19,7 +19,7 @@ router.put('/board/:id', authenticateOrApiKey, ctrl.updateBoardItem);
 router.get('/ably-token', authenticate, ctrl.getAblyToken);
 router.get('/', authenticateOrApiKey, ctrl.listOrders);
 router.get('/:id/ably-token', authenticateOrApiKey, ctrl.getOrderAblyToken);
-router.get('/:id', authenticate, ctrl.getOrder);
+router.get('/:id', authenticateOrApiKey, requireRoleOrApiKey('admin', 'staff'), ctrl.getOrder); // staff or a full key
 router.post('/', authenticateOrApiKey, ctrl.createOrder);
 router.put('/:id', authenticateOrApiKey, ctrl.updateOrder);
 router.put('/:id/status', authenticateOrApiKey, ctrl.updateOrderStatus);

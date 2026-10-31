@@ -1,6 +1,7 @@
-// Guests, bookings, payments and folio over MCP: the staff routes take a
-// full API key and refuse a scoped one, each tool maps to its endpoint, and
-// one booking runs end to end through /api/mcp. Fixtures live under a
+// MCP backfill: guests, bookings, payments, folio, property settings,
+// restaurant orders and the marina catalogue. The staff routes take a full
+// API key and refuse a scoped one, each tool maps to its endpoint, and
+// bookings and marina setup run end to end through /api/mcp. Fixtures live under a
 // throwaway property, deleted at the end (pass or fail). Local DB only.
 //   node -r dotenv/config scripts/check-core-mcp.js
 delete process.env.RESEND_API_KEY;
@@ -101,6 +102,39 @@ const apiKeys = require('../src/lib/apiKeys');
       const folio = await rpc('get_booking_folio', { id: booking.id });
       assert.ok(/\\"balance\\":\\"?0(\.00)?\\"?/.test(folio), folio.slice(0, 600));
     });
+
+    await check('property settings and order reads: full key in, scoped key 403', async () => {
+      for (const url of ['/api/property/reminders', '/api/property/stripe/status', '/api/property/vercel/status']) {
+        assert.equal((await hit(KEY, 'GET', url)).status, 200, `full GET ${url}`);
+        assert.equal((await hit(SCOPED, 'GET', url)).status, 403, `scoped GET ${url}`);
+      }
+      assert.equal((await hit(SCOPED, 'PUT', '/api/property/reminders', { reminder_hours_before: 12 })).status, 403);
+      const r = await hit(KEY, 'PUT', '/api/property/reminders', { reminder_hours_before: 12 });
+      assert.equal(r.status, 200);
+      assert.equal((await r.json()).reminder_hours_before, 12);
+      const missing = `/api/restaurant-orders/${crypto.randomUUID()}`;
+      assert.equal((await hit(KEY, 'GET', missing)).status, 404, 'full key passes auth');
+      assert.equal((await hit(SCOPED, 'GET', missing)).status, 403);
+    });
+
+    await check('marina catalogue tools over MCP: create, list and update a pontoon and a season', async () => {
+      const rpc = (name, args) => fetch(`${base}/api/mcp`, {
+        method: 'POST', headers: { 'X-Api-Key': KEY, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
+      }).then((r) => r.text());
+      const M = (await one(`INSERT INTO marina (property_id, name, slug) VALUES ($1, 'Core Marina', $2) RETURNING id`, [P, `core-marina-${run}`])).id;
+      const ok = (text) => { assert.ok(!text.includes('"isError":true'), text.slice(0, 400)); return text; };
+      ok(await rpc('create_marina_pontoon', { marina_id: M, name: 'A' }));
+      const pontoon = await one('SELECT id FROM marina_pontoon WHERE marina_id = $1', [M]);
+      ok(await rpc('update_marina_pontoon', { marina_id: M, id: pontoon.id, sort_order: 3 }));
+      assert.equal((await one('SELECT sort_order FROM marina_pontoon WHERE id = $1', [pontoon.id])).sort_order, 3);
+      ok(await rpc('create_marina_season', { marina_id: M, name: 'Summer', valid_from: '2031-06-01', valid_to: '2031-08-31', repeats_yearly: true }));
+      assert.ok(ok(await rpc('list_marina_seasons', { marina_id: M })).includes('Summer'));
+      ok(await rpc('create_marina_berth', { marina_id: M, label: 'A1', pontoon_id: pontoon.id, length_m: 12 }));
+      assert.equal((await one('SELECT label FROM marina_berth WHERE marina_id = $1', [M])).label, 'A1');
+      const bad = await rpc('create_marina_season', { marina_id: M, name: 'Odd', valid_from: '2031-09-01', valid_to: '2031-08-01' });
+      assert.ok(bad.includes('"isError":true'), 'API validation reaches the agent');
+    });
   } finally {
     server.close();
     if (P) {
@@ -112,6 +146,7 @@ const apiKeys = require('../src/lib/apiKeys');
       await q('DELETE FROM room WHERE property_id = $1');
       await q('DELETE FROM room_type WHERE property_id = $1');
       await q('DELETE FROM guest WHERE property_id = $1');
+      await q('DELETE FROM marina WHERE property_id = $1'); // children cascade
       await q('DELETE FROM api_key WHERE property_id = $1');
       await q('DELETE FROM property WHERE id = $1');
     }
