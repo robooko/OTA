@@ -133,7 +133,7 @@ const app = require('../src/app');
     });
 
     await check('HOTAL costs are in BUXS', async () => {
-      assert.deepEqual(tokens.TOKEN_COSTS, { ai_reply: 2500, reply_send: 2500 });
+      assert.deepEqual(tokens.TOKEN_COSTS, { ai_reply: 2500, reply_send: 2500, voice_call: 5000, sms_conversation: 2500 });
     });
 
     await check('amounts must be integers from 1 to 50,000,000', async () => {

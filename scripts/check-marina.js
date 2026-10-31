@@ -88,10 +88,12 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
       const r = priceStay({ berth: berthA, tiers: [tier({ max_length_m: '8.00' })], arrival: '2027-06-10', departure: '2027-06-11', boatLengthM: 7.5, boatBeamM: null });
       assert.equal(r.tier_id, 't'); // berth is 12 m, boat 7.5 m
     });
-    await check('stay ending the day after valid_to is covered; one more night is not', async () => {
-      const t = [tier({})];
-      assert.equal(priceStay({ berth: berthA, tiers: t, arrival: '2027-06-28', departure: '2027-07-01', boatLengthM: 10, boatBeamM: null }).tier_id, 't');
-      assert.equal(priceStay({ berth: berthA, tiers: t, arrival: '2027-06-28', departure: '2027-07-02', boatLengthM: 10, boatBeamM: null }).tier_id, null);
+    await check('valid_to night takes the tier; a night past it takes the berth price', async () => {
+      const t = [tier({ price_per_night: '80.00' })];
+      const inside = priceStay({ berth: berthA, tiers: t, arrival: '2027-06-28', departure: '2027-07-01', boatLengthM: 10, boatBeamM: null });
+      assert.deepEqual(inside, { nights: 3, total_price: '240.00', tier_id: 't' }); // 3 × 80
+      const over = priceStay({ berth: berthA, tiers: t, arrival: '2027-06-28', departure: '2027-07-02', boatLengthM: 10, boatBeamM: null });
+      assert.deepEqual(over, { nights: 4, total_price: '290.00', tier_id: 't' }); // 3 × 80 + 5 × 10 m
     });
     await check('beam limit applies only when both are set', async () => {
       const t = [tier({ max_beam_m: '3.50' })];
