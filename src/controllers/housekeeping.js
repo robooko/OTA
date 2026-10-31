@@ -394,6 +394,94 @@ async function recordMinibar(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// ── Reports ─────────────────────────────────────────────────────────────────
+
+// Finished attempts on jobs dated in [from, to), with each one's minutes.
+const ATTEMPTS_CTE = `
+  att AS (
+    SELECT c.id, c.job_id, c.cleaner_id, c.cleaner_name, j.room_id,
+           extract(epoch FROM c.finished_at - c.started_at) / 60 AS minutes
+    FROM hk_clean c JOIN hk_job j ON j.id = c.job_id
+    WHERE j.property_id = $1 AND j.date >= $2::date AND j.date < $3::date AND c.finished_at IS NOT NULL
+  ),
+  insp AS (SELECT i.*, a.cleaner_id, a.room_id FROM hk_inspection i JOIN att a ON a.id = i.clean_id),
+  first_insp AS (SELECT DISTINCT ON (job_id) job_id, passed, cleaner_id, room_id FROM insp ORDER BY job_id, created_at)`;
+
+// Guest ratings for stays that ended in range. Each counts once, unweighted,
+// for the cleaner of the last un-failed checkout clean of that room before
+// the guest arrived, and for every cleaner of a stayover/extra clean during
+// the stay (plan call; the spec left weighting to the builder).
+const RATED_CTE = `
+  rated AS (
+    SELECT cr.rating, b.id AS booking_id, b.room_id, b.check_in
+    FROM cleanliness_rating cr JOIN booking b ON b.id = cr.booking_id
+    WHERE cr.property_id = $1 AND cr.rating IS NOT NULL AND b.check_out >= $2::date AND b.check_out < $3::date
+  ),
+  credit AS (
+    SELECT r.rating, x.cleaner_id FROM rated r
+    CROSS JOIN LATERAL (
+      (SELECT c.cleaner_id FROM hk_clean c JOIN hk_job j ON j.id = c.job_id
+        WHERE j.room_id = r.room_id AND j.kind = 'checkout' AND j.date <= r.check_in AND c.finished_at IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM hk_inspection i WHERE i.clean_id = c.id AND NOT i.passed)
+        ORDER BY c.finished_at DESC LIMIT 1)
+      UNION
+      (SELECT c.cleaner_id FROM hk_clean c JOIN hk_job j ON j.id = c.job_id
+        WHERE j.booking_id = r.booking_id AND j.kind IN ('stayover', 'extra') AND c.finished_at IS NOT NULL)
+    ) x
+  )`;
+
+const r2 = (v) => (v == null ? null : Math.round(Number(v) * 100) / 100);
+
+async function reports(req, res, next) {
+  try {
+    const { from, to } = req.query;
+    if (!isDate(from) || !isDate(to)) return res.status(400).json({ error: 'from and to are required (YYYY-MM-DD, to exclusive)' });
+    if (from >= to) return res.status(400).json({ error: 'from must be before to' });
+    const params = [req.property_id, from, to];
+    const byDim = (dim) => `
+      SELECT ${dim} AS key, count(DISTINCT job_id) AS jobs_done, avg(minutes) AS avg_minutes,
+             percentile_cont(0.5) WITHIN GROUP (ORDER BY minutes) AS median_minutes
+      FROM att GROUP BY ${dim}`;
+    const [cleanerTime, roomTime, cleanerInsp, roomInsp, cleanerFirst, roomFirst, cleanerGuest, roomGuest, names, rooms] = await Promise.all([
+      pool.query(`WITH ${ATTEMPTS_CTE} ${byDim('cleaner_id')}`, params),
+      pool.query(`WITH ${ATTEMPTS_CTE} ${byDim('room_id')}`, params),
+      pool.query(`WITH ${ATTEMPTS_CTE} SELECT cleaner_id AS key, avg(score) AS v FROM insp GROUP BY cleaner_id`, params),
+      pool.query(`WITH ${ATTEMPTS_CTE} SELECT room_id AS key, avg(score) AS v FROM insp GROUP BY room_id`, params),
+      pool.query(`WITH ${ATTEMPTS_CTE} SELECT cleaner_id AS key, avg(passed::int) AS v FROM first_insp GROUP BY cleaner_id`, params),
+      pool.query(`WITH ${ATTEMPTS_CTE} SELECT room_id AS key, avg(passed::int) AS v FROM first_insp GROUP BY room_id`, params),
+      pool.query(`WITH ${RATED_CTE} SELECT cleaner_id AS key, avg(rating) AS v FROM credit GROUP BY cleaner_id`, params),
+      pool.query(`WITH ${RATED_CTE} SELECT room_id AS key, avg(rating) AS v FROM rated GROUP BY room_id`, params),
+      pool.query(`SELECT DISTINCT ON (c.cleaner_id) c.cleaner_id, c.cleaner_name FROM hk_clean c JOIN hk_job j ON j.id = c.job_id
+                  WHERE j.property_id = $1 ORDER BY c.cleaner_id, c.started_at DESC`, [req.property_id]),
+      pool.query('SELECT id, room_number FROM room WHERE property_id = $1', [req.property_id]),
+    ]);
+    const map = (r) => new Map(r.rows.map((x) => [x.key, x.v]));
+    const build = (time, insp, first, guest, label) => {
+      const t = new Map(time.rows.map((x) => [x.key, x]));
+      const ins = map(insp); const fir = map(first); const gst = map(guest);
+      const keys = [...new Set([...t.keys(), ...gst.keys()])];
+      return keys.map((key) => ({
+        id: key,
+        ...label(key),
+        jobs_done: Number(t.get(key)?.jobs_done ?? 0),
+        avg_minutes: r2(t.get(key)?.avg_minutes),
+        median_minutes: r2(t.get(key)?.median_minutes),
+        avg_inspection_score: r2(ins.get(key)),
+        first_time_pass_rate: r2(fir.get(key)),
+        avg_guest_score: r2(gst.get(key)),
+      }));
+    };
+    const nameOf = new Map(names.rows.map((x) => [x.cleaner_id, x.cleaner_name]));
+    const numberOf = new Map(rooms.rows.map((x) => [x.id, x.room_number]));
+    res.json({
+      cleaners: build(cleanerTime, cleanerInsp, cleanerFirst, cleanerGuest, (k) => ({ name: nameOf.get(k) ?? null }))
+        .sort((a, b) => b.jobs_done - a.jobs_done),
+      rooms: build(roomTime, roomInsp, roomFirst, roomGuest, (k) => ({ room_number: numberOf.get(k) ?? null }))
+        .sort((a, b) => String(a.room_number).localeCompare(String(b.room_number), undefined, { numeric: true })),
+    });
+  } catch (err) { next(err); }
+}
+
 // ── Inspection ──────────────────────────────────────────────────────────────
 
 function checkItemError({ name, pass_mark, sort_order, status }, partial) {
@@ -525,7 +613,7 @@ async function inspectJob(req, res, next) {
 module.exports = {
   board, getSettings, putSettings, putOverride, deleteOverride, putRoomStatus,
   claimJob, unclaimJob, startJob, finishJob,
-  placeExtra,
+  placeExtra, reports,
   listMinibarItems, createMinibarItem, updateMinibarItem, putMinibarList, getMinibarList, recordMinibar,
   listCheckItems, createCheckItem, updateCheckItem, uploadPhoto, inspectJob,
   loadJob, respondJob, isAdmin, UUID_RE,

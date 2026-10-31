@@ -564,6 +564,66 @@ const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toI
         server7.close();
       }
     }
+
+    // ── Task 8: reports, swagger ─────────────────────────────────────────────
+    {
+      const DT = '2031-05-01';
+      const T = await newProperty('HK Reports', ['rooms', 'housekeeping']);
+      const rtT = (await one(`INSERT INTO room_type (property_id, name, max_occupancy, base_rate) VALUES ($1, 'Std', 2, 100) RETURNING id`, [T])).id;
+      const T1 = (await one(`INSERT INTO room (property_id, room_type_id, room_number) VALUES ($1, $2, 'T1') RETURNING id`, [T, rtT])).id;
+      const T2 = (await one(`INSERT INTO room (property_id, room_type_id, room_number) VALUES ($1, $2, 'T2') RETURNING id`, [T, rtT])).id;
+      const gT = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'T', 'Guest', $2) RETURNING id`, [T, `t-${run}@example.com`])).id;
+      const BT1 = await book(T1, DT, addDays(DT, 2), 'checked_out', { property: T, guest: gT });
+      const BT2 = await book(T2, DT, addDays(DT, 3), 'checked_out', { property: T, guest: gT });
+      const job = async (roomId, date, kind, bookingId = null) => (await one(
+        `INSERT INTO hk_job (property_id, room_id, date, kind, booking_id, status) VALUES ($1, $2, $3, $4, $5, 'done') RETURNING id`, [T, roomId, date, kind, bookingId])).id;
+      const attempt = async (jobId, who, from, to) => (await one(
+        `INSERT INTO hk_clean (job_id, cleaner_id, cleaner_name, started_at, finished_at) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [jobId, who.id, `Name ${who.id}`, `${DT}T${from}:00Z`, `${DT}T${to}:00Z`])).id;
+      const inspectRow = (jobId, cleanId, passed, score, at) => pool.query(
+        `INSERT INTO hk_inspection (job_id, clean_id, inspector_id, passed, score, created_at) VALUES ($1, $2, 'insp', $3, $4, $5)`,
+        [jobId, cleanId, passed, score, `${DT}T${at}:00Z`]);
+      const J1 = await job(T1, DT, 'checkout');
+      await inspectRow(J1, await attempt(J1, staffA, '10:00', '10:30'), false, 3, '10:45');
+      await inspectRow(J1, await attempt(J1, staffA, '11:00', '11:20'), true, 4.5, '11:30');
+      const J2 = await job(T2, DT, 'checkout');
+      await inspectRow(J2, await attempt(J2, staffA, '10:00', '10:40'), true, 5, '10:50');
+      const J3 = await job(T2, addDays(DT, 1), 'stayover', BT2);
+      await attempt(J3, staffB, '09:00', '09:10');
+      for (const [b, r] of [[BT1, 4], [BT2, 2]]) {
+        await pool.query(`INSERT INTO cleanliness_rating (property_id, booking_id, email, token, status, rating, rated_at) VALUES ($1, $2, 'x@example.com', $3, 'sent', $4, now())`,
+          [T, b, crypto.randomBytes(32).toString('hex'), r]);
+      }
+      const report = async (query) => call(ctrl.reports, { property_id: T, user: admin, query });
+      await check('reports: per cleaner', async () => {
+        const r = await report({ from: DT, to: addDays(DT, 5) });
+        assert.equal(r.statusCode, 200);
+        const a = r.body.cleaners.find((c) => c.id === staffA.id); const b = r.body.cleaners.find((c) => c.id === staffB.id);
+        assert.deepEqual(a, { id: staffA.id, name: `Name ${staffA.id}`, jobs_done: 2, avg_minutes: 30, median_minutes: 30, avg_inspection_score: 4.17, first_time_pass_rate: 0.5, avg_guest_score: 3 });
+        assert.deepEqual(b, { id: staffB.id, name: `Name ${staffB.id}`, jobs_done: 1, avg_minutes: 10, median_minutes: 10, avg_inspection_score: null, first_time_pass_rate: null, avg_guest_score: 2 });
+      });
+      await check('reports: per room', async () => {
+        const r = await report({ from: DT, to: addDays(DT, 5) });
+        const t1 = r.body.rooms.find((x) => x.id === T1); const t2 = r.body.rooms.find((x) => x.id === T2);
+        assert.deepEqual(t1, { id: T1, room_number: 'T1', jobs_done: 1, avg_minutes: 25, median_minutes: 25, avg_inspection_score: 3.75, first_time_pass_rate: 0, avg_guest_score: 4 });
+        assert.deepEqual(t2, { id: T2, room_number: 'T2', jobs_done: 2, avg_minutes: 25, median_minutes: 25, avg_inspection_score: 5, first_time_pass_rate: 1, avg_guest_score: 2 });
+      });
+      await check('reports: range and validation', async () => {
+        assert.equal((await report({ from: DT })).statusCode, 400);
+        assert.equal((await report({ from: addDays(DT, 2), to: DT })).statusCode, 400);
+        const later = await report({ from: addDays(DT, 1), to: addDays(DT, 2) }); // only the stayover
+        assert.deepEqual(later.body.cleaners.map((c) => c.id), [staffB.id]);
+      });
+      await check('swagger documents the housekeeping and cleanliness paths', async () => {
+        delete require.cache[require.resolve('../src/docs/swagger')];
+        const spec = require('../src/docs/swagger');
+        for (const p of ['/api/housekeeping/board', '/api/housekeeping/jobs/{id}/inspections', '/api/housekeeping/minibar/list', '/api/housekeeping/reports', '/api/cleanliness/{token}']) {
+          assert.ok(spec.paths[p], `missing ${p}`);
+        }
+        assert.match(JSON.stringify(spec.paths['/api/bookings/{id}']), /Room not ready/);
+        assert.match(JSON.stringify(spec.paths['/api/housekeeping/jobs/{id}/inspections']), /Missing permission/);
+      });
+    }
   } finally {
     await cleanup(props);
     await pool.end();

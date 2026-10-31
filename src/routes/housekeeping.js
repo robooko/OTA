@@ -10,6 +10,8 @@ const express = require('express');
 
 router.get('/board', authenticateOrApiKey, ctrl.board);
 
+router.get('/reports', authenticateOrApiKey, ctrl.reports);
+
 router.get('/settings', authenticateOrApiKey, ctrl.getSettings);
 router.put('/settings', authenticateOrApiKey, manage, ctrl.putSettings);
 
