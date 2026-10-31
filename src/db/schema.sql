@@ -159,6 +159,17 @@ CREATE TABLE IF NOT EXISTS property_website (
   created_at         TIMESTAMPTZ DEFAULT now()
 );
 
+-- Every competitor report fetched for a website (append-only; newest = latest)
+-- -- see migrate-2026-10-31-website-seo-report.sql and src/lib/dataForSeo.js.
+CREATE TABLE IF NOT EXISTS website_seo_report (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  website_id  UUID        NOT NULL REFERENCES property_website(id),
+  report      JSONB       NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS website_seo_report_website_created_idx
+  ON website_seo_report (website_id, created_at DESC);
+
 -- Guests
 CREATE TABLE IF NOT EXISTS guest (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

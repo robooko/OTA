@@ -74,6 +74,10 @@ router.get('/websites', authenticateOrApiKey, ctrl.listWebsites);
 router.post('/websites', authenticateOrApiKey, ctrl.createWebsite);
 router.put('/websites/:id', authenticateOrApiKey, ctrl.updateWebsite);
 router.get('/websites/:id/analytics', authenticateOrApiKey, ctrl.getWebsiteAnalytics);
+// Competitor reports from DataForSEO. POST is a paid lookup (rate-limited
+// per website in the controller); GET only reads saved reports.
+router.get('/websites/:id/competitors', authenticateOrApiKey, ctrl.getWebsiteCompetitors);
+router.post('/websites/:id/competitors', authenticateOrApiKey, ctrl.refreshWebsiteCompetitors);
 // Tells Settings which service-account address a venue grants Viewer access
 // to in GA4. No secret in the response -- the email is meant to be shared.
 router.get('/analytics/google', authenticateOrApiKey, ctrl.getGoogleAnalyticsSetup);

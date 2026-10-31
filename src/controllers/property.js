@@ -6,6 +6,7 @@ const { isConfigured: aiConfigured, MODEL: AI_MODEL } = require('../lib/aiReplie
 const twilio = require('../lib/twilio');
 const { PUBLIC_BASE_URL } = require('./voice');
 const googleAnalytics = require('../lib/googleAnalytics');
+const dataForSeo = require('../lib/dataForSeo');
 
 // Toggleable sidebar modules/dashboard sections -- see
 // migrate-2026-09-12-property-enabled-modules.sql. Dashboard/Settings/Docs/
@@ -370,6 +371,81 @@ async function getWebsiteAnalytics(req, res, next) {
     const analytics = await fetchVercelAnalytics({ token, teamId, projectId: vercel_project_id, sinceIso, untilIso });
     if (!analytics) return res.status(502).json({ error: 'Failed to fetch analytics from Vercel' });
     res.json({ ...analytics, source: 'vercel' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// A refresh is ~$0.05 of DataForSEO calls, so one per website per 10 minutes
+// stops a double click (or a leaked API key in a loop) from repeating it.
+const SEO_REFRESH_COOLDOWN = '10 minutes';
+// DataForSEO location_name, e.g. "United Kingdom" or "Bedford,England,United Kingdom".
+const SEO_LOCATION = /^[A-Za-z .'-]+(,[A-Za-z .'-]+){0,3}$/;
+
+async function findWebsite(req) {
+  if (!isValidUuid(req.params.id)) return null;
+  const { rows } = await pool.query(
+    "SELECT id, url FROM property_website WHERE id = $1 AND property_id = $2 AND status = 'active'",
+    [req.params.id, req.property_id]
+  );
+  return rows[0] ?? null;
+}
+
+// Latest saved report, or every one (newest first) with ?history=1. Free:
+// reads OTA's own rows, never DataForSEO.
+async function getWebsiteCompetitors(req, res, next) {
+  try {
+    const website = await findWebsite(req);
+    if (!website) return res.status(404).json({ error: 'Website not found' });
+    const history = req.query.history === '1' || req.query.history === 'true';
+    const { rows } = await pool.query(
+      `SELECT id, report, created_at FROM website_seo_report WHERE website_id = $1
+       ORDER BY created_at DESC ${history ? '' : 'LIMIT 1'}`,
+      [website.id]
+    );
+    if (history) return res.json(rows);
+    if (!rows.length) return res.status(404).json({ error: 'No competitor report yet' });
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Fetches a new report from DataForSEO and appends it. competitors (the
+// brief's named rivals) and location come with the request, not stored --
+// OTA keeps only the reports themselves.
+async function refreshWebsiteCompetitors(req, res, next) {
+  try {
+    const { competitors = [], location = 'United Kingdom' } = req.body ?? {};
+    if (!Array.isArray(competitors) || competitors.length > 20 || !competitors.every((c) => typeof c === 'string' && dataForSeo.bareDomain(c))) {
+      return res.status(400).json({ error: 'competitors must be an array of up to 20 domains' });
+    }
+    if (typeof location !== 'string' || location.length > 100 || !SEO_LOCATION.test(location)) {
+      return res.status(400).json({ error: 'location must be a DataForSEO location name, e.g. "United Kingdom"' });
+    }
+    const website = await findWebsite(req);
+    if (!website) return res.status(404).json({ error: 'Website not found' });
+    const domain = dataForSeo.bareDomain(website.url);
+    if (!domain) return res.status(400).json({ error: 'Website url has no domain to look up' });
+    if (!dataForSeo.isConfigured()) return res.status(503).json({ error: 'DataForSEO is not configured on this server' });
+
+    const { rows: recent } = await pool.query(
+      `SELECT 1 FROM website_seo_report WHERE website_id = $1 AND created_at > now() - $2::interval LIMIT 1`,
+      [website.id, SEO_REFRESH_COOLDOWN]
+    );
+    if (recent.length) return res.status(429).json({ error: `A report was fetched in the last ${SEO_REFRESH_COOLDOWN}; GET the latest instead` });
+
+    let report;
+    try {
+      report = await dataForSeo.competitorReport({ domain, competitors, location });
+    } catch (err) {
+      return res.status(502).json({ error: err.message });
+    }
+    const { rows } = await pool.query(
+      'INSERT INTO website_seo_report (website_id, report) VALUES ($1, $2) RETURNING id, report, created_at',
+      [website.id, report]
+    );
+    res.status(201).json(rows[0]);
   } catch (err) {
     next(err);
   }
@@ -1096,7 +1172,7 @@ module.exports = {
   getVoiceSettings, updateVoiceSettings, updateVoiceTransferNumber, updateVoiceEnabled,
   searchVoiceNumbers, provisionVoiceNumber, releaseVoiceNumber,
   getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
-  listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, listVercelProjects, getVercelProjectAnalytics, getGoogleAnalyticsSetup,
+  listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, getWebsiteCompetitors, refreshWebsiteCompetitors, listVercelProjects, getVercelProjectAnalytics, getGoogleAnalyticsSetup,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,
   setVercelPat, clearVercelPat,
   getStripeStatus, setStripeKey, clearStripeKey, setStripePublishableKey, clearStripePublishableKey,

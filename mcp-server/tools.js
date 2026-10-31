@@ -940,6 +940,25 @@ function createTools(apiRequest) {
     run: ({ id, ...query }) => apiRequest('GET', `/api/property/websites/${id}/analytics`, { query }),
   },
   {
+    name: 'get_website_competitors',
+    description: "A website's saved competitor report from DataForSEO: discovered rivals (avg position, shared keywords, estimated traffic) and, per compared competitor, keywords they rank for that the site doesn't. Free -- reads saved reports. history=true returns every report, newest first.",
+    inputSchema: {
+      id: z.string().uuid(),
+      history: z.boolean().optional(),
+    },
+    run: ({ id, history }) => apiRequest('GET', `/api/property/websites/${id}/competitors`, { query: history ? { history: '1' } : {} }),
+  },
+  {
+    name: 'refresh_website_competitors',
+    description: "Fetch a new competitor report from DataForSEO and save it (paid, roughly $0.05; at most once per website every 10 minutes). Without competitors, the top 3 discovered rivals are compared.",
+    inputSchema: {
+      id: z.string().uuid(),
+      competitors: z.array(z.string()).max(20).optional().describe("Rival domains to compare, e.g. from the site's brief; the first 5 are used"),
+      location: z.string().optional().describe('DataForSEO location name; defaults to "United Kingdom"'),
+    },
+    run: ({ id, ...body }) => apiRequest('POST', `/api/property/websites/${id}/competitors`, { body }),
+  },
+  {
     name: 'get_email_branding',
     description: "The property's stored default branding for booking and enquiry emails (logo, accent colour, header background, cancel link), plus its post-visit Google review request settings. This is the saved default -- distinct from the per-request `branding` some booking tools accept, which styles one email and is never stored.",
     inputSchema: {},
