@@ -27,6 +27,11 @@ const EXCLUDE = [
   /sailor-versions/,                                   // shared passport docs: bearer only, records who decided
   /\/images\/upload$/,                                 // raw file upload
   /^\S+ \/api\/restaurant-table-sessions\b/,           // the table QR app (guest devices)
+  /^\S+ \/api\/(buxs|integrations|quickbooks|organization|site|sailor)\b/, // service secret, org-level (no property) and sailor app rails
+  /^(POST|PUT) \/api\/beach-club\/|^GET \/api\/beach-club\/bookings$/, // global env API_KEY, not a property key: always 401 over MCP
+  /^PUT \/api\/billing$/,                              // billing settings, admin dashboard
+  /^PUT \/api\/proshop\/baskets$|\/baskets\/mine$/,    // a shopper's own basket
+  /^GET \/api\/golf\/bookings\/live$/,                 // dashboard feed; list_golf_bookings covers it
 ];
 
 const BASELINE = path.join(__dirname, 'mcp-coverage-baseline.json');
