@@ -24,6 +24,8 @@ router.post('/jobs/:id/start', authenticateOrApiKey, ctrl.startJob);
 router.post('/jobs/:id/finish', authenticateOrApiKey, ctrl.finishJob);
 router.post('/jobs/:id/inspections', authenticateOrApiKey, inspect, ctrl.inspectJob);
 
+router.post('/booking-extras/:id/placed', authenticateOrApiKey, ctrl.placeExtra);
+
 router.get('/check-items', authenticateOrApiKey, ctrl.listCheckItems);
 router.post('/check-items', authenticateOrApiKey, manage, ctrl.createCheckItem);
 router.put('/check-items/:id', authenticateOrApiKey, manage, ctrl.updateCheckItem);

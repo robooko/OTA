@@ -247,6 +247,31 @@ async function finishJob(req, res, next) {
   }
 }
 
+// ── Arrival extras ──────────────────────────────────────────────────────────
+
+// Ticks a booked extra as placed in the room. A second tick keeps the first
+// time and person.
+async function placeExtra(req, res, next) {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Booking extra not found' });
+    const { rows } = await pool.query(
+      `UPDATE booking_extra be SET placed_at = COALESCE(be.placed_at, now()), placed_by = COALESCE(be.placed_by, $1)
+       FROM booking b
+       WHERE be.id = $2 AND b.id = be.booking_id AND b.property_id = $3
+       RETURNING be.*, b.room_id`,
+      [req.user?.id ?? null, req.params.id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Booking extra not found' });
+    const { room_id, ...placed } = rows[0];
+    const jobs = await pool.query('SELECT id FROM hk_job WHERE property_id = $1 AND arriving_booking_id = $2', [req.property_id, placed.booking_id]);
+    for (const { id } of jobs.rows) {
+      const job = await hk.fetchJob(pool, id, req.property_id);
+      if (job) hk.publish(req.property_id, 'job-updated', job);
+    }
+    res.json(placed);
+  } catch (err) { next(err); }
+}
+
 // ── Inspection ──────────────────────────────────────────────────────────────
 
 function checkItemError({ name, pass_mark, sort_order, status }, partial) {
@@ -378,6 +403,7 @@ async function inspectJob(req, res, next) {
 module.exports = {
   board, getSettings, putSettings, putOverride, deleteOverride, putRoomStatus,
   claimJob, unclaimJob, startJob, finishJob,
+  placeExtra,
   listCheckItems, createCheckItem, updateCheckItem, uploadPhoto, inspectJob,
   loadJob, respondJob, isAdmin, UUID_RE,
 };

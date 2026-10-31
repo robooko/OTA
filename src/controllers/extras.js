@@ -14,11 +14,12 @@ async function listExtras(req, res, next) {
 
 async function createExtra(req, res, next) {
   try {
-    const { name, description, price } = req.body;
+    const { name, description, price, place_in_room } = req.body;
     if (!name || price == null) return res.status(400).json({ error: 'name and price are required' });
+    if (place_in_room !== undefined && typeof place_in_room !== 'boolean') return res.status(400).json({ error: 'place_in_room must be true or false' });
     const { rows } = await pool.query(
-      `INSERT INTO extra (property_id, name, description, price) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [req.property_id, name, description ?? null, price]
+      `INSERT INTO extra (property_id, name, description, price, place_in_room) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [req.property_id, name, description ?? null, price, place_in_room ?? false]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -26,15 +27,18 @@ async function createExtra(req, res, next) {
 
 async function updateExtra(req, res, next) {
   try {
-    const { name, description, price, status } = req.body;
+    const { name, description, price, status, place_in_room } = req.body;
+    // Housekeeping puts place_in_room extras in the room before arrival.
+    if (place_in_room !== undefined && typeof place_in_room !== 'boolean') return res.status(400).json({ error: 'place_in_room must be true or false' });
     const { rows } = await pool.query(
       `UPDATE extra SET
-         name        = COALESCE($1, name),
-         description = COALESCE($2, description),
-         price       = COALESCE($3, price),
-         status      = COALESCE($4, status)
+         name          = COALESCE($1, name),
+         description   = COALESCE($2, description),
+         price         = COALESCE($3, price),
+         status        = COALESCE($4, status),
+         place_in_room = COALESCE($7, place_in_room)
        WHERE id = $5 AND property_id = $6 RETURNING *`,
-      [name, description, price, status, req.params.id, req.property_id]
+      [name, description, price, status, req.params.id, req.property_id, place_in_room ?? null]
     );
     if (!rows.length) return res.status(404).json({ error: 'Extra not found' });
     res.json(rows[0]);

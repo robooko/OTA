@@ -5,6 +5,7 @@ const { computeFolio, toCents } = require('../lib/folio');
 const { applyAdjustment, termsSnapshot, guestCancelDecision, PAY_WINDOW_MINUTES } = require('../lib/ratePlans');
 const roomEmails = require('../lib/roomBookingEmails');
 const roomPayments = require('../lib/roomPayments');
+const housekeeping = require('../lib/housekeeping');
 const { fetchJoinedBooking } = roomPayments;
 
 function isValidMetadata(v) {
@@ -370,7 +371,7 @@ async function updateBooking(req, res, next) {
       return res.status(400).json({ error: `status ${status} is set by the system` });
     }
 
-    const beforeRes = await pool.query('SELECT status FROM booking WHERE id = $1 AND property_id = $2', [
+    const beforeRes = await pool.query('SELECT status, room_id FROM booking WHERE id = $1 AND property_id = $2', [
       req.params.id,
       req.property_id,
     ]);
@@ -403,6 +404,16 @@ async function updateBooking(req, res, next) {
       }
     }
 
+    // Soft check-in gate: the room hasn't been cleaned (or passed
+    // inspection) yet. Housekeeping properties only; force overrides.
+    if (status === 'checked_in' && statusBefore !== 'checked_in' && req.body.force !== true
+        && await housekeeping.housekeepingEnabled(pool, req.property_id)) {
+      const room = (await pool.query('SELECT housekeeping_status FROM room WHERE id = $1', [beforeRes.rows[0].room_id])).rows[0];
+      if (room && room.housekeeping_status !== 'ready') {
+        return res.status(409).json({ error: 'Room not ready', housekeeping_status: room.housekeeping_status });
+      }
+    }
+
     const { rows } = await pool.query(
       `UPDATE booking SET
          status   = COALESCE($1, status),
@@ -421,6 +432,9 @@ async function updateBooking(req, res, next) {
       // fetchJoinedBooking), so a partial payload here blanked out the
       // guest name / room line on every status change, not just creation.
       publishBookingStatusChanged(req.property_id, bookedFull).catch((err) => console.error('Ably publish failed:', err.message));
+      if (rows[0].status === 'checked_out') {
+        housekeeping.onCheckedOut(req.property_id, rows[0].room_id).catch((err) => console.error('Housekeeping checkout failed:', err.message));
+      }
     }
 
     res.json(bookedFull);

@@ -278,6 +278,14 @@ async function listJobs(db, propertyId, date) {
   return rows.map(shapeJob);
 }
 
+// A guest left: the room needs cleaning, and today's board gets its job
+// (normally already there from the expected departure).
+async function onCheckedOut(propertyId, roomId) {
+  if (!(await housekeepingEnabled(pool, propertyId))) return;
+  await setRoomStatus(pool, propertyId, roomId, 'dirty');
+  await module.exports.ensureJobs(pool, propertyId, await propertyToday(pool, propertyId));
+}
+
 // Inspection photos: public blob, random suffix (same call as
 // marinaDocuments.putPublic). Seam -- the check script swaps it.
 async function putPhoto(pathname, buf, contentType) {
@@ -288,7 +296,7 @@ async function putPhoto(pathname, buf, contentType) {
 }
 
 module.exports = {
-  putPhoto,
+  putPhoto, onCheckedOut,
   nightIndex, stayoverDue, linenDue, scoreInspection, statusAfterFinish,
   ROOM_STATUSES, housekeepingEnabled, propertyToday, staffName, publish, setRoomStatus,
   ensureJobs, fetchJob, listJobs,

@@ -347,6 +347,56 @@ const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toI
       assert.deepEqual((await call(ctrl.listCheckItems, { property_id: P, user: staffA })).body.map((i) => i.name), ['Bathroom']);
       assert.equal((await call(ctrl.updateCheckItem, { property_id: P, user: admin, params: { id: FLOOR }, body: { pass_mark: 9 } })).statusCode, 400);
     });
+
+    // ── Task 5: booking hooks, arrival extras ────────────────────────────────
+    const bookingsCtrl = require('../src/controllers/bookings');
+    const extrasCtrl = require('../src/controllers/extras');
+    const until = async (fn, ms = 3000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await fn()) return true; await new Promise((r) => setTimeout(r, 50)); } return false; };
+    const room106 = (await one(`INSERT INTO room (property_id, room_type_id, room_number, floor) VALUES ($1, $2, '106', 1) RETURNING id`, [P, RT])).id;
+    const B6 = await book(room106, D, addDays(D, 1), 'confirmed');
+    const setBooking = (property, id, body) => call(bookingsCtrl.updateBooking, { property_id: property, user: staffA, params: { id }, body });
+    await check('check-in into a room that is not ready is 409 unless forced', async () => {
+      await pool.query(`UPDATE room SET housekeeping_status = 'dirty' WHERE id = $1`, [room106]);
+      const r = await setBooking(P, B6, { status: 'checked_in' });
+      assert.equal(r.statusCode, 409); assert.deepEqual(r.body, { error: 'Room not ready', housekeeping_status: 'dirty' });
+      assert.equal((await setBooking(P, B6, { status: 'checked_in', force: true })).statusCode, 200);
+    });
+    await check('checking out makes the room dirty and builds its job', async () => {
+      await pool.query(`UPDATE room SET housekeeping_status = 'ready' WHERE id = $1`, [room106]);
+      assert.equal((await setBooking(P, B6, { status: 'checked_out', force: true })).statusCode, 200);
+      assert.ok(await until(async () => (await roomStatus(room106)) === 'dirty'), 'room went dirty');
+    });
+    const R = await newProperty('HK Off Hooks', null);
+    const rtR = (await one(`INSERT INTO room_type (property_id, name, max_occupancy, base_rate) VALUES ($1, 'Std', 2, 100) RETURNING id`, [R])).id;
+    const roomR = (await one(`INSERT INTO room (property_id, room_type_id, room_number) VALUES ($1, $2, 'R1') RETURNING id`, [R, rtR])).id;
+    const gR = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'R', 'Guest', $2) RETURNING id`, [R, `r-${run}@example.com`])).id;
+    const BR = await book(roomR, D, addDays(D, 1), 'confirmed', { property: R, guest: gR });
+    await check('module off: no check-in gate, checkout leaves the room alone', async () => {
+      await pool.query(`UPDATE room SET housekeeping_status = 'dirty' WHERE id = $1`, [roomR]);
+      assert.equal((await setBooking(R, BR, { status: 'checked_in' })).statusCode, 200);
+      await pool.query(`UPDATE room SET housekeeping_status = 'ready' WHERE id = $1`, [roomR]);
+      assert.equal((await setBooking(R, BR, { status: 'checked_out', force: true })).statusCode, 200);
+      await hk.onCheckedOut(R, roomR);
+      assert.equal(await roomStatus(roomR), 'ready');
+    });
+    await check('extras: place_in_room validated and saved', async () => {
+      assert.equal((await call(extrasCtrl.createExtra, { property_id: P, user: admin, body: { name: 'Prosecco', price: 40, place_in_room: 'x' } })).statusCode, 400);
+      const c = await call(extrasCtrl.createExtra, { property_id: P, user: admin, body: { name: 'Prosecco', price: 40, place_in_room: true } });
+      assert.equal(c.statusCode, 201); assert.equal(c.body.place_in_room, true);
+      const u = await call(extrasCtrl.updateExtra, { property_id: P, user: admin, params: { id: c.body.id }, body: { place_in_room: false } });
+      assert.equal(u.body.place_in_room, false);
+      assert.equal((await call(extrasCtrl.updateExtra, { property_id: P, user: admin, params: { id: c.body.id }, body: { place_in_room: 1 } })).statusCode, 400);
+    });
+    await check('placing an extra: idempotent, shows on the board, property-scoped', async () => {
+      const a = await call(ctrl.placeExtra, { property_id: P, user: staffA, params: { id: BE3 } });
+      assert.equal(a.statusCode, 200); assert.ok(a.body.placed_at); assert.equal(a.body.placed_by, staffA.id);
+      const b = await call(ctrl.placeExtra, { property_id: P, user: staffB, params: { id: BE3 } });
+      assert.equal(b.body.placed_at.toISOString(), a.body.placed_at.toISOString()); assert.equal(b.body.placed_by, staffA.id);
+      const row = jobFor(await board(), room['103'])[0];
+      assert.equal(row.extras_to_place[0].placed_by, staffA.id);
+      assert.equal((await call(ctrl.placeExtra, { property_id: R, user: staffA, params: { id: BE3 } })).statusCode, 404);
+      assert.equal((await call(ctrl.placeExtra, { property_id: P, user: staffA, params: { id: 'nope' } })).statusCode, 404);
+    });
   } finally {
     await cleanup(props);
     await pool.end();
