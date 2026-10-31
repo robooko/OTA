@@ -96,7 +96,8 @@ async function searchAvailability(req, res, next) {
          rt.description,
          rt.max_occupancy,
          MIN(rta.available_rooms) AS min_available,
-         MIN(rta.min_rate)        AS from_rate
+         MIN(rta.min_rate)        AS from_rate,
+         ARRAY_AGG(rta.min_rate)  AS night_rates
        FROM room_type_availability rta
        JOIN room_type rt ON rt.id = rta.room_type_id
        WHERE rta.property_id = $1
@@ -134,9 +135,17 @@ async function searchAvailability(req, res, next) {
         });
       }
     }
-    res.json(rows.map((r) => ({
+    // total_rate: the stay at each night's cheapest rate, adjusted per night as
+    // a booking is priced.
+    const total = (nights, pct) => Math.round(nights.reduce((sum, n) => sum + applyAdjustment(n, pct) * 100, 0)) / 100;
+    res.json(rows.map(({ night_rates, ...r }) => ({
       ...r,
-      plans: (plansByType[r.room_type_id] ?? []).map((p) => ({ ...p, from_rate: applyAdjustment(r.from_rate, p.adjustment_pct) })),
+      total_rate: total(night_rates, 0),
+      plans: (plansByType[r.room_type_id] ?? []).map((p) => ({
+        ...p,
+        from_rate: applyAdjustment(r.from_rate, p.adjustment_pct),
+        total_rate: total(night_rates, p.adjustment_pct),
+      })),
     })));
   } catch (err) {
     next(err);
