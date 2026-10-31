@@ -337,6 +337,14 @@ async function publishMarinaGuestUpdate(bookingId, status) {
 // Subscribe-only, one channel, short-lived: handed to a guest holding the
 // booking token (or a sailor's own bookings: pass an array). OTA issued no
 // TokenRequests before this.
+// Housekeeping board events (job-updated, room-status-changed,
+// inspection-failed, minibar-recorded) on one property channel. Payloads are
+// full joined rows -- the app replaces list items wholesale.
+async function publishHousekeeping(propertyId, event, payload) {
+  if (!client) return;
+  await client.channels.get(`property:${propertyId}:housekeeping`).publish(event, payload);
+}
+
 async function createSubscribeTokenRequest(channels) {
   if (!client) return null;
   const capability = Object.fromEntries([].concat(channels).map((c) => [c, ['subscribe']]));
@@ -344,6 +352,7 @@ async function createSubscribeTokenRequest(channels) {
 }
 
 module.exports = {
+  publishHousekeeping,
   publishMarinaBooking,
   publishMarinaGuestUpdate,
   createSubscribeTokenRequest,
