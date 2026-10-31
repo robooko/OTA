@@ -135,4 +135,4 @@ function startReviewRequestJob() {
   timer.unref();
 }
 
-module.exports = { claimDue, claimRetries, sweep, startReviewRequestJob, MAX_ATTEMPTS };
+module.exports = { claimDue, claimRetries, sweep, startReviewRequestJob, MAX_ATTEMPTS, OTA_API_BASE_URL };

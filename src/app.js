@@ -102,6 +102,8 @@ app.use('/api/billing', billingRoutes);
 // forge and forge-app, server to server (X-Buxs-Secret); see controllers/buxs.js.
 app.use('/api/buxs', buxsRoutes);
 app.use('/api/review-opt-out', reviewRoutes);
+// The guest's cleanliness rating form (housekeeping); token in the path, no auth.
+app.use('/api/cleanliness', require('./routes/cleanliness'));
 app.use('/api/basket-reminder-opt-out', require('./routes/basketOptOut'));
 app.use('/api/review-requests', reviewRequestRoutes);
 app.use('/api/marina', marinaRoutes);

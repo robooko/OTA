@@ -454,6 +454,33 @@ async function sendReviewRequest({ to, name, propertyName, branding, reviewUrl, 
   return data.id;
 }
 
+// Housekeeping's post-stay cleanliness rating: one button to a short OTA
+// form. Same skeleton and unsubscribe footer as sendReviewRequest.
+async function sendCleanlinessRequest({ to, name, propertyName, branding, formUrl, optOutUrl, idempotencyKey }) {
+  if (!client) throw new Error('Resend not configured');
+  const subject = `How clean was your room at ${propertyName}?`;
+  const greeting = name ? `Hi ${name},` : 'Hi there,';
+  const note = `Thanks for staying with us at ${propertyName}. How clean was your room? It takes ten seconds and goes straight to our housekeeping team.`;
+  const text = [greeting, '', note, '', `Rate your room: ${formUrl}`, '', `Don't want these? Unsubscribe: ${optOutUrl}`].join('\n');
+  const { data, error } = await client.emails.send({
+    from: `${propertyName} via Forge <bookings@hotal.forge-build.co.uk>`,
+    to,
+    subject,
+    text,
+    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.6;max-width:600px;margin:0 auto;">
+      ${brandingHeaderHtml(branding, propertyName)}
+      <p style="margin:0 0 16px;">${escapeHtml(greeting)}</p>
+      <p style="margin:0 0 20px;">${escapeHtml(note)}</p>
+      <div style="margin:20px 0;">
+        <a href="${escapeHtml(formUrl)}" style="display:inline-block;background:${branding?.brand_color || '#1a1a1a'};color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 22px;border-radius:6px;">Rate your room</a>
+      </div>
+      <p style="margin:24px 0 0;font-size:12px;"><a href="${escapeHtml(optOutUrl)}" style="color:#888;text-decoration:underline;">Don't want these? Unsubscribe</a></p>
+    </div>`,
+  }, idempotencyKey ? { idempotencyKey } : undefined);
+  if (error) throw new Error(error.message);
+  return data.id;
+}
+
 // One-shot abandoned-basket nudge. No discount copy by design. Same
 // skeleton and unsubscribe footer as sendReviewRequest.
 async function sendBasketReminder({ to, name, propertyName, branding, items, subtotal, currency, returnUrl, optOutUrl, idempotencyKey }) {
@@ -669,6 +696,7 @@ module.exports = {
   sendSpaReminder,
   sendReservationReminder,
   sendReviewRequest,
+  sendCleanlinessRequest,
   sendBasketReminder,
   sendOrderConfirmation,
   verifyInboundWebhook,

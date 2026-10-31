@@ -490,6 +490,80 @@ const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toI
     } finally {
       server.close();
     }
+
+    // ── Task 7: guest cleanliness rating ─────────────────────────────────────
+    const ratings = require('../src/lib/cleanlinessRatings');
+    const resend = require('../src/lib/resend');
+    const sent = [];
+    let failSend = false;
+    resend.sendCleanlinessRequest = async (args) => { if (failSend) throw new Error('resend down'); sent.push(args); return 'email_1'; };
+    const NOW = new Date('2031-03-11T12:00:00Z'); // 2031-03-12 in Auckland
+    const G2 = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'Opted', 'Out', $2) RETURNING id`, [P, `out-${run}@example.com`])).id;
+    await pool.query('INSERT INTO review_request_opt_out (property_id, email) VALUES ($1, $2)', [P, `out-${run}@example.com`]);
+    const room109 = (await one(`INSERT INTO room (property_id, room_type_id, room_number) VALUES ($1, $2, '109') RETURNING id`, [P, RT])).id;
+    const BO = await book(room109, addDays(D, -2), D, 'checked_out', { guest: G2 });
+    const BOld = await book(room109, addDays(D, -9), addDays(D, -5), 'checked_out');
+    const ours = (rows) => rows.filter((r) => props.includes(r.property_id)).map((r) => r.booking_id).sort();
+    await check('claimDue: recent checkouts on housekeeping properties, opt-outs and old stays left out', async () => {
+      const claimed = ours(await ratings.claimDue(pool, NOW));
+      assert.deepEqual(claimed, [B6, BS].sort());
+      assert.ok(!claimed.includes(BO)); assert.ok(!claimed.includes(BOld)); assert.ok(!claimed.includes(BR));
+      assert.deepEqual(ours(await ratings.claimDue(pool, NOW)), []); // claimed once
+      const row = await one('SELECT * FROM cleanliness_rating WHERE booking_id = $1', [B6]);
+      assert.equal(row.email, `ada-${run}@example.com`); assert.ok(row.token.length >= 32);
+    });
+    await check('runOnce sends each claim once, retries failures up to 3 attempts', async () => {
+      failSend = true;
+      await ratings.runOnce(NOW);
+      assert.equal((await one('SELECT attempts, status FROM cleanliness_rating WHERE booking_id = $1', [B6])).attempts, 1);
+      failSend = false;
+      await ratings.runOnce(NOW);
+      const mine = sent.filter((s) => s.to === `ada-${run}@example.com`);
+      assert.equal(mine.length, 2); // B6 and BS
+      const row = await one('SELECT * FROM cleanliness_rating WHERE booking_id = $1', [B6]);
+      assert.equal(row.status, 'sent'); assert.ok(row.sent_at);
+      assert.equal(mine.find((s) => s.formUrl.endsWith(row.token)).optOutUrl, `${mine.find((s) => s.formUrl.endsWith(row.token)).formUrl}/opt-out`);
+      assert.match(mine[0].propertyName, /HK Board/);
+      await ratings.runOnce(NOW);
+      assert.equal(sent.filter((s) => s.to === `ada-${run}@example.com`).length, 2);
+      // A row that keeps failing stops at 3.
+      await pool.query(`UPDATE cleanliness_rating SET status = 'pending', attempts = 2 WHERE booking_id = $1`, [BS]);
+      failSend = true; await ratings.runOnce(NOW); failSend = false;
+      assert.deepEqual(await one('SELECT attempts, status FROM cleanliness_rating WHERE booking_id = $1', [BS]), { attempts: 3, status: 'failed' });
+    });
+    {
+      const server7 = require('../src/app').listen(0);
+      const base7 = `http://127.0.0.1:${server7.address().port}`;
+      try {
+        const { token } = await one('SELECT token FROM cleanliness_rating WHERE booking_id = $1', [B6]);
+        const post = (body) => fetch(`${base7}/api/cleanliness/${token}`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
+        await check('guest form: shows, validates, stores, overwrites', async () => {
+          const g = await fetch(`${base7}/api/cleanliness/${token}`);
+          assert.equal(g.status, 200); assert.match(await g.text(), /HK Board/);
+          assert.equal((await post('rating=7')).status, 400);
+          assert.equal((await post('rating=4&comment=great')).status, 200);
+          let row = await one('SELECT rating, comment, rated_at FROM cleanliness_rating WHERE booking_id = $1', [B6]);
+          assert.equal(row.rating, 4); assert.equal(row.comment, 'great'); assert.ok(row.rated_at);
+          await post('rating=2');
+          row = await one('SELECT rating, comment FROM cleanliness_rating WHERE booking_id = $1', [B6]);
+          assert.equal(row.rating, 2); assert.equal(row.comment, null);
+          assert.equal((await fetch(`${base7}/api/cleanliness/nope`)).status, 404);
+          assert.equal((await post('rating=3&comment=' + 'x'.repeat(2001))).status, 400);
+        });
+        await check('guest form escapes the property name', async () => {
+          await pool.query(`UPDATE property SET name = $2 WHERE id = $1`, [P, `HK Board <b>${run}</b>`]);
+          const html = await (await fetch(`${base7}/api/cleanliness/${token}`)).text();
+          assert.ok(!html.includes('<b>')); assert.ok(html.includes('&lt;b&gt;'));
+          await pool.query(`UPDATE property SET name = $2 WHERE id = $1`, [P, `HK Board ${run}`]);
+        });
+        await check('opt-out link records the opt-out', async () => {
+          assert.equal((await fetch(`${base7}/api/cleanliness/${token}/opt-out`)).status, 200);
+          assert.ok(await one('SELECT 1 FROM review_request_opt_out WHERE property_id = $1 AND email = $2', [P, `ada-${run}@example.com`]));
+        });
+      } finally {
+        server7.close();
+      }
+    }
   } finally {
     await cleanup(props);
     await pool.end();
