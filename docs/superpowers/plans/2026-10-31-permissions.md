@@ -375,4 +375,18 @@ Expected: equal counts.
 
 - [ ] **Step 3: Push** `git push origin main`, then once Render deploys hit `GET /api/property/me` with a known live key to confirm it still resolves.
 
+- [ ] **Step 3b: Close the deploy window.** Between the live migration and the deploy finishing, old code still writes keys to the legacy columns only, so a rotate, disable, or first org-key creation made in that window is invisible to the new code. Don't touch keys in the dashboard during the window. After the deploy is live, re-run the migration once (idempotent; it picks up any owner created in the window), then run the divergence query and act on any row it returns (re-apply the change via the new endpoints):
+
+```sql
+SELECT 'property' AS owner, p.id::text AS id, p.api_key AS legacy_key, p.api_key_enabled AS legacy_enabled, k.key, k.enabled
+FROM property p JOIN api_key k ON k.property_id = p.id AND k.name = 'Default'
+WHERE p.api_key IS NOT NULL AND (p.api_key <> k.key OR p.api_key_enabled <> k.enabled)
+UNION ALL
+SELECT 'organization', o.clerk_org_id, o.api_key, o.api_key_enabled, k.key, k.enabled
+FROM organization o JOIN api_key k ON k.clerk_org_id = o.clerk_org_id AND k.name = 'Default'
+WHERE o.api_key IS NOT NULL AND (o.api_key <> k.key OR o.api_key_enabled <> k.enabled);
+```
+
+Rolling back past this deploy is unsafe once any key has been changed through the new code: old code would read the stale legacy columns. Note both in the memory file.
+
 - [ ] **Step 4: Save a project memory** `project_permissions_state.md`: live date, legacy columns still present, cleanup migration outstanding, housekeeping gates to wire.

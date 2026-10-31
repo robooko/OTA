@@ -7,8 +7,11 @@ const { isValidUuid } = require('../middleware/validate');
 // (/api/property/api-keys, owner { property_id }) and the org
 // (/api/organization/api-keys, owner { clerk_org_id }). The legacy single-key
 // endpoints (/api-key, /rotate, /disable, /enable) act on the row named
-// 'Default' with their old response shapes, so the dashboard is untouched.
-// See docs/superpowers/specs/2026-10-31-permissions-design.md.
+// 'Default' with their old response shapes, so the dashboard is untouched:
+// a property's GET answers { api_key: null } until rotate mints one (the
+// dashboard's "Generate" state), while the org's GET creates on first call,
+// each exactly as before. See
+// docs/superpowers/specs/2026-10-31-permissions-design.md.
 
 // 'Default' is reserved so "the row named Default" is always one row.
 const RESERVED = 'Default';
@@ -40,18 +43,26 @@ function parseBody(body, { requireName }) {
 
 const legacyShape = (row) => ({ api_key: row.key, api_key_enabled: row.enabled });
 
-function forOwner(ownerOf) {
+const NO_KEY = 'No API key yet; rotate to create one';
+
+function forOwner(ownerOf, { mintOnRead }) {
   const wrap = (fn) => async (req, res, next) => {
     try { await fn(req, res, ownerOf(req)); } catch (err) { next(err); }
   };
+  const by = (req) => req.user?.id ?? null; // created_by; the admin gate always supplies a user
+  const readDefault = (req, owner) => (mintOnRead ? apiKeys.ensureDefault(pool, owner, by(req)) : apiKeys.findDefault(pool, owner));
   const setDefault = (patch) => async (req, res, owner) => {
-    const d = await apiKeys.ensureDefault(pool, owner);
-    res.json(legacyShape(await apiKeys.update(pool, owner, d.id, typeof patch === 'function' ? patch(owner) : patch)));
+    const d = await readDefault(req, owner);
+    if (!d) return res.status(404).json({ error: NO_KEY });
+    res.json(legacyShape(await apiKeys.update(pool, owner, d.id, patch)));
   };
   return {
-    getLegacy: wrap(async (req, res, owner) => res.json(legacyShape(await apiKeys.ensureDefault(pool, owner)))),
+    getLegacy: wrap(async (req, res, owner) => {
+      const d = await readDefault(req, owner);
+      res.json(d ? legacyShape(d) : { api_key: null, api_key_enabled: true });
+    }),
     rotateLegacy: wrap(async (req, res, owner) => {
-      const d = await apiKeys.ensureDefault(pool, owner);
+      const d = await apiKeys.ensureDefault(pool, owner, by(req));
       const row = await apiKeys.update(pool, owner, d.id, { key: apiKeys.generateKey(owner) });
       res.json({ api_key: row.key });
     }),
@@ -62,7 +73,7 @@ function forOwner(ownerOf) {
     create: wrap(async (req, res, owner) => {
       const v = parseBody(req.body, { requireName: true });
       if (v.error) return res.status(400).json({ error: v.error });
-      res.status(201).json(await apiKeys.create(pool, owner, { ...v, created_by: req.user.id }));
+      res.status(201).json(await apiKeys.create(pool, owner, { ...v, created_by: by(req) }));
     }),
     update: wrap(async (req, res, owner) => {
       if (!isValidUuid(req.params.id)) return res.status(404).json({ error: 'API key not found' });
@@ -82,6 +93,6 @@ function forOwner(ownerOf) {
 }
 
 module.exports = {
-  property: forOwner((req) => ({ property_id: req.property_id })),
-  organization: forOwner((req) => ({ clerk_org_id: req.clerk_org_id })),
+  property: forOwner((req) => ({ property_id: req.property_id }), { mintOnRead: false }),
+  organization: forOwner((req) => ({ clerk_org_id: req.clerk_org_id }), { mintOnRead: true }),
 };

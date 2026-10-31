@@ -48,6 +48,7 @@ const mw = (fn, req) => new Promise((resolve, reject) => {
   const run = crypto.randomBytes(4).toString('hex');
   const ORG = `org_permchk_${run}`;
   const FRESH_ORG = `org_permfresh_${run}`;
+  const ORG_D = `org_permD_${run}`;
   const P = (await one(`INSERT INTO property (name, clerk_org_id, slug) VALUES ('Perm Check', $1, 'perm') RETURNING id`, [ORG])).id;
   const P2 = (await one(`INSERT INTO property (name, clerk_org_id, slug) VALUES ('Perm Check Two', $1, 'perm-two') RETURNING id`, [ORG])).id;
 
@@ -182,6 +183,13 @@ const mw = (fn, req) => new Promise((resolve, reject) => {
         assert.deepEqual([s.status, s.body], [403, SCOPED_ERR]);
         assert.deepEqual((await get('/admin-gated', EMPTY.key)).body, SCOPED_ERR);
       });
+      await check('a key copied in by the migration keeps doing everything', async () => {
+        const P4 = (await one(`INSERT INTO property (name, clerk_org_id, slug, api_key, api_key_enabled) VALUES ('Perm Legacy Live', $1, 'perm-legacy-live', $2, true) RETURNING id`, [ORG, `prop_legacylive_${run}`])).id;
+        await pool.query(fs.readFileSync('src/db/migrate-2026-10-31-permissions.sql', 'utf8'));
+        const g = await get('/gated', `prop_legacylive_${run}`);
+        assert.deepEqual([g.status, g.body.property_id], [200, P4]);
+        assert.equal((await get('/admin-gated', `prop_legacylive_${run}`)).status, 200);
+      });
       await check('org-only route: org key passes with req.api_key, disabled 401, property key 403', async () => {
         const o = await get('/org-only', ORG_FULL.key);
         assert.deepEqual([o.status, o.body], [200, { org: ORG, key: ORG_FULL.id }]);
@@ -218,13 +226,21 @@ const mw = (fn, req) => new Promise((resolve, reject) => {
     const admin = { property_id: P_C, clerk_org_id: ORG, user: { id: 'user_adm', role: 'admin' } };
     const org = { clerk_org_id: FRESH_ORG, user: { id: 'user_adm', role: 'admin' } };
 
+    await check('legacy property GET never mints a key: null until rotate, as before', async () => {
+      const none = await call(apiKeysCtrl.property.getLegacy, admin);
+      assert.deepEqual(none.body, { api_key: null, api_key_enabled: true });
+      assert.deepEqual(await apiKeys.list(pool, { property_id: P_C }), []);
+      assert.equal((await call(apiKeysCtrl.property.disableLegacy, admin)).statusCode, 404);
+      assert.equal((await call(apiKeysCtrl.property.enableLegacy, admin)).statusCode, 404);
+      assert.deepEqual(await apiKeys.list(pool, { property_id: P_C }), []);
+    });
     await check('legacy property endpoints act on the Default row with the old shapes', async () => {
+      const first = await call(apiKeysCtrl.property.rotateLegacy, admin); // mints
+      assert.deepEqual(Object.keys(first.body), ['api_key']);
       const g = await call(apiKeysCtrl.property.getLegacy, admin);
       assert.match(g.body.api_key, /^prop_[0-9a-f]{64}$/);
-      assert.deepEqual(Object.keys(g.body).sort(), ['api_key', 'api_key_enabled']);
-      assert.equal(g.body.api_key_enabled, true);
+      assert.deepEqual(g.body, { api_key: first.body.api_key, api_key_enabled: true });
       const r = await call(apiKeysCtrl.property.rotateLegacy, admin);
-      assert.deepEqual(Object.keys(r.body), ['api_key']);
       assert.notEqual(r.body.api_key, g.body.api_key);
       assert.equal(await apiKeys.findByKey(pool, g.body.api_key), null); // old value dead
       assert.equal((await apiKeys.findByKey(pool, r.body.api_key)).name, 'Default');
@@ -269,12 +285,23 @@ const mw = (fn, req) => new Promise((resolve, reject) => {
       assert.equal((await call(apiKeysCtrl.property.remove, { ...admin, params: { id: site.id } })).statusCode, 404);
       assert.equal((await call(apiKeysCtrl.property.list, admin)).body.length, 2);
     });
-    await check('deleting Default: the legacy GET makes a fresh one', async () => {
+    await check('deleting Default: GET is null again and rotate mints a fresh one', async () => {
       const d = (await call(apiKeysCtrl.property.list, admin)).body.find((k) => k.name === 'Default');
       assert.equal((await call(apiKeysCtrl.property.remove, { ...admin, params: { id: d.id } })).statusCode, 204);
-      const g = await call(apiKeysCtrl.property.getLegacy, admin);
-      assert.notEqual(g.body.api_key, d.key);
-      assert.equal(g.body.api_key_enabled, true);
+      assert.deepEqual((await call(apiKeysCtrl.property.getLegacy, admin)).body, { api_key: null, api_key_enabled: true });
+      const r = await call(apiKeysCtrl.property.rotateLegacy, admin);
+      assert.match(r.body.api_key, /^prop_[0-9a-f]{64}$/);
+      assert.notEqual(r.body.api_key, d.key);
+    });
+    // Review #2: two tabs restoring at once must not end up with two Default rows.
+    await check('concurrent first calls create exactly one Default row', async () => {
+      const P_D = (await one(`INSERT INTO property (name, clerk_org_id, slug) VALUES ('Perm Check D', $1, 'perm-d') RETURNING id`, [ORG])).id;
+      const rows = await Promise.all(Array.from({ length: 6 }, () => apiKeys.ensureDefault(pool, { property_id: P_D })));
+      assert.equal(new Set(rows.map((r) => r.id)).size, 1, JSON.stringify(rows.map((r) => r.id)));
+      assert.equal((await apiKeys.list(pool, { property_id: P_D })).length, 1);
+      const orgRows = await Promise.all(Array.from({ length: 6 }, () => apiKeys.ensureDefault(pool, { clerk_org_id: ORG_D })));
+      assert.equal(new Set(orgRows.map((r) => r.id)).size, 1);
+      await assert.rejects(apiKeys.create(pool, { property_id: P_D }, {}), /duplicate|unique/i); // a second Default is refused by the DB
     });
     await check('staff grant PUT validates before Clerk is called', async () => {
       const put = (clerk_user_id, body) => call(staffCtrl.setStaffPermissions, { ...admin, params: { clerk_user_id }, body });
@@ -285,7 +312,7 @@ const mw = (fn, req) => new Promise((resolve, reject) => {
     });
   } finally {
     await pool.query('DELETE FROM property WHERE clerk_org_id = $1', [ORG]);
-    await pool.query('DELETE FROM organization WHERE clerk_org_id = ANY($1)', [[ORG, FRESH_ORG]]);
+    await pool.query('DELETE FROM organization WHERE clerk_org_id = ANY($1)', [[ORG, FRESH_ORG, ORG_D]]);
     await pool.end();
   }
 

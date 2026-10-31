@@ -109,14 +109,14 @@ A property key has `property_id`; an org key has `clerk_org_id`. Migration copie
 
 **The old columns stay for now.** `resolveSiteProperty`, `authenticateOrgKey` and the key controllers read and write only the new table. The four legacy columns are left in place, marked deprecated in `schema.sql`, so that production code still running during the migrate-then-push window keeps resolving keys. A later cleanup migration drops them once the new code is live.
 
-**Existing key endpoints keep working.** `GET /api/property/api-key`, `POST .../rotate`, `.../disable`, `.../enable` and their `/api/organization/api-key` twins act on the row named `Default` for that property or org, creating it (full, enabled) if missing, exactly as `ensureOrg` does today. Same response shapes, so the dashboard is untouched.
+**Existing key endpoints keep working.** `GET /api/property/api-key`, `POST .../rotate`, `.../disable`, `.../enable` and their `/api/organization/api-key` twins act on the row named `Default` for that property or org. Same response shapes and the same create behaviour as today, so the dashboard is untouched: the property's GET answers `{ api_key: null, api_key_enabled: true }` until rotate mints one (the dashboard's "Generate" state; disable/enable on a keyless property are 404), while the org's GET creates the row on first call as `ensureOrg` did. One `Default` row per owner is enforced by partial unique indexes, so two tabs restoring at once can't mint two. *(Corrected after review: the draft said both GETs create on read, which was only ever true for orgs.)*
 
 New endpoints, staff rail, admin only, mirrored at `/api/property/api-keys` and `/api/organization/api-keys`:
 
 - `GET /` — list `{ id, name, key, permissions, enabled, created_at, created_by }`. The key value is shown, as today.
 - `POST /` body `{ name, permissions? }` — `permissions` omitted or `null` = full key. Unknown permission names 400. The name `Default` is reserved for the legacy endpoints' row and is a 400 here, so "the row named Default" is always one row. Returns 201 with the row. *(Claude's call.)*
 - `PUT /:id` body `{ name?, permissions?, enabled? }` — `permissions: null` makes it full again.
-- `DELETE /:id` — revoke for good. Deleting the `Default` row is allowed; the legacy endpoints simply recreate one on next call.
+- `DELETE /:id` — revoke for good. Deleting the `Default` row is allowed; the property's legacy GET goes back to `null` and rotate mints a fresh one, the org's GET recreates one.
 
 **Resolving a key.** `resolveSiteProperty` and `authenticateOrgKey` look up `SELECT id, property_id, clerk_org_id, permissions FROM api_key WHERE key = $1 AND enabled = true`. Property key → its property, routing headers ignored; org key → org routing as today. Both set `req.api_key = { id, permissions }` so `requirePermission` and `requireRoleOrApiKey` can read it. `req.auth_method = 'api_key'` and the rate limiter (keyed by the raw header) are unchanged.
 

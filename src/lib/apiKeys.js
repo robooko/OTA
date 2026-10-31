@@ -41,13 +41,25 @@ async function findByKey(db = pool, key) {
   return rows[0] ?? null;
 }
 
-// The row the legacy single-key endpoints act on; created full and enabled
-// if missing, so a deleted Default simply comes back on the next call.
-async function ensureDefault(db = pool, owner) {
+// The row the legacy single-key endpoints act on, or null. One per owner
+// (partial unique indexes api_key_default_*_key).
+async function findDefault(db = pool, owner) {
   const [col, id] = ownerCol(owner);
-  const { rows } = await db.query(
-    `SELECT ${COLS} FROM api_key WHERE ${col} = $1 AND name = 'Default' ORDER BY created_at LIMIT 1`, [id]);
-  return rows[0] ?? create(db, owner, {});
+  const { rows } = await db.query(`SELECT ${COLS} FROM api_key WHERE ${col} = $1 AND name = 'Default'`, [id]);
+  return rows[0] ?? null;
+}
+
+// findDefault, creating the row full and enabled if missing. Two concurrent
+// first calls race to the unique index; the loser re-reads the winner's row.
+async function ensureDefault(db = pool, owner, created_by = null) {
+  const found = await findDefault(db, owner);
+  if (found) return found;
+  try {
+    return await create(db, owner, { created_by });
+  } catch (err) {
+    if (err.code !== '23505') throw err;
+    return findDefault(db, owner);
+  }
 }
 
 async function list(db = pool, owner) {
@@ -79,4 +91,4 @@ async function remove(db = pool, owner, keyId) {
   return rowCount > 0;
 }
 
-module.exports = { generateKey, create, findByKey, ensureDefault, list, update, remove };
+module.exports = { generateKey, create, findByKey, findDefault, ensureDefault, list, update, remove };

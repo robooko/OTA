@@ -127,6 +127,11 @@ CREATE TABLE IF NOT EXISTS api_key (
   CHECK ((property_id IS NULL) <> (clerk_org_id IS NULL))
 );
 
+-- One 'Default' row per owner: the legacy single-key endpoints act on "the
+-- row named Default", and two tabs restoring at once must not mint two.
+CREATE UNIQUE INDEX IF NOT EXISTS api_key_default_property_key ON api_key (property_id) WHERE name = 'Default';
+CREATE UNIQUE INDEX IF NOT EXISTS api_key_default_org_key ON api_key (clerk_org_id) WHERE name = 'Default';
+
 -- A staff member's permission names at one property. Admins need no row.
 CREATE TABLE IF NOT EXISTS staff_permission (
   property_id    UUID NOT NULL REFERENCES property(id) ON DELETE CASCADE,
