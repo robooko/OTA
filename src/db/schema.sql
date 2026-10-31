@@ -12,8 +12,8 @@ CREATE TABLE IF NOT EXISTS property (
   status           VARCHAR(20)  DEFAULT 'active',
   clerk_org_id     VARCHAR(255), -- several properties per org; see migrate-2026-10-11-property-org-not-unique.sql
   slug             VARCHAR(60), -- path segment a group website routes on; unique per org (property_org_slug_key)
-  api_key          TEXT UNIQUE,
-  api_key_enabled  BOOLEAN NOT NULL DEFAULT true,
+  api_key          TEXT UNIQUE,                   -- DEPRECATED: keys live in api_key (migrate-2026-10-31-permissions.sql); column kept until the cleanup migration
+  api_key_enabled  BOOLEAN NOT NULL DEFAULT true, -- DEPRECATED: keys live in api_key (migrate-2026-10-31-permissions.sql); column kept until the cleanup migration
   currency         VARCHAR(3)   NOT NULL DEFAULT 'GBP',
   timezone         VARCHAR(50)  NOT NULL DEFAULT 'Europe/London',
   vercel_team_id       VARCHAR(100),
@@ -99,8 +99,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS property_org_slug_key ON property(clerk_org_id
 -- roles stay in Clerk.
 CREATE TABLE IF NOT EXISTS organization (
   clerk_org_id     VARCHAR(255) PRIMARY KEY,
-  api_key          TEXT UNIQUE,
-  api_key_enabled  BOOLEAN NOT NULL DEFAULT true,
+  api_key          TEXT UNIQUE,                   -- DEPRECATED: keys live in api_key (migrate-2026-10-31-permissions.sql); column kept until the cleanup migration
+  api_key_enabled  BOOLEAN NOT NULL DEFAULT true, -- DEPRECATED: keys live in api_key (migrate-2026-10-31-permissions.sql); column kept until the cleanup migration
   created_at       TIMESTAMPTZ DEFAULT now(),
   -- QuickBooks Online -- see migrate-2026-10-16-organization-quickbooks.sql.
   qbo_realm_id                 VARCHAR(50),
@@ -108,6 +108,33 @@ CREATE TABLE IF NOT EXISTS organization (
   qbo_access_token             TEXT,
   qbo_access_token_expires_at  TIMESTAMPTZ,
   qbo_connected_at             TIMESTAMPTZ
+);
+
+-- Named permissions for staff and API keys -- see
+-- docs/superpowers/specs/2026-10-31-permissions-design.md and
+-- migrate-2026-10-31-permissions.sql. Several keys per property or org, each
+-- full (permissions NULL) or holding permission names (src/lib/permissions.js).
+CREATE TABLE IF NOT EXISTS api_key (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID REFERENCES property(id) ON DELETE CASCADE,
+  clerk_org_id  VARCHAR(255) REFERENCES organization(clerk_org_id) ON DELETE CASCADE,
+  name          VARCHAR(100) NOT NULL DEFAULT 'Default',
+  key           TEXT NOT NULL UNIQUE,
+  permissions   TEXT[],                      -- NULL = everything (full key)
+  enabled       BOOLEAN NOT NULL DEFAULT true,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_by    VARCHAR(100),                -- clerk user id; NULL for migrated rows
+  CHECK ((property_id IS NULL) <> (clerk_org_id IS NULL))
+);
+
+-- A staff member's permission names at one property. Admins need no row.
+CREATE TABLE IF NOT EXISTS staff_permission (
+  property_id    UUID NOT NULL REFERENCES property(id) ON DELETE CASCADE,
+  clerk_user_id  VARCHAR(100) NOT NULL,
+  permissions    TEXT[] NOT NULL DEFAULT '{}',
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by     VARCHAR(100),                -- clerk user id of the admin
+  PRIMARY KEY (property_id, clerk_user_id)
 );
 
 -- Per-org integrations (Google Drive, ...) -- see migrate-2026-10-17-org-integrations.sql.
