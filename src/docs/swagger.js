@@ -4,6 +4,25 @@ const INCLUDE_INACTIVE = { name: 'include_inactive', in: 'query', schema: { type
 // Every courses route takes a staff session or a site API key.
 const COURSE_AUTH = [{ bearerAuth: [] }, { apiKeyAuth: [] }];
 
+// Named permissions (src/lib/permissions.js). A route that needs one says so;
+// admins and full API keys pass every check.
+const { PERMISSIONS } = require('../lib/permissions');
+const PERMISSIONS_DESC = 'Permission names (lowercase dotted <module>.<action>). Staff pass a gated route when their grant at the property lists the name; a scoped API key when its list does; admins and full keys always. 403 { error: "Missing permission", permission } otherwise.';
+const KEY_PERMISSIONS = { type: 'array', nullable: true, items: { $ref: '#/components/schemas/Permission' }, description: 'null = full key: does everything, the only kind that existed before 2026-10-31. A list = scoped: passes only routes requiring one of these names, and fails admin-gated routes with 403 { error: "This key is scoped; this route needs a full key or a named permission" }.' };
+const KEY_BODY = { type: 'object', properties: { name: { type: 'string', maxLength: 100, description: "'Default' is reserved for the main key (the /api-key endpoints)" }, permissions: KEY_PERMISSIONS, enabled: { type: 'boolean' } } };
+const KEY_RESPONSES = { 400: { description: 'Invalid name, unknown permission name, or non-boolean enabled' }, 403: { description: 'Insufficient permissions' }, 404: { description: 'No such key for this owner' } };
+const KEY_ID = { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } };
+const keyPaths = (prefix, tag, security, owner) => ({
+  [`${prefix}/api-keys`]: {
+    get: { tags: [tag], summary: `List the ${owner}'s API keys (admin only)`, description: 'Every key, oldest first, including the main one named Default. Key values are shown.', security, responses: { 200: { description: 'Array of ApiKey', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/ApiKey' } } } } }, 403: KEY_RESPONSES[403] } },
+    post: { tags: [tag], summary: `Create a named ${owner} API key (admin only)`, description: 'permissions omitted or null = full key. Give a list to scope it.', security, requestBody: { required: true, content: { 'application/json': { schema: { ...KEY_BODY, required: ['name'] } } } }, responses: { 201: { description: 'ApiKey', content: { 'application/json': { schema: { $ref: '#/components/schemas/ApiKey' } } } }, 400: KEY_RESPONSES[400], 403: KEY_RESPONSES[403] } },
+  },
+  [`${prefix}/api-keys/{id}`]: {
+    put: { tags: [tag], summary: `Rename, re-scope, enable or disable a ${owner} API key (admin only)`, description: 'Only the fields sent change. permissions: null makes the key full again.', security, parameters: [KEY_ID], requestBody: { required: true, content: { 'application/json': { schema: KEY_BODY } } }, responses: { 200: { description: 'ApiKey', content: { 'application/json': { schema: { $ref: '#/components/schemas/ApiKey' } } } }, ...KEY_RESPONSES } },
+    delete: { tags: [tag], summary: `Revoke a ${owner} API key for good (admin only)`, description: 'Deleting the Default key is allowed; the /api-key endpoints simply make a fresh one on their next call.', security, parameters: [KEY_ID], responses: { 204: { description: 'Revoked' }, 403: KEY_RESPONSES[403], 404: KEY_RESPONSES[404] } },
+  },
+});
+
 const swaggerSpec = {
   openapi: '3.0.0',
   info: {
@@ -66,6 +85,32 @@ const swaggerSpec = {
       },
     },
     schemas: {
+      Permission: { type: 'string', enum: PERMISSIONS, description: PERMISSIONS_DESC },
+      ApiKey: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          property_id: { type: 'string', format: 'uuid', nullable: true, description: 'Set on a property key' },
+          clerk_org_id: { type: 'string', nullable: true, description: 'Set on an organization key' },
+          name: { type: 'string' },
+          key: { type: 'string', description: 'The X-Api-Key value (prop_... or org_...)' },
+          permissions: KEY_PERMISSIONS,
+          enabled: { type: 'boolean', description: 'A disabled key is refused with 401' },
+          created_at: { type: 'string', format: 'date-time' },
+          created_by: { type: 'string', nullable: true, description: 'Clerk user id of the admin; null for keys that predate 2026-10-31' },
+        },
+      },
+      StaffMember: {
+        type: 'object',
+        properties: {
+          clerk_user_id: { type: 'string' },
+          first_name: { type: 'string', nullable: true },
+          last_name: { type: 'string', nullable: true },
+          email: { type: 'string', nullable: true },
+          role: { type: 'string', enum: ['admin', 'staff'], description: 'From Clerk. Admins pass every check and need no grant.' },
+          permissions: { type: 'array', items: { $ref: '#/components/schemas/Permission' }, description: 'Granted at this property; empty when none' },
+        },
+      },
       Error: {
         type: 'object',
         properties: {
@@ -208,7 +253,7 @@ const swaggerSpec = {
   paths: {
     // ── Auth ────────────────────────────────────────────────────────────────
     '/api/auth/me': {
-      get: { tags: ['Auth'], summary: 'Get the current property and role, resolved from the Clerk session token', responses: { 200: { description: 'Object with property_id and role', content: { 'application/json': { schema: { type: 'object', properties: { property_id: { type: 'string', format: 'uuid' }, role: { type: 'string', enum: ['admin', 'staff'] } } } } } } } },
+      get: { tags: ['Auth'], summary: 'Get the current property, role and permissions, resolved from the Clerk session token', responses: { 200: { description: 'Object with property_id, role and permissions', content: { 'application/json': { schema: { type: 'object', properties: { property_id: { type: 'string', format: 'uuid' }, role: { type: 'string', enum: ['admin', 'staff'] }, permissions: { type: 'array', items: { $ref: '#/components/schemas/Permission' }, description: 'Granted at this property; empty for admins, who pass every check, and for staff with no grant' } } } } } } } },
     },
 
     // ── Property ────────────────────────────────────────────────────────────
@@ -217,7 +262,7 @@ const swaggerSpec = {
       put: { tags: ['Property'], summary: 'Update the current property', description: 'tax_* fields are optional and off by default -- only proshop_order and a pickup restaurant_order (website checkout) apply them today.', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { currency: { type: 'string', description: '3-letter ISO 4217 code, e.g. GBP' }, timezone: { type: 'string', description: 'IANA timezone name, e.g. Europe/London' }, tax_enabled: { type: 'boolean' }, tax_rate: { type: 'number', minimum: 0, maximum: 100, description: 'Percentage, e.g. 20 for 20%' }, tax_inclusive: { type: 'boolean', description: 'true = prices already include tax; false = tax is added at checkout' }, tax_id: { type: 'string', nullable: true, description: 'VAT/tax registration number printed on invoices' }, return_instructions: { type: 'string', nullable: true, description: 'null clears it; omit to leave unchanged' }, sidon_marina_id: { type: 'string', nullable: true, description: 'Sidon marina owner id (org_...); null clears it. Changing or clearing it also drops the stored marina API key' }, slug: { type: 'string', nullable: true, pattern: '^[a-z0-9-]{1,60}$', description: 'Unique within the organization; null clears it' } } } } } }, responses: { 200: { description: 'Updated' }, 400: { description: 'Invalid currency, timezone, or tax_rate' }, 409: { description: 'slug already used by another property in this organization' } } },
     },
     '/api/property/api-key': {
-      get: { tags: ['Property'], summary: "Get the current property's API key (admin only)", responses: { 200: { description: 'API key and enabled state', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' }, api_key_enabled: { type: 'boolean' } } } } } }, 403: { description: 'Insufficient permissions' } } },
+      get: { tags: ['Property'], summary: "Get the current property's main API key (admin only)", description: 'The key named Default (created full and enabled if missing). Every key, including this one, is listed and managed at /api/property/api-keys.', responses: { 200: { description: 'API key and enabled state', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' }, api_key_enabled: { type: 'boolean' } } } } } }, 403: { description: 'Insufficient permissions' } } },
     },
     '/api/property/api-key/rotate': {
       post: { tags: ['Property'], summary: "Rotate the current property's API key (admin only) — the old key stops working immediately", responses: { 200: { description: 'New API key', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' } } } } } }, 403: { description: 'Insufficient permissions' } } },
@@ -228,13 +273,20 @@ const swaggerSpec = {
     '/api/property/api-key/enable': {
       post: { tags: ['Property'], summary: "Re-enable the current property's API key (admin only) — restores access using the same key value", responses: { 200: { description: 'Current key and enabled state (true)', content: { 'application/json': { schema: { type: 'object', properties: { api_key: { type: 'string' }, api_key_enabled: { type: 'boolean' } } } } } }, 403: { description: 'Insufficient permissions' } } },
     },
+    ...keyPaths('/api/property', 'Property', undefined, 'property'),
+    '/api/property/staff': {
+      get: { tags: ['Property'], summary: "List the organization's members with their permissions at this property (admin only)", description: 'Members come from Clerk; permissions from the grant at the current property.', responses: { 200: { description: 'Array of StaffMember', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/StaffMember' } } } } }, 403: { description: 'Insufficient permissions' } } },
+    },
+    '/api/property/staff/{clerk_user_id}/permissions': {
+      put: { tags: ['Property'], summary: "Set a staff member's permissions at this property (admin only)", description: 'Replaces the grant. Admins pass every check regardless of their grant.', parameters: [{ name: 'clerk_user_id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['permissions'], properties: { permissions: { type: 'array', items: { $ref: '#/components/schemas/Permission' } } } } } } }, responses: { 200: { description: '{ property_id, clerk_user_id, permissions, updated_at, updated_by }' }, 400: { description: 'permissions missing, not an array, or naming an unknown permission' }, 403: { description: 'Insufficient permissions' }, 404: { description: 'User is not a member of this organization' } } },
+    },
     // ── Organization (several properties per Clerk org) ─────────────────────
     '/api/organization/properties': {
       get: { tags: ['Organization'], summary: "List the organization's properties (no X-Property-Id needed)", security: [{ bearerAuth: [] }], responses: { 200: { description: 'Array of { id, name, slug, status }' } } },
       post: { tags: ['Organization'], summary: 'Create another property in the organization (admin only); grants starter tokens', security: [{ bearerAuth: [] }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string', maxLength: 100 }, slug: { type: 'string', nullable: true, pattern: '^[a-z0-9-]{1,60}$' } } } } } }, responses: { 201: { description: '{ id, name, slug, status, currency, timezone }' }, 400: { description: 'Invalid name or slug' }, 403: { description: 'Insufficient permissions' }, 409: { description: 'slug already used in this organization' } } },
     },
     '/api/organization/api-key': {
-      get: { tags: ['Organization'], summary: "Get the organization's website API key (admin only) -- created on first call", security: [{ bearerAuth: [] }], responses: { 200: { description: '{ api_key, api_key_enabled }' }, 403: { description: 'Insufficient permissions' } } },
+      get: { tags: ['Organization'], summary: "Get the organization's main website API key (admin only) -- created on first call", description: 'The org key named Default. Every org key is listed and managed at /api/organization/api-keys.', security: [{ bearerAuth: [] }], responses: { 200: { description: '{ api_key, api_key_enabled }' }, 403: { description: 'Insufficient permissions' } } },
     },
     '/api/organization/api-key/rotate': {
       post: { tags: ['Organization'], summary: "Rotate the organization's API key (admin only) -- the old key stops working immediately", security: [{ bearerAuth: [] }], responses: { 200: { description: '{ api_key }' }, 403: { description: 'Insufficient permissions' } } },
@@ -245,6 +297,7 @@ const swaggerSpec = {
     '/api/organization/api-key/enable': {
       post: { tags: ['Organization'], summary: "Re-enable the organization's API key (admin only)", security: [{ bearerAuth: [] }], responses: { 200: { description: '{ api_key, api_key_enabled: true }' }, 403: { description: 'Insufficient permissions' } } },
     },
+    ...keyPaths('/api/organization', 'Organization', [{ bearerAuth: [] }], 'organization'),
     '/api/site/properties': {
       get: { tags: ['Organization'], summary: "The organization's active properties for a group website (organization API key only)", security: [{ apiKeyAuth: [] }], responses: { 200: { description: 'Array of { id, name, slug, currency, timezone, websites: [url] }' }, 401: { description: 'Missing or invalid key' }, 403: { description: 'A per-property key was used' } } },
     },
