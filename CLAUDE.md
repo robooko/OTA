@@ -284,6 +284,20 @@ DATABASE_URL=postgresql://user:password@localhost:5432/hotel_booking
 
 ---
 
+## New feature checklist
+
+Every feature that adds or changes API routes is not done until it has:
+
+- [ ] Dated migration `src/db/migrate-YYYY-MM-DD-<feature>.sql` + the same change in `schema.sql`
+- [ ] Swagger docs in `src/docs/swagger.js`
+- [ ] **MCP tools in `mcp-server/tools.js`** for every new route, unless it is staff-app, public guest link, webhook, OAuth or Stripe client flow (then add an `EXCLUDE` rule in `scripts/check-mcp-coverage.js`)
+- [ ] `scripts/check-<feature>.js`
+- [ ] `node -r dotenv/config scripts/check-mcp-coverage.js` passes
+
+Plans must include the MCP tools step explicitly.
+
+---
+
 ## Additional notes
 
 - All date parameters are `YYYY-MM-DD` format
