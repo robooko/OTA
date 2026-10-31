@@ -25,6 +25,7 @@ const realExtractSailor = docs.extractSailorVersion;
 docs.extractSailorVersion = async () => {};
 
 const pool = require('../src/db');
+const apiKeys = require('../src/lib/apiKeys');
 const app = require('../src/app');
 
 (async () => {
@@ -34,7 +35,8 @@ const app = require('../src/app');
   const mail = (n) => `${n}-${RUN}@sd-http.test`;
   const KEY = `check_${crypto.randomBytes(8).toString('hex')}`;
   const one = async (sql, p) => (await pool.query(sql, p)).rows[0];
-  const P = (await one(`INSERT INTO property (name, timezone, currency, api_key, api_key_enabled) VALUES ('Sailor Docs HTTP Check', 'Europe/Rome', 'eur', $1, true) RETURNING id`, [KEY])).id;
+  const P = (await one(`INSERT INTO property (name, timezone, currency) VALUES ('Sailor Docs HTTP Check', 'Europe/Rome', 'eur') RETURNING id`)).id;
+  await apiKeys.create(pool, { property_id: P }, { key: KEY });
   let failed = 0;
   const check = async (name, fn) => {
     try { await fn(); console.log(`ok   ${name}`); }

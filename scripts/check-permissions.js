@@ -12,9 +12,28 @@ const crypto = require('crypto');
 const fs = require('fs');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
+const express = require('express');
 const pool = require('../src/db');
 const { PERMISSIONS, unknownPermissions, getGrant, setGrant } = require('../src/lib/permissions');
 const apiKeys = require('../src/lib/apiKeys');
+const { resolveSiteProperty } = require('../src/lib/propertyResolver');
+const { authenticateOrApiKey, authenticateOrgKey, requirePermission, requireRoleOrApiKey } = require('../src/middleware/auth');
+const authCtrl = require('../src/controllers/auth');
+
+// Drives a controller directly (bearer routes can't be reached over HTTP
+// without a real Clerk token).
+const call = async (fn, req) => {
+  const res = { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; }, send() { return this; } };
+  let error;
+  await fn({ params: {}, query: {}, body: {}, headers: {}, ...req }, res, (e) => { error = e; });
+  if (error) throw error;
+  return res;
+};
+// Drives a middleware directly: resolves { next: true } or { status, body }.
+const mw = (fn, req) => new Promise((resolve, reject) => {
+  const res = { statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { resolve({ status: this.statusCode, body: b }); return this; } };
+  fn({ headers: {}, ...req }, res, (err) => (err ? reject(err) : resolve({ next: true })));
+});
 
 (async () => {
   let failed = 0;
@@ -109,6 +128,88 @@ const apiKeys = require('../src/lib/apiKeys');
       assert.equal(rows.length, 1);
       assert.deepEqual([rows[0].name, rows[0].key, rows[0].enabled, rows[0].permissions], ['Default', `prop_copyme_${run}`, false, null]);
     });
+
+    // ── Resolver and middleware over HTTP ───────────────────────────────────
+    // No gated route exists in the product yet, so the real middleware is
+    // mounted on throwaway routes.
+    const P_B = (await one(`INSERT INTO property (name, clerk_org_id, slug) VALUES ('Perm Check B', $1, 'perm-b') RETURNING id`, [ORG])).id;
+    const own = { property_id: P };
+    const FULL = await apiKeys.create(pool, own, { name: 'Full' });
+    const SCOPED = await apiKeys.create(pool, own, { name: 'Scoped', permissions: ['housekeeping.inspect'] });
+    const EMPTY = await apiKeys.create(pool, own, { name: 'Empty', permissions: [] });
+    const OFF = await apiKeys.create(pool, own, { name: 'Off', enabled: false });
+    const ORG_FULL = await apiKeys.create(pool, { clerk_org_id: ORG }, { name: 'Org full' });
+    const ORG_OFF = await apiKeys.create(pool, { clerk_org_id: ORG }, { name: 'Org off', enabled: false });
+
+    const test = express();
+    test.get('/gated', authenticateOrApiKey, requirePermission('housekeeping.inspect'), (req, res) => res.json({ ok: true, key: req.api_key.id, property_id: req.property_id }));
+    test.get('/admin-gated', authenticateOrApiKey, requireRoleOrApiKey('admin'), (req, res) => res.json({ ok: true }));
+    test.get('/org-only', authenticateOrgKey, (req, res) => res.json({ org: req.clerk_org_id, key: req.api_key.id }));
+    const server = test.listen(0);
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const get = async (path, key, headers = {}) => {
+      const r = await fetch(base + path, { headers: { 'X-Api-Key': key, ...headers } });
+      return { status: r.status, body: await r.json().catch(() => null) };
+    };
+    const MISSING = { error: 'Missing permission', permission: 'housekeeping.inspect' };
+    const SCOPED_ERR = { error: 'This key is scoped; this route needs a full key or a named permission' };
+
+    try {
+      await check('resolveSiteProperty returns the key on both paths', async () => {
+        const a = await resolveSiteProperty(pool, { key: FULL.key });
+        assert.deepEqual(a, { propertyId: P, apiKey: { id: FULL.id, permissions: null } });
+        const b = await resolveSiteProperty(pool, { key: ORG_FULL.key, propertyId: P_B });
+        assert.deepEqual(b, { propertyId: P_B, clerkOrgId: ORG, apiKey: { id: ORG_FULL.id, permissions: null } });
+        assert.equal(await resolveSiteProperty(pool, { key: OFF.key }), null);
+        assert.equal(await resolveSiteProperty(pool, { key: ORG_OFF.key, propertyId: P }), null);
+      });
+      await check('gated route: full and scoped keys pass, empty list / disabled / unknown do not', async () => {
+        const f = await get('/gated', FULL.key);
+        assert.deepEqual([f.status, f.body.key, f.body.property_id], [200, FULL.id, P]);
+        assert.equal((await get('/gated', SCOPED.key)).status, 200);
+        const e = await get('/gated', EMPTY.key);
+        assert.deepEqual([e.status, e.body], [403, MISSING]);
+        assert.equal((await get('/gated', OFF.key)).status, 401);
+        assert.equal((await get('/gated', 'prop_nope')).status, 401);
+        const o = await get('/gated', ORG_FULL.key, { 'X-Property-Id': P });
+        assert.deepEqual([o.status, o.body.key], [200, ORG_FULL.id]);
+      });
+      await check('admin-gated route: only a full key passes', async () => {
+        assert.equal((await get('/admin-gated', FULL.key)).status, 200);
+        const s = await get('/admin-gated', SCOPED.key);
+        assert.deepEqual([s.status, s.body], [403, SCOPED_ERR]);
+        assert.deepEqual((await get('/admin-gated', EMPTY.key)).body, SCOPED_ERR);
+      });
+      await check('org-only route: org key passes with req.api_key, disabled 401, property key 403', async () => {
+        const o = await get('/org-only', ORG_FULL.key);
+        assert.deepEqual([o.status, o.body], [200, { org: ORG, key: ORG_FULL.id }]);
+        assert.equal((await get('/org-only', ORG_OFF.key)).status, 401);
+        const p = await get('/org-only', FULL.key);
+        assert.deepEqual([p.status, p.body.error], [403, 'This endpoint requires an organization API key']);
+      });
+      await check('staff rail: admin always, staff by grant at that property only', async () => {
+        const gate = requirePermission('housekeeping.inspect');
+        const staff = (property_id, id = 'user_s') => ({ auth_method: 'bearer', property_id, user: { id, role: 'staff' } });
+        assert.deepEqual(await mw(gate, { auth_method: 'bearer', property_id: P, user: { id: 'user_adm', role: 'admin' } }), { next: true });
+        assert.deepEqual(await mw(gate, staff(P)), { status: 403, body: MISSING });
+        await setGrant(pool, P, 'user_s', ['housekeeping.inspect'], 'user_adm');
+        assert.deepEqual(await mw(gate, staff(P)), { next: true });
+        assert.deepEqual(await mw(gate, staff(P_B)), { status: 403, body: MISSING });
+        assert.deepEqual(await mw(gate, staff(undefined)), { status: 403, body: MISSING });
+        assert.deepEqual(await mw(requirePermission('housekeeping.manage'), staff(P)), { status: 403, body: { ...MISSING, permission: 'housekeeping.manage' } });
+      });
+      await check('requirePermission refuses an unknown name at definition time', () => {
+        assert.throws(() => requirePermission('nope.x'), /nope\.x/);
+      });
+      await check('/api/auth/me carries the grant; empty for admins', async () => {
+        const s = await call(authCtrl.me, { property_id: P, user: { id: 'user_s', role: 'staff' } });
+        assert.deepEqual(s.body, { property_id: P, role: 'staff', permissions: ['housekeeping.inspect'] });
+        const a = await call(authCtrl.me, { property_id: P, user: { id: 'user_adm', role: 'admin' } });
+        assert.deepEqual(a.body, { property_id: P, role: 'admin', permissions: [] });
+      });
+    } finally {
+      server.close();
+    }
   } finally {
     await pool.query('DELETE FROM property WHERE clerk_org_id = $1', [ORG]);
     await pool.query('DELETE FROM organization WHERE clerk_org_id = ANY($1)', [[ORG, FRESH_ORG]]);

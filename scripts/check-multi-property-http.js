@@ -11,6 +11,7 @@ const crypto = require('crypto');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
 const pool = require('../src/db');
+const apiKeys = require('../src/lib/apiKeys');
 const app = require('../src/app');
 const { SITE_AMBIGUOUS } = require('../src/lib/propertyResolver');
 const orgCtrl = require('../src/controllers/organization');
@@ -38,8 +39,9 @@ const call = async (fn, req) => {
   const one = async (sql, p) => (await pool.query(sql, p)).rows[0];
 
   const A1 = (await one(`INSERT INTO property (name, clerk_org_id, slug) VALUES ('Seaview', $1, 'seaview') RETURNING id`, [ORG])).id;
-  const A2 = (await one(`INSERT INTO property (name, clerk_org_id, slug, api_key) VALUES ('Harbour', $1, 'harbour', $2) RETURNING id`, [ORG, PROP_KEY])).id;
-  await pool.query('INSERT INTO organization (clerk_org_id, api_key) VALUES ($1, $2)', [ORG, ORG_KEY]);
+  const A2 = (await one(`INSERT INTO property (name, clerk_org_id, slug) VALUES ('Harbour', $1, 'harbour') RETURNING id`, [ORG])).id;
+  await apiKeys.create(pool, { property_id: A2 }, { key: PROP_KEY });
+  await apiKeys.create(pool, { clerk_org_id: ORG }, { key: ORG_KEY });
   await pool.query('INSERT INTO property_website (property_id, url) VALUES ($1, $2)', [A1, `https://www.${HOST}/`]);
   const cleanupOrgs = [ORG];
 

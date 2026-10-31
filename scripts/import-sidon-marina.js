@@ -8,6 +8,7 @@
 // email or a Sidon owner id.
 require('dotenv').config();
 require('../src/db'); // DATE as 'YYYY-MM-DD' strings, for every pg client in the process
+const apiKeys = require('../src/lib/apiKeys');
 const crypto = require('crypto');
 const fs = require('fs');
 const { Client } = require('pg');
@@ -470,10 +471,10 @@ async function importCore(dst, source, plan, opts) {
     let id = p.property_id;
     if (p.create) {
       id = (await dst.query(
-        `INSERT INTO property (name, clerk_org_id, currency, timezone, api_key, api_key_enabled, sidon_marina_id)
-         VALUES ($1, $2, $3, $4, $5, true, $6) RETURNING id`,
-        [p.create.name, p.create.clerk_org_id, p.create.currency.toUpperCase(), p.create.timezone,
-          'prop_' + crypto.randomBytes(32).toString('hex'), p.owners[0]])).rows[0].id;
+        `INSERT INTO property (name, clerk_org_id, currency, timezone, sidon_marina_id)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [p.create.name, p.create.clerk_org_id, p.create.currency.toUpperCase(), p.create.timezone, p.owners[0]])).rows[0].id;
+      await apiKeys.create(dst, { property_id: id }, {}); // the hotel's full 'Default' site key
       // grantStarter() opens its own pool connection, which is bound to
       // DATABASE_URL even under --live and sits outside this transaction, so
       // the same two writes are made here instead.

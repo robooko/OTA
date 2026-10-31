@@ -10,6 +10,7 @@ const crypto = require('crypto');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
 const pool = require('../src/db');
+const apiKeys = require('../src/lib/apiKeys');
 const { sessionDates, ageOn } = require('../src/lib/courseSessions');
 const { isValidDate } = require('../src/middleware/validate');
 const app = require('../src/app');
@@ -56,8 +57,10 @@ const app = require('../src/app');
   const KEY = `courses_check_${tag}`;
   const OTHER_KEY = `courses_check_other_${tag}`;
   const one = async (sql, p) => (await pool.query(sql, p)).rows[0];
-  const P = (await one(`INSERT INTO property (name, api_key) VALUES ('Course Check', $1) RETURNING id`, [KEY])).id;
-  const Q = (await one(`INSERT INTO property (name, api_key) VALUES ('Course Check Other', $1) RETURNING id`, [OTHER_KEY])).id;
+  const P = (await one(`INSERT INTO property (name) VALUES ('Course Check') RETURNING id`)).id;
+  await apiKeys.create(pool, { property_id: P }, { key: KEY });
+  const Q = (await one(`INSERT INTO property (name) VALUES ('Course Check Other') RETURNING id`)).id;
+  await apiKeys.create(pool, { property_id: Q }, { key: OTHER_KEY });
   // ponytail: ~60 requests on one key, under the 100/window API-key limit; split keys if checks grow past it.
   const api = async (method, path, body, key = KEY) => {
     const r = await fetch(base + path, {

@@ -11,6 +11,7 @@ const crypto = require('crypto');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
 const pool = require('../src/db');
+const apiKeys = require('../src/lib/apiKeys');
 const marinaStripe = require('../src/lib/marinaStripe');
 const fakeStripe = require('./fake-stripe');
 marinaStripe.stripeFor = () => fakeStripe;
@@ -100,9 +101,11 @@ const {
   const KEY = `rate_plans_check_${tag}`;
   const one = async (sql, p) => (await pool.query(sql, p)).rows[0];
   const P = (await one(
-    `INSERT INTO property (name, api_key, api_key_enabled, timezone, currency, stripe_secret_key, stripe_publishable_key, room_booking_url)
-     VALUES ('Rate Plan Check', $1, true, 'Europe/London', 'GBP', 'sk_test_check', 'pk_test_check', 'https://hotel.test/stay/{id}') RETURNING id`, [KEY])).id;
-  const Q = (await one(`INSERT INTO property (name, api_key, api_key_enabled) VALUES ('Rate Plan Check Other', $1, true) RETURNING id`, [`${KEY}_other`])).id;
+    `INSERT INTO property (name, timezone, currency, stripe_secret_key, stripe_publishable_key, room_booking_url)
+     VALUES ('Rate Plan Check', 'Europe/London', 'GBP', 'sk_test_check', 'pk_test_check', 'https://hotel.test/stay/{id}') RETURNING id`)).id;
+  await apiKeys.create(pool, { property_id: P }, { key: KEY });
+  const Q = (await one(`INSERT INTO property (name) VALUES ('Rate Plan Check Other') RETURNING id`)).id;
+  await apiKeys.create(pool, { property_id: Q }, { key: `${KEY}_other` });
 
   const api = async (method, path, body) => {
     const r = await fetch(base + path, {

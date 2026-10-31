@@ -5,6 +5,7 @@
 //   node -r dotenv/config scripts/check-import-sidon.js
 process.env.MARINA_BOOKING_TOKEN_SECRET ||= 'check-secret';
 require('../src/db'); // DATE as 'YYYY-MM-DD' strings
+const apiKeys = require('../src/lib/apiKeys');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -342,9 +343,12 @@ INSERT INTO sidon_fixture.marina_message (owner_id, sailor_email, sailor_name, d
         const created = report.properties.filter((p) => p.created);
         assert.equal(created.length, 1);
         const [p] = await rows('SELECT * FROM property WHERE id = $1', [created[0].property_id]);
-        assert.deepEqual([p.name, p.currency, p.timezone, p.clerk_org_id, p.sidon_marina_id, p.api_key_enabled],
-          ['T2 Alpha Co', 'EUR', 'Europe/Rome', 'org_check_t2', A, true]);
-        assert.match(p.api_key, /^prop_[0-9a-f]{64}$/);
+        assert.deepEqual([p.name, p.currency, p.timezone, p.clerk_org_id, p.sidon_marina_id],
+          ['T2 Alpha Co', 'EUR', 'Europe/Rome', 'org_check_t2', A]);
+        const keys = await rows('SELECT name, key, enabled, permissions FROM api_key WHERE property_id = $1', [p.id]);
+        assert.equal(keys.length, 1);
+        assert.deepEqual([keys[0].name, keys[0].enabled, keys[0].permissions], ['Default', true, null]);
+        assert.match(keys[0].key, /^prop_[0-9a-f]{64}$/);
         assert.equal(p.token_balance, STARTER_BALANCE > 0 ? STARTER_BALANCE : 0);
         assert.deepEqual(await rows('SELECT delta, balance_after, reason FROM property_token_ledger WHERE property_id = $1', [p.id]), starterRows);
         assert.equal(created[0].today, await todayIn('Europe/Rome'));
@@ -352,7 +356,7 @@ INSERT INTO sidon_fixture.marina_message (owner_id, sailor_email, sailor_name, d
 
       await check('import: a reused property is never written (currency, timezone, sidon_marina_id, tokens; G3)', async () => {
         const P = await beta();
-        const snap = async () => (await rows('SELECT currency, timezone, sidon_marina_id, token_balance, api_key FROM property WHERE id = $1', [P]))[0];
+        const snap = async () => (await rows('SELECT currency, timezone, sidon_marina_id, token_balance FROM property WHERE id = $1', [P]))[0];
         const before = await snap();
         const report = await run(P);
         assert.deepEqual(await snap(), before);

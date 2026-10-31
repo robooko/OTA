@@ -3,6 +3,8 @@ const pool = require('../db');
 const { apiKeyRateLimiter } = require('./rateLimiter');
 const { grantStarter } = require('../lib/tokens');
 const { resolveStaffProperty, resolveSiteProperty, siteSelectors } = require('../lib/propertyResolver');
+const { findByKey } = require('../lib/apiKeys');
+const { PERMISSIONS, getGrant } = require('../lib/permissions');
 
 if (!process.env.CLERK_SECRET_KEY) {
   throw new Error('CLERK_SECRET_KEY is required');
@@ -11,6 +13,7 @@ if (!process.env.CLERK_SECRET_KEY) {
 const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
 const BAD_KEY = 'Missing or invalid Authorization header or X-Api-Key';
+const SCOPED_KEY = 'This key is scoped; this route needs a full key or a named permission';
 
 function mapClerkRole(orgRole) {
   return orgRole === 'admin' ? 'admin' : 'staff';
@@ -91,6 +94,7 @@ async function authenticateOrApiKey(req, res, next) {
       if (r.error) return res.status(r.status).json({ error: r.error });
       req.property_id = r.propertyId;
       if (r.clerkOrgId) req.clerk_org_id = r.clerkOrgId;
+      req.api_key = r.apiKey; // { id, permissions }; permissions null = full key
       req.auth_method = 'api_key'; // untrusted guest-proxy rail -- join codes enforced
       next();
     } catch (err) {
@@ -107,15 +111,13 @@ async function authenticateOrgKey(req, res, next) {
 
   return apiKeyRateLimiter(req, res, async () => {
     try {
-      const org = await pool.query('SELECT clerk_org_id FROM organization WHERE api_key = $1 AND api_key_enabled = true', [key]);
-      if (org.rows.length) {
-        req.clerk_org_id = org.rows[0].clerk_org_id;
-        req.auth_method = 'api_key';
-        return next();
-      }
-      const prop = await pool.query('SELECT 1 FROM property WHERE api_key = $1 AND api_key_enabled = true', [key]);
-      if (prop.rows.length) return res.status(403).json({ error: 'This endpoint requires an organization API key' });
-      return res.status(401).json({ error: BAD_KEY });
+      const row = await findByKey(pool, key);
+      if (!row) return res.status(401).json({ error: BAD_KEY });
+      if (row.property_id) return res.status(403).json({ error: 'This endpoint requires an organization API key' });
+      req.clerk_org_id = row.clerk_org_id;
+      req.api_key = { id: row.id, permissions: row.permissions };
+      req.auth_method = 'api_key';
+      next();
     } catch (err) {
       next(err);
     }
@@ -131,18 +133,46 @@ function requireRole(...roles) {
   };
 }
 
-// Same role gate, but an api-key caller passes it: the key is already
+// Same role gate, but a full api-key caller passes it: the key is already
 // property-scoped and every other property-wide write it can reach (PUT
 // /api/property/me -- currency, timezone, tax, enabled_modules) trusts it
-// the same way. Use this instead of requireRole on a route that has been
-// widened to authenticateOrApiKey, so staff sessions keep the role rule
-// they had rather than silently losing it.
+// the same way. A scoped key (one given a permissions list) fails: these
+// routes have no permission name yet, so there is nothing it could list.
+// Use this instead of requireRole on a route that has been widened to
+// authenticateOrApiKey, so staff sessions keep the role rule they had
+// rather than silently losing it.
 function requireRoleOrApiKey(...roles) {
   const guard = requireRole(...roles);
   return (req, res, next) => {
-    if (req.auth_method === 'api_key') return next();
+    if (req.auth_method === 'api_key') {
+      return req.api_key.permissions === null ? next() : res.status(403).json({ error: SCOPED_KEY });
+    }
     return guard(req, res, next);
   };
 }
 
-module.exports = { authenticate, authenticateOrg, authenticateOrApiKey, authenticateOrgKey, requireRole, requireRoleOrApiKey };
+// Who passes a named permission (src/lib/permissions.js): admins; a full
+// api key; a scoped key listing the name; staff whose grant at the resolved
+// property lists it. Grants are per property, so on an org-level route
+// (no req.property_id) only admins and full keys pass.
+async function hasPermission(req, name) {
+  if (req.auth_method === 'api_key') return req.api_key.permissions === null || req.api_key.permissions.includes(name);
+  if (!req.user) return false;
+  if (req.user.role === 'admin') return true;
+  if (!req.property_id) return false;
+  return (await getGrant(pool, req.property_id, req.user.id)).includes(name);
+}
+
+function requirePermission(name) {
+  if (!PERMISSIONS.includes(name)) throw new Error(`Unknown permission: ${name}`);
+  return async (req, res, next) => {
+    try {
+      if (await hasPermission(req, name)) return next();
+      res.status(403).json({ error: 'Missing permission', permission: name });
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
+module.exports = { clerkClient, authenticate, authenticateOrg, authenticateOrApiKey, authenticateOrgKey, requireRole, requireRoleOrApiKey, hasPermission, requirePermission };

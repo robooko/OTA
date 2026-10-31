@@ -19,6 +19,7 @@ class FakeAnthropic {
 require.cache[require.resolve('@anthropic-ai/sdk')] = { exports: FakeAnthropic };
 
 const pool = require('../src/db');
+const apiKeys = require('../src/lib/apiKeys');
 const app = require('../src/app');
 const tokens = require('../src/lib/tokens');
 const { sendOutboundReply, loadInquiryWithProperty } = require('../src/lib/inquiryReplies');
@@ -132,7 +133,8 @@ const toolUse = (name, input = {}) => ({ type: 'tool_use', id: `tu_${Math.random
       releaseNumber: async (n) => { released.push(n); },
     });
     const KEY = `check_${Math.random().toString(36).slice(2)}`;
-    const Q = (await one(`INSERT INTO property (name, timezone, api_key, api_key_enabled) VALUES ('Voice Check Two', 'Europe/London', $1, true) RETURNING id`, [KEY])).id;
+    const Q = (await one(`INSERT INTO property (name, timezone) VALUES ('Voice Check Two', 'Europe/London') RETURNING id`)).id;
+    await apiKeys.create(pool, { property_id: Q }, { key: KEY });
     const api = async (method, path, body) => {
       const r = await fetch(base + path, { method, headers: { 'X-Api-Key': KEY, 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
       return { status: r.status, json: await r.json() };

@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { findByKey } = require('./apiKeys');
 
 // Turns the hotel selectors a caller sends into one property_id. Staff
 // (Clerk org) and website keys (per-property or org-level) both land here --
@@ -45,7 +46,8 @@ function siteSelectors(req) {
 // X-Api-Key -> property. A per-property key is its hotel, full stop (routing
 // headers ignored). An org key picks among the org's active hotels:
 // X-Property-Id > X-Property-Slug > X-Site-Host > "the only one". null means
-// the key matched nothing (caller's 401).
+// the key matched nothing (caller's 401). Successes carry apiKey
+// { id, permissions } for requirePermission (permissions null = full key).
 async function resolveSiteProperty(db = pool, sel = {}) {
   const key = given(sel.key);
   const propertyId = given(sel.propertyId);
@@ -53,18 +55,17 @@ async function resolveSiteProperty(db = pool, sel = {}) {
   const host = given(sel.host);
   if (!key) return null;
 
-  const own = await db.query('SELECT id FROM property WHERE api_key = $1 AND api_key_enabled = true', [key]);
-  if (own.rows.length) return { propertyId: own.rows[0].id };
-
-  const org = await db.query('SELECT clerk_org_id FROM organization WHERE api_key = $1 AND api_key_enabled = true', [key]);
-  if (!org.rows.length) return null;
-  const clerkOrgId = org.rows[0].clerk_org_id;
+  const row = await findByKey(db, key);
+  if (!row) return null;
+  const apiKey = { id: row.id, permissions: row.permissions };
+  if (row.property_id) return { propertyId: row.property_id, apiKey };
+  const clerkOrgId = row.clerk_org_id;
 
   const { rows: props } = await db.query(
     "SELECT id, slug FROM property WHERE clerk_org_id = $1 AND status = 'active'",
     [clerkOrgId]
   );
-  const pick = (id) => (id ? { propertyId: id, clerkOrgId } : notFound());
+  const pick = (id) => (id ? { propertyId: id, clerkOrgId, apiKey } : notFound());
 
   if (propertyId) return pick(props.find((p) => p.id === propertyId.toLowerCase())?.id);
   if (slug) return pick(props.find((p) => p.slug === slug)?.id);

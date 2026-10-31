@@ -12,6 +12,7 @@ const { Client } = require('pg');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
 const pool = require('../src/db');
+const apiKeys = require('../src/lib/apiKeys');
 const {
   hostKey, resolveSiteProperty, resolveStaffProperty,
   SITE_AMBIGUOUS, HOST_AMBIGUOUS, STAFF_AMBIGUOUS, NO_ACTIVE,
@@ -76,14 +77,16 @@ const {
 
     const run = crypto.randomBytes(4).toString('hex');
     const ORG = { A: `org_chkA_${run}`, B: `org_chkB_${run}`, C: `org_chkC_${run}`, D: `org_chkD_${run}` };
-    const prop = async (org, name, slug, { status = 'active', key = null } = {}) =>
-      (await one(`INSERT INTO property (name, clerk_org_id, slug, status, api_key) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [name, org, slug, status, key])).id;
+    const prop = async (org, name, slug, { status = 'active', key = null } = {}) => {
+      const id = (await one(`INSERT INTO property (name, clerk_org_id, slug, status) VALUES ($1, $2, $3, $4) RETURNING id`,
+        [name, org, slug, status])).id;
+      if (key) await apiKeys.create(db, { property_id: id }, { key });
+      return id;
+    };
     const site = (propertyId, url, status = 'active') =>
       db.query(`INSERT INTO property_website (property_id, url, status) VALUES ($1, $2, $3)`, [propertyId, url, status]);
     const orgKey = async (org, enabled = true) =>
-      (await one(`INSERT INTO organization (clerk_org_id, api_key, api_key_enabled) VALUES ($1, $2, $3) RETURNING api_key`,
-        [org, `org_check_${org}`, enabled])).api_key;
+      (await apiKeys.create(db, { clerk_org_id: org }, { key: `org_check_${org}`, enabled })).key;
 
     const A1_KEY = `prop_check_A1_${run}`;
     const A1 = await prop(ORG.A, 'Seaview', 'seaview', { key: A1_KEY });
@@ -150,7 +153,9 @@ const {
     });
     await check('per-property key ignores routing headers', async () => {
       const r = await site$({ key: A1_KEY, slug: 'harbour', host: 'mygroup.com', propertyId: A2 });
-      assert.deepEqual(r, { propertyId: A1 });
+      assert.equal(r.propertyId, A1);
+      assert.equal(r.clerkOrgId, undefined);
+      assert.equal(r.apiKey.permissions, null); // a full key
     });
     await check('disabled, unknown or missing key -> null', async () => {
       assert.equal(await site$({ key: KOFF }), null);

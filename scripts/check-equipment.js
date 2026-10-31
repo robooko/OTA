@@ -10,6 +10,7 @@ const crypto = require('crypto');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
 const pool = require('../src/db');
+const apiKeys = require('../src/lib/apiKeys');
 const { hireWindow, peakUse, fitsHours, startTimes } = require('../src/lib/equipmentWindows');
 const app = require('../src/app');
 
@@ -55,7 +56,8 @@ const app = require('../src/app');
   const tag = crypto.randomBytes(4).toString('hex');
   const KEY = `equipment_check_${tag}`;
   const one = async (sql, p) => (await pool.query(sql, p)).rows[0];
-  const P = (await one(`INSERT INTO property (name, api_key) VALUES ('Equipment Check', $1) RETURNING id`, [KEY])).id;
+  const P = (await one(`INSERT INTO property (name) VALUES ('Equipment Check') RETURNING id`)).id;
+  await apiKeys.create(pool, { property_id: P }, { key: KEY });
   const api = async (method, path, body, key = KEY) => {
     const r = await fetch(base + path, {
       method,

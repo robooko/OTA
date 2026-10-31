@@ -34,6 +34,7 @@ drive.uploadMarinaDocument = async (orgId, d) => {
 };
 
 const pool = require('../src/db');
+const apiKeys = require('../src/lib/apiKeys');
 const app = require('../src/app');
 const { bookingToken } = require('../src/lib/marinaToken');
 
@@ -45,7 +46,8 @@ const { bookingToken } = require('../src/lib/marinaToken');
   const ORG = `org_mhc_${crypto.randomBytes(6).toString('hex')}`;
   await pool.query('INSERT INTO organization (clerk_org_id) VALUES ($1)', [ORG]);
   await pool.query("INSERT INTO org_integration (clerk_org_id, provider, refresh_token) VALUES ($1, 'google_drive', 'x')", [ORG]);
-  const P = (await one(`INSERT INTO property (name, timezone, currency, api_key, api_key_enabled, clerk_org_id) VALUES ('Marina HTTP Check', 'Europe/Rome', 'eur', $1, true, $2) RETURNING id`, [KEY, ORG])).id;
+  const P = (await one(`INSERT INTO property (name, timezone, currency, clerk_org_id) VALUES ('Marina HTTP Check', 'Europe/Rome', 'eur', $1) RETURNING id`, [ORG])).id;
+  await apiKeys.create(pool, { property_id: P }, { key: KEY });
   let failed = 0;
   const check = async (name, fn) => {
     try { await fn(); console.log(`ok   ${name}`); }

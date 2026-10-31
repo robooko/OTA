@@ -7,8 +7,8 @@
 //   node scripts/seed-marina-demo.js
 //   MARINA_DEMO_SLUG=pirates-bight node scripts/seed-marina-demo.js
 require('dotenv').config();
-const crypto = require('crypto');
 const { Client } = require('pg');
+const apiKeys = require('../src/lib/apiKeys');
 
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
@@ -81,10 +81,9 @@ async function put(db, table, key, row) {
 }
 
 async function seed(db) {
-  const P = await put(db, 'property', { name: 'Marina Demo' }, { currency: 'EUR', timezone: 'Europe/Rome', api_key_enabled: true });
+  const P = await put(db, 'property', { name: 'Marina Demo' }, { currency: 'EUR', timezone: 'Europe/Rome' });
   // Generated once and then kept, so a running widget demo survives a re-seed.
-  const { rows: [{ api_key: apiKey }] } = await db.query(
-    'UPDATE property SET api_key = COALESCE(api_key, $2) WHERE id = $1 RETURNING api_key', [P, `prop_${crypto.randomBytes(32).toString('hex')}`]);
+  const apiKey = (await apiKeys.ensureDefault(db, { property_id: P })).key;
   const M = await put(db, 'marina', { property_id: P, slug: SLUG }, {
     name: 'Demo Marina', description: 'A local demo marina for the booking widget.', phone: '+39 0185 000000',
     email: 'demo-marina@example.com', website: 'https://example.com', lat: 44.30332, lng: 9.2096,
