@@ -233,7 +233,7 @@ async function fetchGa4Analytics({ propertyId, sinceIso, untilIso, host = null }
  * Google Search Console totals and top searches for a host, or null when the
  * service account can't read either form of the site (a Domain property,
  * then a URL-prefix one) -- the dashboard just leaves search out then.
- * { impressions, clicks, position, daily: [{ date, impressions, clicks }],
+ * { impressions, clicks, position, daily: [{ date, impressions, clicks, position }],
  * queries: [{ name, value }] }, value = impressions.
  */
 async function fetchSearchConsole({ host, startDate, endDate }) {
@@ -260,7 +260,8 @@ async function fetchSearchConsole({ host, startDate, endDate }) {
     for (let day = new Date(`${startDate}T00:00:00Z`); day <= new Date(`${endDate}T00:00:00Z`); day.setUTCDate(day.getUTCDate() + 1)) {
       const date = day.toISOString().slice(0, 10);
       const r = dayRows.get(date);
-      daily.push({ date, impressions: r?.impressions ?? 0, clicks: r?.clicks ?? 0 });
+      // position is null on a day with no impressions -- there was no rank.
+      daily.push({ date, impressions: r?.impressions ?? 0, clicks: r?.clicks ?? 0, position: r?.position ?? null });
     }
     return {
       impressions: row?.impressions ?? 0,
