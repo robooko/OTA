@@ -958,13 +958,15 @@ CREATE INDEX IF NOT EXISTS idx_spa_appointment_property  ON spa_appointment(prop
 
 CREATE TABLE IF NOT EXISTS beach_bed (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  bed_number  VARCHAR(10)  NOT NULL UNIQUE,
+  property_id UUID         NOT NULL REFERENCES property(id) ON DELETE CASCADE,
+  bed_number  VARCHAR(10)  NOT NULL,
   zone        VARCHAR(50),
   status      VARCHAR(20)  DEFAULT 'active'
 );
 
 CREATE TABLE IF NOT EXISTS beach_booking (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id   UUID         NOT NULL REFERENCES property(id) ON DELETE CASCADE,
   bed_id        UUID         NOT NULL REFERENCES beach_bed(id),
   guest_id      UUID         REFERENCES guest(id),
   contact_name  VARCHAR(100) NOT NULL,
@@ -973,9 +975,13 @@ CREATE TABLE IF NOT EXISTS beach_booking (
   date          DATE         NOT NULL,
   status        VARCHAR(20)  DEFAULT 'confirmed',
   notes         TEXT,
-  created_at    TIMESTAMPTZ  DEFAULT now(),
-  UNIQUE (bed_id, date)
+  created_at    TIMESTAMPTZ  DEFAULT now()
 );
+
+-- Bed numbers per property; only live bookings hold a bed for a day.
+CREATE UNIQUE INDEX IF NOT EXISTS beach_bed_property_bed_number ON beach_bed(property_id, bed_number);
+CREATE UNIQUE INDEX IF NOT EXISTS beach_booking_bed_date_live ON beach_booking(bed_id, date) WHERE status <> 'cancelled';
+CREATE INDEX IF NOT EXISTS idx_beach_booking_property ON beach_booking(property_id, date);
 
 CREATE INDEX IF NOT EXISTS idx_beach_booking_date    ON beach_booking(date);
 CREATE INDEX IF NOT EXISTS idx_beach_booking_bed     ON beach_booking(bed_id);

@@ -1,18 +1,21 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/beachClub');
-const { requireApiKey } = require('../middleware/apiKey');
+const { authenticateOrApiKey } = require('../middleware/auth');
+
+// Staff or the property's API key, like tours -- every query is scoped to
+// the resolved property.
 
 // Beds
-router.get('/beds', ctrl.listBeds);
-router.post('/beds', requireApiKey, ctrl.createBed);
-router.put('/beds/:id', requireApiKey, ctrl.updateBed);
+router.get('/beds', authenticateOrApiKey, ctrl.listBeds);
+router.post('/beds', authenticateOrApiKey, ctrl.createBed);
+router.put('/beds/:id', authenticateOrApiKey, ctrl.updateBed);
 
 // Search
-router.get('/beds/search', ctrl.searchBeds);
+router.get('/beds/search', authenticateOrApiKey, ctrl.searchBeds);
 
 // Bookings
-router.get('/bookings', requireApiKey, ctrl.listBookings);
-router.post('/bookings', requireApiKey, ctrl.createBooking);
-router.put('/bookings/:id', requireApiKey, ctrl.updateBooking);
+router.get('/bookings', authenticateOrApiKey, ctrl.listBookings);
+router.post('/bookings', authenticateOrApiKey, ctrl.createBooking);
+router.put('/bookings/:id', authenticateOrApiKey, ctrl.updateBooking);
 
 module.exports = router;

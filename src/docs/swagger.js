@@ -1,7 +1,7 @@
 // ?include_inactive=1 on the marina and catalogue list routes (dashboard Reactivate).
 const INCLUDE_INACTIVE = { name: 'include_inactive', in: 'query', schema: { type: 'string', enum: ['1'] }, description: "'1' = every status (inactive rows too), same order; any other value = the default list" };
 
-// Every courses route takes a staff session or a site API key.
+// Every courses and beach club route takes a staff session or a site API key.
 const COURSE_AUTH = [{ bearerAuth: [] }, { apiKeyAuth: [] }];
 
 // Staff, or a FULL api key (MCP, scripts); a scoped key gets 403.
@@ -640,22 +640,23 @@ const swaggerSpec = {
     },
 
     // ── Beach Club ───────────────────────────────────────────────────────────
+    // Staff or the property's API key; every route is scoped to that property. Bed numbers are unique per property; a bed is held for a day by its one non-cancelled booking.
     '/api/beach-club/beds': {
-      get: { tags: ['Beach Club'], summary: 'List beds', parameters: [{ name: 'zone', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Array of beds' } } },
-      post: { tags: ['Beach Club'], summary: 'Create bed', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['bed_number'], properties: { bed_number: { type: 'string' }, zone: { type: 'string', example: 'pool, beach, VIP' } } } } } }, responses: { 201: { description: 'Created' } } },
+      get: { tags: ['Beach Club'], summary: 'List beds', security: COURSE_AUTH, parameters: [{ name: 'zone', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Array of beds' } } },
+      post: { tags: ['Beach Club'], summary: 'Create bed', security: COURSE_AUTH, requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['bed_number'], properties: { bed_number: { type: 'string' }, zone: { type: 'string', example: 'pool, beach, VIP' } } } } } }, responses: { 201: { description: 'Created' } } },
     },
     '/api/beach-club/beds/{id}': {
-      put: { tags: ['Beach Club'], summary: 'Update bed', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { bed_number: { type: 'string' }, zone: { type: 'string' }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Bed not found' } } },
+      put: { tags: ['Beach Club'], summary: 'Update bed', security: COURSE_AUTH, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { bed_number: { type: 'string' }, zone: { type: 'string' }, status: { type: 'string', enum: ['active', 'inactive'] } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Bed not found' } } },
     },
     '/api/beach-club/beds/search': {
-      get: { tags: ['Beach Club'], summary: 'Search available beds', parameters: [{ name: 'date', in: 'query', required: true, schema: { type: 'string', format: 'date' } }, { name: 'zone', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Available beds' } } },
+      get: { tags: ['Beach Club'], summary: 'Search available beds', security: COURSE_AUTH, parameters: [{ name: 'date', in: 'query', required: true, schema: { type: 'string', format: 'date' } }, { name: 'zone', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Available beds' } } },
     },
     '/api/beach-club/bookings': {
-      get: { tags: ['Beach Club'], summary: 'List beach club bookings', parameters: [{ name: 'date', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'status', in: 'query', schema: { type: 'string' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'zone', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Array of bookings' } } },
-      post: { tags: ['Beach Club'], summary: 'Book a beach bed', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['bed_id', 'contact_name', 'date'], properties: { bed_id: { type: 'string', format: 'uuid' }, guest_id: { type: 'string', format: 'uuid' }, contact_name: { type: 'string' }, contact_email: { type: 'string' }, contact_phone: { type: 'string' }, date: { type: 'string', format: 'date' }, notes: { type: 'string' } } } } } }, responses: { 201: { description: 'Booking created' }, 409: { description: 'Bed already booked' } } },
+      get: { tags: ['Beach Club'], summary: 'List beach club bookings', security: COURSE_AUTH, parameters: [{ name: 'date', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'status', in: 'query', schema: { type: 'string' } }, { name: 'guest_id', in: 'query', schema: { type: 'string', format: 'uuid' } }, { name: 'zone', in: 'query', schema: { type: 'string' } }], responses: { 200: { description: 'Array of bookings' } } },
+      post: { tags: ['Beach Club'], summary: 'Book a beach bed', security: COURSE_AUTH, requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['bed_id', 'contact_name', 'date'], properties: { bed_id: { type: 'string', format: 'uuid' }, guest_id: { type: 'string', format: 'uuid' }, contact_name: { type: 'string' }, contact_email: { type: 'string' }, contact_phone: { type: 'string' }, date: { type: 'string', format: 'date' }, notes: { type: 'string' } } } } } }, responses: { 201: { description: 'Booking created' }, 409: { description: 'Bed already booked' } } },
     },
     '/api/beach-club/bookings/{id}': {
-      put: { tags: ['Beach Club'], summary: 'Update beach club booking (e.g. cancel)', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string' }, notes: { type: 'string' } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Booking not found' } } },
+      put: { tags: ['Beach Club'], summary: 'Update beach club booking (e.g. cancel)', security: COURSE_AUTH, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['confirmed', 'cancelled'] }, notes: { type: 'string' } } } } } }, responses: { 200: { description: 'Updated' }, 404: { description: 'Booking not found' } } },
     },
 
     // ── Tours ────────────────────────────────────────────────────────────────

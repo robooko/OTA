@@ -2118,25 +2118,53 @@ function createTools(apiRequest) {
     inputSchema: { booking_id: z.string(), id: z.string() },
     run: ({ booking_id, id }) => apiRequest('DELETE', `/api/extras/booking/${booking_id}/${id}`),
   },
-  // Beach club create/update routes (create_bed, update_bed, create_booking,
-  // update_booking) use the older requireApiKey middleware -- a single
-  // global secret (process.env.API_KEY), not the per-property X-Api-Key an
-  // MCP client authenticates with (see OTA/src/middleware/apiKey.js vs
-  // authenticateOrApiKey). Those writes would always 401 through this MCP
-  // server, so only the two unauthenticated read routes are exposed here.
-  // (Note: listBeds/searchBeds also aren't property-scoped in the
-  // controller -- a separate, pre-existing gap, not introduced by this.)
   {
     name: 'list_beach_beds',
-    description: 'List beach club beds, optionally filtered by zone',
+    description: 'List active beach club beds, optionally filtered by zone',
     inputSchema: { zone: z.string().optional() },
     run: (args) => apiRequest('GET', '/api/beach-club/beds', { query: args }),
   },
   {
     name: 'search_beach_beds',
-    description: 'Search available beach club beds for a date, optionally filtered by zone',
-    inputSchema: { date: z.string(), zone: z.string().optional() },
+    description: 'Beach club beds free on a date, optionally filtered by zone',
+    inputSchema: { date: z.string().describe('YYYY-MM-DD'), zone: z.string().optional() },
     run: (args) => apiRequest('GET', '/api/beach-club/beds/search', { query: args }),
+  },
+  {
+    name: 'create_beach_bed',
+    description: 'Add a beach club bed (bed_number unique per property)',
+    inputSchema: { bed_number: z.string().max(10), zone: z.string().max(50).optional() },
+    run: (body) => apiRequest('POST', '/api/beach-club/beds', { body }),
+  },
+  {
+    name: 'update_beach_bed',
+    description: 'Update a beach club bed; omitted fields are unchanged. status inactive takes it out of listings and search.',
+    inputSchema: { id: z.string(), bed_number: z.string().max(10).optional(), zone: z.string().max(50).optional(), status: z.enum(['active', 'inactive']).optional() },
+    run: ({ id, ...body }) => apiRequest('PUT', `/api/beach-club/beds/${id}`, { body }),
+  },
+  {
+    name: 'list_beach_bookings',
+    description: 'Beach club bookings, optionally by date, status, guest or zone',
+    inputSchema: {
+      date: z.string().optional().describe('YYYY-MM-DD'), status: z.enum(['confirmed', 'cancelled']).optional(),
+      guest_id: z.string().optional(), zone: z.string().optional(),
+    },
+    run: (query) => apiRequest('GET', '/api/beach-club/bookings', { query }),
+  },
+  {
+    name: 'create_beach_booking',
+    description: 'Book a beach bed for a day (find one with search_beach_beds). 409 if it is already booked.',
+    inputSchema: {
+      bed_id: z.string(), date: z.string().describe('YYYY-MM-DD'), contact_name: z.string().max(100),
+      contact_email: z.string().optional(), contact_phone: z.string().optional(), guest_id: z.string().optional(), notes: z.string().optional(),
+    },
+    run: (body) => apiRequest('POST', '/api/beach-club/bookings', { body }),
+  },
+  {
+    name: 'update_beach_booking',
+    description: 'Cancel or restore a beach booking, or change its notes',
+    inputSchema: { id: z.string(), status: z.enum(['confirmed', 'cancelled']).optional(), notes: z.string().optional() },
+    run: ({ id, ...body }) => apiRequest('PUT', `/api/beach-club/bookings/${id}`, { body }),
   },
   {
     name: 'get_room_type',
