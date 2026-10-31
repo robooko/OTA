@@ -19,6 +19,7 @@ const staffOrFullKey = [authenticateOrApiKey, requireRoleOrApiKey('admin', 'staf
 const setup = [authenticateOrApiKey, manage];
 
 router.get('/board', staffOrFullKey, ctrl.board);
+router.get('/ably-token', staffOrFullKey, ctrl.ablyToken);
 router.get('/reports', staffOrFullKey, ctrl.reports);
 
 router.get('/settings', staffOrFullKey, ctrl.getSettings);

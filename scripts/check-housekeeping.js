@@ -715,6 +715,23 @@ const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toI
           assert.equal((await hit(SCOPED, 'GET', `/minibar/list?room_type_id=${RT}`)).status, 200); // booking site
           assert.equal((await hit(KEY, 'GET', `/minibar/list?room_type_id=${RT}`)).status, 200);
         });
+        await check('ably-token: subscribe-only on the property housekeeping channel; 503 without Ably; scoped key refused', async () => {
+          const minted = [];
+          const real = ably.createSubscribeTokenRequest;
+          ably.createSubscribeTokenRequest = async (channels) => { minted.push(channels); return { keyName: 'k', capability: 'x' }; };
+          try {
+            const r = await call(ctrl.ablyToken, { property_id: P, user: staffA });
+            assert.equal(r.statusCode, 200);
+            assert.deepEqual(r.body, { tokenRequest: { keyName: 'k', capability: 'x' }, channel: `property:${P}:housekeeping` });
+            assert.deepEqual(minted, [`property:${P}:housekeeping`]);
+            ably.createSubscribeTokenRequest = async () => null; // no ABLY_API_KEY
+            assert.equal((await call(ctrl.ablyToken, { property_id: P, user: staffA })).statusCode, 503);
+          } finally {
+            ably.createSubscribeTokenRequest = real;
+          }
+          assert.equal((await hit(SCOPED, 'GET', '/ably-token')).status, 403);
+          assert.equal((await fetch(`${base9}/api/housekeeping/ably-token`)).status, 401);
+        });
         await check('MCP tools map to the housekeeping endpoints', async () => {
           const calls = [];
           const tools = require('../mcp-server/tools').createTools(async (method, path, opts) => { calls.push([method, path, opts]); return {}; });

@@ -23,6 +23,18 @@ async function board(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Subscribe-only token for property:{id}:housekeeping (job-updated,
+// room-status-changed, inspection-failed, minibar-recorded). Staff or a full
+// key only: the events carry guest names, same as the board.
+async function ablyToken(req, res, next) {
+  try {
+    const channel = `property:${req.property_id}:housekeeping`;
+    const tokenRequest = await require('../lib/ably').createSubscribeTokenRequest(channel);
+    if (!tokenRequest) return res.status(503).json({ error: 'Realtime notifications are not configured' });
+    res.json({ tokenRequest, channel });
+  } catch (err) { next(err); }
+}
+
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 const SETTINGS_SQL = `hk_inspection_required AS inspection_required, hk_service_every_days AS service_every_days,
@@ -618,7 +630,7 @@ async function inspectJob(req, res, next) {
 }
 
 module.exports = {
-  board, getSettings, putSettings, putOverride, deleteOverride, putRoomStatus,
+  board, ablyToken, getSettings, putSettings, putOverride, deleteOverride, putRoomStatus,
   claimJob, unclaimJob, startJob, finishJob,
   placeExtra, reports,
   listMinibarItems, createMinibarItem, updateMinibarItem, putMinibarList, getMinibarList, recordMinibar,
