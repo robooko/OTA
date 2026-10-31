@@ -1,6 +1,6 @@
 # Housekeeping — design
 
-Date: 2026-10-31. Status: draft for approval. Scope: hotel **rooms only** (no berths).
+Date: 2026-10-31. Status: draft for approval (builder-check questions answered). Scope: hotel **rooms only** (no berths).
 
 ## Why
 
@@ -10,11 +10,11 @@ OTA provides the API and live events. Housekeeping staff use the existing staff 
 
 ## Goals
 
-1. **Room readiness.** Every room has a housekeeping state: `dirty → cleaning → clean → ready` (ready = passed inspection). Checkout makes a room dirty. Check-in warns when the room isn't ready.
+1. **Room readiness.** Every room has a housekeeping state: `dirty → cleaning → clean → ready`. Ready means passed inspection where the property requires it, otherwise just cleaned. Checkout makes a room dirty. Check-in warns when the room isn't ready.
 2. **Daily board.** A shared list of today's housekeeping jobs per property. Cleaners claim jobs themselves. Each job shows who last cleaned the room and who has been looking after the current guest's stay, so cleaners can keep "their" rooms and guests. It doesn't lock anyone out.
 3. **Recorded cleans.** Each clean records the cleaner, start and finish times (time per room), comments, and whether sheets and towels were changed.
 4. **Stayover rule.** Each property sets how often in-house guests get serviced and how often sheets are changed. Staff can override it for a room on a day (skip because the guest declined, or add an extra clean).
-5. **Inspection.** Each property defines its own checklist items, each with a pass mark (e.g. "Vacuum/floor ≥ 4"). The inspector grades every item 1–5 and can add a comment and a photo per item. Any item below its pass mark fails the room. The fail goes straight back to the cleaner who did it, showing the exact item, score, comment and photo. They redo it, and it's inspected again.
+5. **Inspection.** Optional per property. Each property defines its own checklist items, each with a pass mark (e.g. "Vacuum/floor ≥ 4"). The inspector grades every item 1–5 and can add a comment and a photo per item. Any item below its pass mark fails the room. The fail goes straight back to the cleaner who did it, showing the exact item, score, comment and photo. They redo it, and it's inspected again.
 6. **Scores.** The inspector's score and the guest's post-stay cleanliness rating are both credited to the cleaner. Reports give average minutes, inspection score and guest score per cleaner and per room.
 7. **Arrival extras.** Booked extras that belong in the room appear on that room's arrival job as a checklist ("place Dom Pérignon ×1"). Each is ticked off when placed.
 8. **Minibar.** Each room type has a minibar list, and a rate plan can have its own list that replaces it. Each item on a list is either **included** or **charged**, so the same item can be free on Flex and charged on Saver. The list is public so the booking site can market it. Housekeeping records what was used and restocks. Charged items go on the folio.
@@ -39,12 +39,13 @@ OTA provides the API and live events. Housekeeping staff use the existing staff 
 
 **Module.** Everything sits behind a new `housekeeping` entry in `property.enabled_modules`, like the other modules. Staff rail (Clerk bearer) for all write endpoints. The minibar list is also exposed on the site rail (API key) for the booking site.
 
-**Identity.** Cleaners and inspectors are Clerk org members. Store `clerk_user_id` (and a display name snapshot), the same way spa therapists do.
+**Identity.** Every cleaner and inspector has their own Clerk login (Robert confirmed; no shared tablet logins). Store `clerk_user_id` and a display name snapshot, the same way spa therapists do. The Clerk token carries no name, so the builder gets it the way `/api/property/staff` already does.
 
 **Housekeeping state on the room.** New column `room.housekeeping_status` (`dirty` | `cleaning` | `clean` | `ready`), default `ready`.
 - Booking moves to `checked_out` → room `dirty`, and a checkout job is created for today.
-- Cleaner starts a job → `cleaning`. Finishes → `clean`.
-- Inspection pass → `ready`. Inspection fail → `dirty` again, and the job is reopened for the same cleaner (rework).
+- Cleaner starts a job → `cleaning`. Finishes → `clean` when the property requires inspection, `ready` when it doesn't.
+- Inspection pass → `ready`. Inspection fail → `dirty` again, and the job is reopened for the same cleaner (rework). This also applies to spot checks at properties that don't require inspection: a failed spot check sends a `ready` room back to `dirty`.
+- Stayover cleans in occupied rooms never require inspection. They can still be spot-checked.
 - Staff can set it by hand (e.g. mark a room dirty after a maintenance visit).
 
 **Jobs.** One job per room per day per kind: `checkout` or `stayover` (plus `extra` for a manually added clean). Each job holds the booking it relates to (departing or staying guest), plus the arriving booking when there is one that day, so arrival extras and priority ("arrival today") show on it. Job lifecycle: `open → claimed → in_progress → done → passed | failed`. Failed goes back to `in_progress` on rework, and `skipped` is set by override. A job keeps its full history: each attempt's start/finish and each inspection.
@@ -53,11 +54,13 @@ OTA provides the API and live events. Housekeeping staff use the existing staff 
 
 **Board.** `GET` today's board (or a given date) for the property. It lists jobs with room number, floor, kind, state, claimed-by, departing/arriving guest names, arrival time if known, extras to place, the minibar list, the last cleaner of the room, and the cleaner who has handled most of the current stay. Ordered with arrivals-today-and-dirty first.
 
+**Inspection setting.** Property setting `hk_inspection_required`, default **off** (Robert: "no or optional"). Off means finishing a clean makes the room ready and inspections are optional spot checks. On means checkout cleans wait at `clean` until passed. First-time pass rate counts only inspected jobs.
+
 **Inspection checklist.** Property-level list of items: name, pass mark (1–5), sort order, active/archived. An inspection stores a score per item, plus optional comment and photo per item. The overall score is the average. It fails if any item is under its pass mark. Archiving an item never rewrites old inspections (scores snapshot the item name and pass mark).
 
 **Fail alert.** On fail, publish an Ably event on the property channel addressed to the cleaner's `clerk_user_id`. The event carries the failed items (name, score, pass mark, comment, photo URL). The app shows it and filters to the signed-in user.
 
-**Guest cleanliness rating.** Add a 1–5 cleanliness rating to the existing post-stay review request email (`reviewRequester`) for room bookings. Each star is a one-click link to a public OTA endpoint that records it, and the existing Google review link stays. The rating is credited to the cleaner of the last passed checkout job on that room before the guest's check-in. Credit for stayover cleans during the stay is spread across their cleaners. (Builder: weighting is your call, documented in code.)
+**Guest cleanliness rating.** Separate from Google reviews and from `reviewRequester` (Robert). After a room booking checks out, the guest gets a short email from its own sweep, with a link to a simple public OTA form: a 1–5 cleanliness rating and an optional comment. It's one email per room booking, works whether or not the property uses Google reviews, and respects existing guest email opt-outs. The link is a signed or unguessable token per booking, so the form needs no login. Delay after checkout is the builder's call (a few hours). The rating is credited to the cleaner of the last finished (and passed, if inspected) checkout job on that room before the guest's check-in. Credit for stayover cleans during the stay is spread across their cleaners. (Builder: weighting is your call, documented in code.)
 
 **Arrival extras.** New `extra.place_in_room` boolean (default false). On a job with an arriving booking, list that booking's `booking_extra` rows where the extra is `place_in_room`. Add `placed_at` and `placed_by` to `booking_extra`. The cleaner or anyone else ticks them.
 
@@ -65,7 +68,7 @@ OTA provides the API and live events. Housekeeping staff use the existing staff 
 - Catalogue: `minibar_item` per property (name, description, image URL, price, active).
 - Lists: `minibar_list_item` rows of (room_type_id, rate_plan_id nullable, minibar_item_id, quantity, included). Rows with a rate plan **replace** the room type's list for that plan entirely (no merge).
 - Public read: the list for a room type and rate plan, with included/charged and price, for the booking site.
-- Recording: on any job, the cleaner records quantities used per item. Included items record at 0 so they're still counted for restock. Charged items become a folio line (new folio line type `minibar`) at the price at the time. If the guest has already checked out, the charge simply shows as an unpaid balance. Nothing blocks.
+- Recording: on any job, the cleaner records quantities used per item. Included items are **never charged**, however many are used (no cap; Robert). They record at price 0 so they're still counted for restock. Charged items become a folio line (new folio line type `minibar`) at the price at the time. If the guest has already checked out, the charge simply shows as an unpaid balance. Nothing blocks.
 - Restock: recording usage also means "restocked to par". There's no separate restock step.
 
 **Check-in warning.** `PUT /api/bookings/:id` to `checked_in` when the room isn't `ready` returns `409 { error: 'Room not ready', housekeeping_status }` unless `force: true`. This mirrors the existing folio gate at `src/controllers/bookings.js:399`.
