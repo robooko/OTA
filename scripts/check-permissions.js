@@ -19,11 +19,13 @@ const apiKeys = require('../src/lib/apiKeys');
 const { resolveSiteProperty } = require('../src/lib/propertyResolver');
 const { authenticateOrApiKey, authenticateOrgKey, requirePermission, requireRoleOrApiKey } = require('../src/middleware/auth');
 const authCtrl = require('../src/controllers/auth');
+const apiKeysCtrl = require('../src/controllers/apiKeys');
+const staffCtrl = require('../src/controllers/staff');
 
 // Drives a controller directly (bearer routes can't be reached over HTTP
 // without a real Clerk token).
 const call = async (fn, req) => {
-  const res = { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; }, send() { return this; } };
+  const res = { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; }, end() { return this; } };
   let error;
   await fn({ params: {}, query: {}, body: {}, headers: {}, ...req }, res, (e) => { error = e; });
   if (error) throw error;
@@ -210,6 +212,77 @@ const mw = (fn, req) => new Promise((resolve, reject) => {
     } finally {
       server.close();
     }
+
+    // ── Key management and staff grants (controllers driven directly) ───────
+    const P_C = (await one(`INSERT INTO property (name, clerk_org_id, slug) VALUES ('Perm Check C', $1, 'perm-c') RETURNING id`, [ORG])).id;
+    const admin = { property_id: P_C, clerk_org_id: ORG, user: { id: 'user_adm', role: 'admin' } };
+    const org = { clerk_org_id: FRESH_ORG, user: { id: 'user_adm', role: 'admin' } };
+
+    await check('legacy property endpoints act on the Default row with the old shapes', async () => {
+      const g = await call(apiKeysCtrl.property.getLegacy, admin);
+      assert.match(g.body.api_key, /^prop_[0-9a-f]{64}$/);
+      assert.deepEqual(Object.keys(g.body).sort(), ['api_key', 'api_key_enabled']);
+      assert.equal(g.body.api_key_enabled, true);
+      const r = await call(apiKeysCtrl.property.rotateLegacy, admin);
+      assert.deepEqual(Object.keys(r.body), ['api_key']);
+      assert.notEqual(r.body.api_key, g.body.api_key);
+      assert.equal(await apiKeys.findByKey(pool, g.body.api_key), null); // old value dead
+      assert.equal((await apiKeys.findByKey(pool, r.body.api_key)).name, 'Default');
+      const d = await call(apiKeysCtrl.property.disableLegacy, admin);
+      assert.deepEqual(d.body, { api_key: r.body.api_key, api_key_enabled: false });
+      assert.equal(await apiKeys.findByKey(pool, r.body.api_key), null);
+      const e = await call(apiKeysCtrl.property.enableLegacy, admin);
+      assert.deepEqual(e.body, { api_key: r.body.api_key, api_key_enabled: true });
+    });
+    await check('legacy org endpoints create the organization row and an org_ Default', async () => {
+      const g = await call(apiKeysCtrl.organization.getLegacy, org);
+      assert.match(g.body.api_key, /^org_[0-9a-f]{64}$/);
+      assert.equal((await call(apiKeysCtrl.organization.getLegacy, org)).body.api_key, g.body.api_key);
+      assert.notEqual((await call(apiKeysCtrl.organization.rotateLegacy, org)).body.api_key, g.body.api_key);
+    });
+    await check('create: 201 with created_by; Default reserved; bad name / permissions are 400', async () => {
+      const c = await call(apiKeysCtrl.property.create, { ...admin, body: { name: 'Website', permissions: ['housekeeping.inspect'] } });
+      assert.equal(c.statusCode, 201);
+      assert.deepEqual([c.body.name, c.body.permissions, c.body.created_by, c.body.enabled, c.body.property_id], ['Website', ['housekeeping.inspect'], 'user_adm', true, P_C]);
+      const full = await call(apiKeysCtrl.property.create, { ...admin, body: { name: 'Agent' } });
+      assert.equal(full.body.permissions, null);
+      for (const body of [{ name: 'Default' }, { name: '' }, { name: 'x'.repeat(101) }, { name: 7 }, {}, { name: 'Bad', permissions: 'housekeeping.inspect' }, { name: 'Bad', permissions: [1] }]) {
+        const r = await call(apiKeysCtrl.property.create, { ...admin, body });
+        assert.equal(r.statusCode, 400, JSON.stringify([body, r.body]));
+      }
+      assert.deepEqual((await call(apiKeysCtrl.property.create, { ...admin, body: { name: 'Bad', permissions: ['nope.x', 'housekeeping.inspect'] } })).body, { error: 'Unknown permissions: nope.x' });
+    });
+    await check('update / list / remove, owner-scoped', async () => {
+      const keys = (await call(apiKeysCtrl.property.list, admin)).body;
+      assert.deepEqual(keys.map((k) => k.name), ['Default', 'Website', 'Agent']);
+      const site = keys[1];
+      const u = await call(apiKeysCtrl.property.update, { ...admin, params: { id: site.id }, body: { permissions: null, enabled: false } });
+      assert.deepEqual([u.statusCode, u.body.permissions, u.body.enabled, u.body.name], [200, null, false, 'Website']);
+      const n = await call(apiKeysCtrl.property.update, { ...admin, params: { id: site.id }, body: { name: 'Site', permissions: ['housekeeping.manage'] } });
+      assert.deepEqual([n.body.name, n.body.permissions, n.body.enabled], ['Site', ['housekeeping.manage'], false]);
+      assert.equal((await call(apiKeysCtrl.property.update, { ...admin, params: { id: site.id }, body: { permissions: ['nope.x'] } })).statusCode, 400);
+      assert.equal((await call(apiKeysCtrl.property.update, { ...admin, params: { id: site.id }, body: { name: 'Default' } })).statusCode, 400);
+      assert.equal((await call(apiKeysCtrl.property.update, { ...admin, params: { id: site.id }, body: { enabled: 'yes' } })).statusCode, 400);
+      assert.equal((await call(apiKeysCtrl.organization.update, { ...org, params: { id: site.id }, body: { name: 'x' } })).statusCode, 404); // wrong owner
+      assert.equal((await call(apiKeysCtrl.property.update, { ...admin, params: { id: 'not-a-uuid' }, body: { name: 'x' } })).statusCode, 404);
+      assert.equal((await call(apiKeysCtrl.property.remove, { ...admin, params: { id: site.id } })).statusCode, 204);
+      assert.equal((await call(apiKeysCtrl.property.remove, { ...admin, params: { id: site.id } })).statusCode, 404);
+      assert.equal((await call(apiKeysCtrl.property.list, admin)).body.length, 2);
+    });
+    await check('deleting Default: the legacy GET makes a fresh one', async () => {
+      const d = (await call(apiKeysCtrl.property.list, admin)).body.find((k) => k.name === 'Default');
+      assert.equal((await call(apiKeysCtrl.property.remove, { ...admin, params: { id: d.id } })).statusCode, 204);
+      const g = await call(apiKeysCtrl.property.getLegacy, admin);
+      assert.notEqual(g.body.api_key, d.key);
+      assert.equal(g.body.api_key_enabled, true);
+    });
+    await check('staff grant PUT validates before Clerk is called', async () => {
+      const put = (clerk_user_id, body) => call(staffCtrl.setStaffPermissions, { ...admin, params: { clerk_user_id }, body });
+      assert.deepEqual((await put('user_x', { permissions: ['nope.x'] })).body, { error: 'Unknown permissions: nope.x' });
+      assert.equal((await put('user_x', {})).statusCode, 400);
+      assert.equal((await put('user_x', { permissions: 'housekeeping.inspect' })).statusCode, 400);
+      assert.equal((await put('user_x', { permissions: [null] })).statusCode, 400);
+    });
   } finally {
     await pool.query('DELETE FROM property WHERE clerk_org_id = $1', [ORG]);
     await pool.query('DELETE FROM organization WHERE clerk_org_id = ANY($1)', [[ORG, FRESH_ORG]]);

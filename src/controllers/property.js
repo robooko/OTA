@@ -48,10 +48,6 @@ function verifyState(state) {
   return sig === expected ? propertyId : null;
 }
 
-function generateApiKey() {
-  return 'prop_' + crypto.randomBytes(32).toString('hex');
-}
-
 async function getCurrentProperty(req, res, next) {
   try {
     const { rows } = await pool.query(
@@ -125,52 +121,6 @@ async function updateCurrentProperty(req, res, next) {
     res.json(rows[0]);
   } catch (err) {
     if (isSlugConflict(err)) return res.status(409).json({ error: SLUG_TAKEN });
-    next(err);
-  }
-}
-
-async function getApiKey(req, res, next) {
-  try {
-    const { rows } = await pool.query('SELECT api_key, api_key_enabled FROM property WHERE id = $1', [req.property_id]);
-    res.json(rows[0]);
-  } catch (err) {
-    next(err);
-  }
-}
-
-async function rotateApiKey(req, res, next) {
-  try {
-    const api_key = generateApiKey();
-    const { rows } = await pool.query(
-      'UPDATE property SET api_key = $1 WHERE id = $2 RETURNING api_key',
-      [api_key, req.property_id]
-    );
-    res.json({ api_key: rows[0].api_key });
-  } catch (err) {
-    next(err);
-  }
-}
-
-async function disableApiKey(req, res, next) {
-  try {
-    const { rows } = await pool.query(
-      'UPDATE property SET api_key_enabled = false WHERE id = $1 RETURNING api_key, api_key_enabled',
-      [req.property_id]
-    );
-    res.json(rows[0]);
-  } catch (err) {
-    next(err);
-  }
-}
-
-async function enableApiKey(req, res, next) {
-  try {
-    const { rows } = await pool.query(
-      'UPDATE property SET api_key_enabled = true WHERE id = $1 RETURNING api_key, api_key_enabled',
-      [req.property_id]
-    );
-    res.json(rows[0]);
-  } catch (err) {
     next(err);
   }
 }
@@ -1188,7 +1138,7 @@ module.exports = {
   getReminderSettings, updateReminderSettings,
   getVoiceSettings, updateVoiceSettings, updateVoiceTransferNumber, updateVoiceEnabled,
   searchVoiceNumbers, provisionVoiceNumber, releaseVoiceNumber,
-  getCurrentProperty, updateCurrentProperty, getApiKey, rotateApiKey, disableApiKey, enableApiKey,
+  getCurrentProperty, updateCurrentProperty,
   listWebsites, createWebsite, updateWebsite, getWebsiteAnalytics, getWebsiteCompetitors, refreshWebsiteCompetitors, listVercelProjects, getVercelProjectAnalytics, getGoogleAnalyticsSetup,
   getVercelConnectUrl, vercelConnectCallback, getVercelConnectionStatus, disconnectVercel,
   setVercelPat, clearVercelPat,

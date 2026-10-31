@@ -15,6 +15,7 @@ const apiKeys = require('../src/lib/apiKeys');
 const app = require('../src/app');
 const { SITE_AMBIGUOUS } = require('../src/lib/propertyResolver');
 const orgCtrl = require('../src/controllers/organization');
+const orgKeys = require('../src/controllers/apiKeys').organization;
 
 // Drives a controller directly (bearer routes can't be reached over HTTP
 // without a real Clerk token).
@@ -171,13 +172,13 @@ const call = async (fn, req) => {
     await check('org controller: api-key routes work in any order and toggle', async () => {
       const fresh = `org_httpchk_new_${run}`;
       cleanupOrgs.push(fresh);
-      const rotated = await call(orgCtrl.rotateApiKey, { clerk_org_id: fresh }); // before any GET
+      const rotated = await call(orgKeys.rotateLegacy, { clerk_org_id: fresh }); // before any GET
       assert.match(rotated.body.api_key, /^org_[0-9a-f]{64}$/);
-      const got = await call(orgCtrl.getApiKey, { clerk_org_id: fresh });
+      const got = await call(orgKeys.getLegacy, { clerk_org_id: fresh });
       assert.deepEqual(got.body, { api_key: rotated.body.api_key, api_key_enabled: true });
-      assert.equal((await call(orgCtrl.disableApiKey, { clerk_org_id: fresh })).body.api_key_enabled, false);
-      assert.equal((await call(orgCtrl.enableApiKey, { clerk_org_id: fresh })).body.api_key_enabled, true);
-      const again = await call(orgCtrl.rotateApiKey, { clerk_org_id: fresh });
+      assert.equal((await call(orgKeys.disableLegacy, { clerk_org_id: fresh })).body.api_key_enabled, false);
+      assert.equal((await call(orgKeys.enableLegacy, { clerk_org_id: fresh })).body.api_key_enabled, true);
+      const again = await call(orgKeys.rotateLegacy, { clerk_org_id: fresh });
       assert.notEqual(again.body.api_key, rotated.body.api_key);
     });
   } finally {

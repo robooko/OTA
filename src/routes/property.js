@@ -1,5 +1,7 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/property');
+const apiKeys = require('../controllers/apiKeys').property;
+const staff = require('../controllers/staff');
 const { authenticate, authenticateOrApiKey, requireRole, requireRoleOrApiKey } = require('../middleware/auth');
 
 // Both on the API-key rail: identity is read-only content, and
@@ -12,10 +14,19 @@ const { authenticate, authenticateOrApiKey, requireRole, requireRoleOrApiKey } =
 router.get('/me', authenticateOrApiKey, ctrl.getCurrentProperty);
 router.put('/me', authenticateOrApiKey, ctrl.updateCurrentProperty);
 
-router.get('/api-key', authenticate, requireRole('admin'), ctrl.getApiKey);
-router.post('/api-key/rotate', authenticate, requireRole('admin'), ctrl.rotateApiKey);
-router.post('/api-key/disable', authenticate, requireRole('admin'), ctrl.disableApiKey);
-router.post('/api-key/enable', authenticate, requireRole('admin'), ctrl.enableApiKey);
+// The property's main ('Default') key, old shapes kept for the dashboard.
+router.get('/api-key', authenticate, requireRole('admin'), apiKeys.getLegacy);
+router.post('/api-key/rotate', authenticate, requireRole('admin'), apiKeys.rotateLegacy);
+router.post('/api-key/disable', authenticate, requireRole('admin'), apiKeys.disableLegacy);
+router.post('/api-key/enable', authenticate, requireRole('admin'), apiKeys.enableLegacy);
+// Every key: named, individually enabled, full (permissions null) or scoped.
+router.get('/api-keys', authenticate, requireRole('admin'), apiKeys.list);
+router.post('/api-keys', authenticate, requireRole('admin'), apiKeys.create);
+router.put('/api-keys/:id', authenticate, requireRole('admin'), apiKeys.update);
+router.delete('/api-keys/:id', authenticate, requireRole('admin'), apiKeys.remove);
+// Staff grants at this property (members from Clerk).
+router.get('/staff', authenticate, requireRole('admin'), staff.listStaff);
+router.put('/staff/:clerk_user_id/permissions', authenticate, requireRole('admin'), staff.setStaffPermissions);
 
 router.get('/vercel/projects', authenticate, ctrl.listVercelProjects);
 router.get('/vercel/projects/:projectId/analytics', authenticateOrApiKey, ctrl.getVercelProjectAnalytics);
