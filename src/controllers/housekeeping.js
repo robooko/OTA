@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const pool = require('../db');
 const hk = require('../lib/housekeeping');
 
@@ -246,8 +247,137 @@ async function finishJob(req, res, next) {
   }
 }
 
+// ── Inspection ──────────────────────────────────────────────────────────────
+
+function checkItemError({ name, pass_mark, sort_order, status }, partial) {
+  if (!(partial && name === undefined) && (typeof name !== 'string' || !name.trim() || name.length > 100)) return 'name is required (up to 100 characters)';
+  if (!(partial && pass_mark === undefined) && !(Number.isInteger(pass_mark) && pass_mark >= 1 && pass_mark <= 5)) return 'pass_mark must be a whole number 1 to 5';
+  if (sort_order !== undefined && !Number.isInteger(sort_order)) return 'sort_order must be a whole number';
+  if (status !== undefined && !['active', 'archived'].includes(status)) return "status must be 'active' or 'archived'";
+  return null;
+}
+
+async function activeCheckItems(db, propertyId) {
+  const { rows } = await db.query(
+    `SELECT * FROM hk_check_item WHERE property_id = $1 AND status = 'active' ORDER BY sort_order, name`, [propertyId]
+  );
+  return rows;
+}
+
+async function listCheckItems(req, res, next) {
+  try { res.json(await activeCheckItems(pool, req.property_id)); } catch (err) { next(err); }
+}
+
+async function createCheckItem(req, res, next) {
+  try {
+    const err = checkItemError(req.body, false);
+    if (err) return res.status(400).json({ error: err });
+    const { name, pass_mark, sort_order } = req.body;
+    const { rows } = await pool.query(
+      'INSERT INTO hk_check_item (property_id, name, pass_mark, sort_order) VALUES ($1, $2, $3, $4) RETURNING *',
+      [req.property_id, name.trim(), pass_mark, sort_order ?? 0]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) { next(err); }
+}
+
+async function updateCheckItem(req, res, next) {
+  try {
+    const err = checkItemError(req.body, true);
+    if (err) return res.status(400).json({ error: err });
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Checklist item not found' });
+    const { name, pass_mark, sort_order, status } = req.body;
+    const { rows } = await pool.query(
+      `UPDATE hk_check_item SET
+         name = COALESCE($1, name), pass_mark = COALESCE($2, pass_mark),
+         sort_order = COALESCE($3, sort_order), status = COALESCE($4, status)
+       WHERE id = $5 AND property_id = $6 RETURNING *`,
+      [name?.trim() ?? null, pass_mark ?? null, sort_order ?? null, status ?? null, req.params.id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Checklist item not found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
+const PHOTO_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+
+// Raw image body (express.raw on the route); returns a URL to put on a score.
+async function uploadPhoto(req, res, next) {
+  try {
+    const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (!PHOTO_EXT[type]) return res.status(400).json({ error: 'Send a JPEG, PNG or WebP image as the request body' });
+    if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Empty image' });
+    const url = await hk.putPhoto(`housekeeping/${req.property_id}/${crypto.randomUUID()}.${PHOTO_EXT[type]}`, req.body, type);
+    res.status(201).json({ url });
+  } catch (err) { next(err); }
+}
+
+// Grades the latest clean. Fail sends the room back to dirty and the job back
+// to its cleaner with exactly what failed; pass makes the room ready. A done
+// job is inspected; a passed one may be spot-checked again.
+async function inspectJob(req, res, next) {
+  const client = await pool.connect();
+  try {
+    const job = await loadJob(client, req.params.id, req.property_id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (!['done', 'passed'].includes(job.status)) return res.status(409).json({ error: `Job is ${job.status}; only a finished clean can be inspected` });
+    const attempt = (await client.query(
+      'SELECT * FROM hk_clean WHERE job_id = $1 AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1', [job.id]
+    )).rows[0];
+    if (!attempt) return res.status(409).json({ error: 'No finished clean to inspect' });
+    if (attempt.cleaner_id === req.user?.id && !isAdmin(req)) return res.status(409).json({ error: 'Cannot inspect your own clean' });
+    const graded = hk.scoreInspection(await activeCheckItems(client, req.property_id), req.body?.scores);
+    if (graded.error) return res.status(400).json({ error: graded.error });
+
+    const me = req.user?.id;
+    const name = await hk.staffName(me);
+    await client.query('BEGIN');
+    const moved = await client.query(
+      `UPDATE hk_job SET status = $1 WHERE id = $2 AND status = $3 RETURNING id`,
+      [graded.passed ? 'passed' : 'failed', job.id, job.status]
+    );
+    if (!moved.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Job changed, try again' });
+    }
+    const insp = (await client.query(
+      `INSERT INTO hk_inspection (job_id, clean_id, inspector_id, inspector_name, passed, score)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [job.id, attempt.id, me, name, graded.passed, graded.score]
+    )).rows[0];
+    for (const r of graded.rows) {
+      await client.query(
+        `INSERT INTO hk_inspection_score (inspection_id, item_id, item_name, pass_mark, score, comment, photo_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [insp.id, r.item_id, r.item_name, r.pass_mark, r.score, r.comment, r.photo_url]
+      );
+    }
+    await client.query('COMMIT');
+
+    await hk.setRoomStatus(pool, req.property_id, job.room_id, graded.passed ? 'ready' : 'dirty');
+    const row = await hk.fetchJob(pool, job.id, req.property_id);
+    hk.publish(req.property_id, 'job-updated', row);
+    if (!graded.passed) {
+      hk.publish(req.property_id, 'inspection-failed', {
+        cleaner_id: attempt.cleaner_id,
+        cleaner_name: attempt.cleaner_name,
+        job: row,
+        failed_items: graded.rows.filter((r) => r.score < r.pass_mark)
+          .map(({ item_name, score, pass_mark, comment, photo_url }) => ({ item_name, score, pass_mark, comment, photo_url })),
+      });
+    }
+    res.status(201).json(row);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   board, getSettings, putSettings, putOverride, deleteOverride, putRoomStatus,
   claimJob, unclaimJob, startJob, finishJob,
+  listCheckItems, createCheckItem, updateCheckItem, uploadPhoto, inspectJob,
   loadJob, respondJob, isAdmin, UUID_RE,
 };

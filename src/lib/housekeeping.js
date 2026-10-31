@@ -278,7 +278,17 @@ async function listJobs(db, propertyId, date) {
   return rows.map(shapeJob);
 }
 
+// Inspection photos: public blob, random suffix (same call as
+// marinaDocuments.putPublic). Seam -- the check script swaps it.
+async function putPhoto(pathname, buf, contentType) {
+  const r = await require('@vercel/blob').put(pathname, buf, {
+    access: 'public', token: process.env.BLOB_PUBLIC_READ_WRITE_TOKEN, contentType, addRandomSuffix: true,
+  });
+  return r.url;
+}
+
 module.exports = {
+  putPhoto,
   nightIndex, stayoverDue, linenDue, scoreInspection, statusAfterFinish,
   ROOM_STATUSES, housekeepingEnabled, propertyToday, staffName, publish, setRoomStatus,
   ensureJobs, fetchJob, listJobs,

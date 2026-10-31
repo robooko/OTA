@@ -255,6 +255,98 @@ const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toI
       assert.equal((await act(ctrl.claimJob, staffA, crypto.randomUUID())).statusCode, 404);
       assert.equal((await act(ctrl.startJob, staffA, 'not-a-uuid')).statusCode, 404);
     });
+
+    // ── Task 4: checklist, photos, inspections, fail alert ───────────────────
+    const { requirePermission } = require('../src/middleware/auth');
+    const { setGrant } = require('../src/lib/permissions');
+    const mw = (fn, req) => new Promise((resolve, reject) => {
+      const res = { statusCode: 200, status(c) { this.statusCode = c; return this; }, json(b) { resolve({ status: this.statusCode, body: b }); return this; } };
+      fn({ headers: {}, ...req }, res, (err) => (err ? reject(err) : resolve({ next: true })));
+    });
+    const inspect = (user, id, scores) => call(ctrl.inspectJob, { property_id: P, user, params: { id }, body: { scores } });
+    const inspections = async () => (await one('SELECT count(*)::int AS n FROM hk_inspection i JOIN hk_job j ON j.id = i.job_id WHERE j.property_id = $1', [P])).n;
+    let FLOOR, BATH;
+    await check('checklist items: validate, create, list in order', async () => {
+      assert.equal((await call(ctrl.createCheckItem, { property_id: P, user: admin, body: { name: 'Floor', pass_mark: 6 } })).statusCode, 400);
+      assert.equal((await call(ctrl.createCheckItem, { property_id: P, user: admin, body: { name: ' ', pass_mark: 3 } })).statusCode, 400);
+      FLOOR = (await call(ctrl.createCheckItem, { property_id: P, user: admin, body: { name: 'Vacuum/floor', pass_mark: 4, sort_order: 1 } })).body.id;
+      const b = await call(ctrl.createCheckItem, { property_id: P, user: admin, body: { name: 'Bathroom', pass_mark: 3, sort_order: 2 } });
+      assert.equal(b.statusCode, 201); BATH = b.body.id;
+      assert.deepEqual((await call(ctrl.listCheckItems, { property_id: P, user: staffA })).body.map((i) => i.name), ['Vacuum/floor', 'Bathroom']);
+    });
+    await check('inspect permission: staff without a grant 403, with a grant passes', async () => {
+      const gate = requirePermission('housekeeping.inspect');
+      const no = await mw(gate, { user: staffB, property_id: P, auth_method: 'bearer' });
+      assert.equal(no.status, 403); assert.equal(no.body.permission, 'housekeeping.inspect');
+      await setGrant(pool, P, staffB.id, ['housekeeping.inspect'], admin.id);
+      assert.deepEqual(await mw(gate, { user: staffB, property_id: P, auth_method: 'bearer' }), { next: true });
+    });
+    const J103 = await jobId(room['103'], 'arrival');
+    await check('inspecting a job that is not done is 409', async () => {
+      await act(ctrl.startJob, staffA, J103);
+      assert.equal((await inspect(staffB, J103, [{ item_id: FLOOR, score: 5 }, { item_id: BATH, score: 5 }])).statusCode, 409);
+    });
+    await check('bad scores are 400 and write nothing', async () => {
+      const before = await inspections();
+      assert.equal((await inspect(staffB, J105, [{ item_id: FLOOR, score: 5 }])).statusCode, 400);
+      assert.equal((await inspect(staffB, J105, [{ item_id: FLOOR, score: 0 }, { item_id: BATH, score: 5 }])).statusCode, 400);
+      assert.equal(await inspections(), before);
+    });
+    await check('a cleaner cannot inspect their own clean', async () => {
+      await setGrant(pool, P, staffA.id, ['housekeeping.inspect'], admin.id);
+      const r = await inspect(staffA, J105, [{ item_id: FLOOR, score: 5 }, { item_id: BATH, score: 5 }]);
+      assert.equal(r.statusCode, 409); assert.match(r.body.error, /own clean/);
+    });
+    await check('fail: job failed, room dirty, alert names the exact item', async () => {
+      published.length = 0;
+      const r = await inspect(staffB, J105, [
+        { item_id: FLOOR, score: 3, comment: 'hair under the bed', photo_url: 'https://blob.example/p.jpg' },
+        { item_id: BATH, score: 5 },
+      ]);
+      assert.equal(r.statusCode, 201); assert.equal(r.body.status, 'failed');
+      assert.equal(await roomStatus(room105), 'dirty');
+      const alert = published.find((e) => e.event === 'inspection-failed');
+      assert.equal(alert.payload.cleaner_id, staffA.id);
+      assert.equal(alert.payload.cleaner_name, `Name ${staffA.id}`);
+      assert.deepEqual(alert.payload.failed_items, [{ item_name: 'Vacuum/floor', score: 3, pass_mark: 4, comment: 'hair under the bed', photo_url: 'https://blob.example/p.jpg' }]);
+      assert.equal(alert.payload.job.id, J105);
+    });
+    await check('redo then pass: job passed, room ready, both inspections kept', async () => {
+      assert.equal((await act(ctrl.startJob, staffA, J105)).body.attempts.length, 2);
+      await act(ctrl.finishJob, staffA, J105, { sheets_changed: false, towels_changed: false });
+      assert.equal(await roomStatus(room105), 'clean');
+      const r = await inspect(staffB, J105, [{ item_id: FLOOR, score: 4 }, { item_id: BATH, score: 4 }]);
+      assert.equal(r.statusCode, 201); assert.equal(r.body.status, 'passed');
+      assert.equal(await roomStatus(room105), 'ready');
+      assert.equal(r.body.inspections.length, 2);
+      assert.equal(r.body.inspections[0].passed, false); assert.equal(r.body.inspections[1].passed, true);
+      assert.equal(r.body.inspections[0].scores.length, 2);
+    });
+    await check('an admin may inspect their own clean', async () => {
+      const J104 = await jobId(room['104'], 'extra');
+      await act(ctrl.startJob, admin, J104);
+      await act(ctrl.finishJob, admin, J104, { sheets_changed: true, towels_changed: true });
+      assert.equal((await inspect(admin, J104, [{ item_id: FLOOR, score: 5 }, { item_id: BATH, score: 5 }])).statusCode, 201);
+    });
+    await check('photo upload: images only, stored through the seam', async () => {
+      const bad = await call(ctrl.uploadPhoto, { property_id: P, user: staffB, headers: { 'content-type': 'text/plain' }, body: Buffer.from('hi') });
+      assert.equal(bad.statusCode, 400);
+      const empty = await call(ctrl.uploadPhoto, { property_id: P, user: staffB, headers: { 'content-type': 'image/jpeg' }, body: {} });
+      assert.equal(empty.statusCode, 400);
+      const saved = [];
+      hk.putPhoto = async (pathname, buf, type) => { saved.push({ pathname, type, size: buf.length }); return `https://blob.example/${pathname}`; };
+      const ok = await call(ctrl.uploadPhoto, { property_id: P, user: staffB, headers: { 'content-type': 'image/jpeg' }, body: Buffer.from([0xff, 0xd8, 0xff]) });
+      assert.equal(ok.statusCode, 201); assert.match(ok.body.url, /^https:\/\/blob\.example\/housekeeping\//);
+      assert.equal(saved[0].type, 'image/jpeg'); assert.ok(saved[0].pathname.startsWith(`housekeeping/${P}/`));
+    });
+    await check('archiving an item keeps old scores and drops it from new inspections', async () => {
+      const r = await call(ctrl.updateCheckItem, { property_id: P, user: admin, params: { id: FLOOR }, body: { status: 'archived', name: 'Floors' } });
+      assert.equal(r.statusCode, 200);
+      const old = await one('SELECT item_name FROM hk_inspection_score WHERE item_id = $1 LIMIT 1', [FLOOR]);
+      assert.equal(old.item_name, 'Vacuum/floor');
+      assert.deepEqual((await call(ctrl.listCheckItems, { property_id: P, user: staffA })).body.map((i) => i.name), ['Bathroom']);
+      assert.equal((await call(ctrl.updateCheckItem, { property_id: P, user: admin, params: { id: FLOOR }, body: { pass_mark: 9 } })).statusCode, 400);
+    });
   } finally {
     await cleanup(props);
     await pool.end();
