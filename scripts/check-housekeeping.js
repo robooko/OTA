@@ -624,6 +624,83 @@ const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toI
         assert.match(JSON.stringify(spec.paths['/api/housekeeping/jobs/{id}/inspections']), /Missing permission/);
       });
     }
+
+    // ── Final review fixes ───────────────────────────────────────────────────
+    {
+      const TODAY = await hk.propertyToday(pool, P);
+      const mkRoom = async (n) => (await one(`INSERT INTO room (property_id, room_type_id, room_number) VALUES ($1, $2, $3) RETURNING id`, [P, RT, n])).id;
+      await check('desk checking out after the clean is done leaves the room alone', async () => {
+        const rm = await mkRoom('110');
+        const b = await book(rm, addDays(TODAY, -1), TODAY, 'checked_in');
+        await board(TODAY);
+        const j = await jobId(rm, 'checkout', TODAY);
+        await act(ctrl.startJob, staffA, j);
+        await act(ctrl.finishJob, staffA, j, { sheets_changed: true, towels_changed: true });
+        const before = await roomStatus(rm); // clean (inspection required at P)
+        await pool.query(`UPDATE booking SET status = 'checked_out' WHERE id = $1`, [b]);
+        await hk.onCheckedOut(P, rm, b);
+        assert.equal(await roomStatus(rm), before);
+      });
+      await check('an early departure gets a checkout job today and a dirty room', async () => {
+        const rm = await mkRoom('111');
+        const b = await book(rm, addDays(TODAY, -1), addDays(TODAY, 3), 'checked_out');
+        await hk.onCheckedOut(P, rm, b);
+        assert.equal(await roomStatus(rm), 'dirty');
+        const j = await one('SELECT kind, booking_id, status FROM hk_job WHERE room_id = $1 AND date = $2', [rm, TODAY]);
+        assert.deepEqual(j, { kind: 'checkout', booking_id: b, status: 'open' });
+        assert.equal(jobFor(await board(TODAY), rm).length, 1); // and the board keeps it
+      });
+      await check('two simultaneous claims: exactly one wins', async () => {
+        for (let i = 0; i < 5; i++) {
+          const rm = await mkRoom(`12${i}`);
+          await book(rm, addDays(D, -1), D, 'confirmed');
+          await board();
+          const j = await jobId(rm, 'checkout');
+          const [a, b] = await Promise.all([act(ctrl.claimJob, staffA, j), act(ctrl.claimJob, staffB, j)]);
+          assert.deepEqual([a.statusCode, b.statusCode].sort(), [200, 409], `round ${i}`);
+        }
+      });
+      await check('overlapping minibar recordings never double the folio', async () => {
+        for (let i = 0; i < 5; i++) {
+          const rm = await mkRoom(`13${i}`);
+          const b = await book(rm, addDays(D, -1), D, 'checked_in', { rate_plan_id: SAVER });
+          await board();
+          const j = await jobId(rm, 'checkout');
+          const items = [{ minibar_item_id: PROSECCO, quantity: 2 }];
+          await Promise.all([record(j, items), record(j, items), record(j, items)]);
+          const lines = (await computeFolio(b, P)).items.filter((x) => x.type === 'minibar');
+          assert.equal(lines.length, 1, `round ${i}`); assert.equal(lines[0].amount, '60.00');
+        }
+      });
+      await check('arrival extras still get a job when the departing booking is cancelled', async () => {
+        const rm = await mkRoom('140');
+        const dep = await book(rm, addDays(D, -1), D, 'confirmed');
+        const arr = await book(rm, D, addDays(D, 1), 'confirmed');
+        await pool.query(`INSERT INTO booking_extra (booking_id, extra_id, quantity, unit_price) VALUES ($1, $2, 1, 120)`, [arr, EX]);
+        await board();
+        await pool.query(`UPDATE booking SET status = 'cancelled' WHERE id = $1`, [dep]);
+        const rows = jobFor(await board(), rm);
+        const arrival = rows.find((r) => r.kind === 'arrival');
+        assert.ok(arrival, 'arrival job'); assert.equal(arrival.status, 'open');
+        assert.deepEqual(arrival.extras_to_place.map((e) => e.name), ['Red Roses']);
+      });
+      const server9 = require('../src/app').listen(0);
+      const base9 = `http://127.0.0.1:${server9.address().port}`;
+      try {
+        await check('staff endpoints refuse the site API key; the public minibar list takes it', async () => {
+          const KEY = `hk_key_${run}`;
+          const h = { 'x-api-key': KEY, 'content-type': 'application/json' };
+          for (const [method, url] of [['GET', '/board'], ['POST', `/jobs/${J101}/claim`], ['PUT', `/jobs/${J107}/minibar`], ['PUT', '/settings'],
+            ['PUT', `/rooms/${room['101']}/status`], ['GET', '/reports?from=2031-01-01&to=2031-02-01'], ['POST', `/booking-extras/${BE3}/placed`]]) {
+            const r = await fetch(`${base9}/api/housekeeping${url}`, { method, headers: h, body: method === 'GET' ? undefined : '{}' });
+            assert.equal(r.status, 401, `${method} ${url}`);
+          }
+          assert.equal((await fetch(`${base9}/api/housekeeping/minibar/list?room_type_id=${RT}`, { headers: h })).status, 200);
+        });
+      } finally {
+        server9.close();
+      }
+    }
   } finally {
     await cleanup(props);
     await pool.end();

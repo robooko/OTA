@@ -38,6 +38,9 @@ async function recordUsage(db, { propertyId, job, items, userId }) {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+    // Serialises overlapping recordings of one job (an app retry while the
+    // first is still running) so the replace can't double the charge.
+    await client.query('SELECT 1 FROM hk_job WHERE id = $1 FOR UPDATE', [job.id]);
     await client.query('DELETE FROM minibar_usage WHERE job_id = $1', [job.id]);
     const rows = [];
     for (const i of items.filter((x) => x.quantity > 0)) {

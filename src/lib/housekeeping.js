@@ -120,6 +120,21 @@ async function ensureJobs(db, propertyId, date) {
   const take = (r) => touched.push(...r.rows.map((x) => x.id));
   try {
     await client.query('BEGIN');
+    // First, jobs whose reason went away: cancelled booking, skip override,
+    // or a removed clean override. Started work is never skipped. Done first
+    // so a skipped checkout no longer hides its arrival (below).
+    take(await client.query(
+      `UPDATE hk_job j SET status = 'skipped'
+       WHERE j.property_id = $1 AND j.date = $2::date AND j.status IN ('open', 'claimed')
+         AND (
+           (j.kind IN ('checkout', 'stayover') AND NOT EXISTS (SELECT 1 FROM booking b WHERE b.id = j.booking_id AND b.status IN ${LIVE}))
+           OR (j.kind = 'arrival' AND NOT EXISTS (SELECT 1 FROM booking b WHERE b.id = j.arriving_booking_id AND b.status IN ${LIVE}))
+           OR (j.kind = 'stayover' AND EXISTS (SELECT 1 FROM hk_override o WHERE o.room_id = j.room_id AND o.date = j.date AND o.action = 'skip'))
+           OR (j.kind = 'extra' AND NOT EXISTS (SELECT 1 FROM hk_override o WHERE o.room_id = j.room_id AND o.date = j.date AND o.action = 'clean'))
+         )
+       RETURNING id`,
+      [propertyId, date]
+    ));
     // Departures. The arriving guest on the same room rides on the job.
     take(await client.query(
       `INSERT INTO hk_job (property_id, room_id, date, kind, booking_id, arriving_booking_id, linen_due)
@@ -171,24 +186,10 @@ async function ensureJobs(db, propertyId, date) {
        SELECT b.property_id, b.room_id, $2::date, 'arrival', b.id
        FROM booking b
        WHERE b.property_id = $1 AND b.check_in = $2::date AND b.status IN ${LIVE}
-         AND NOT EXISTS (SELECT 1 FROM hk_job j WHERE j.room_id = b.room_id AND j.date = $2::date AND j.kind = 'checkout')
+         AND NOT EXISTS (SELECT 1 FROM hk_job j WHERE j.room_id = b.room_id AND j.date = $2::date AND j.kind = 'checkout' AND j.status <> 'skipped')
          AND EXISTS (SELECT 1 FROM booking_extra be JOIN extra e ON e.id = be.extra_id
                      WHERE be.booking_id = b.id AND e.place_in_room)
        ON CONFLICT (room_id, date, kind) DO NOTHING RETURNING id`,
-      [propertyId, date]
-    ));
-    // Jobs whose reason went away: cancelled booking, skip override, or a
-    // removed clean override. Started work is never skipped.
-    take(await client.query(
-      `UPDATE hk_job j SET status = 'skipped'
-       WHERE j.property_id = $1 AND j.date = $2::date AND j.status IN ('open', 'claimed')
-         AND (
-           (j.kind IN ('checkout', 'stayover') AND NOT EXISTS (SELECT 1 FROM booking b WHERE b.id = j.booking_id AND b.status IN ${LIVE}))
-           OR (j.kind = 'arrival' AND NOT EXISTS (SELECT 1 FROM booking b WHERE b.id = j.arriving_booking_id AND b.status IN ${LIVE}))
-           OR (j.kind = 'stayover' AND EXISTS (SELECT 1 FROM hk_override o WHERE o.room_id = j.room_id AND o.date = j.date AND o.action = 'skip'))
-           OR (j.kind = 'extra' AND NOT EXISTS (SELECT 1 FROM hk_override o WHERE o.room_id = j.room_id AND o.date = j.date AND o.action = 'clean'))
-         )
-       RETURNING id`,
       [propertyId, date]
     ));
     await client.query('COMMIT');
@@ -293,12 +294,26 @@ async function listJobs(db, propertyId, date) {
   return withMinibar(db, rows.map(shapeJob));
 }
 
-// A guest left: the room needs cleaning, and today's board gets its job
-// (normally already there from the expected departure).
-async function onCheckedOut(propertyId, roomId) {
+// A guest left. Usually the board already made today's checkout job from
+// the expected departure; if housekeeping already cleaned (or is cleaning)
+// it, the desk marking the checkout late must not undo that. An early or
+// late departure gets a checkout job today.
+async function onCheckedOut(propertyId, roomId, bookingId) {
   if (!(await housekeepingEnabled(pool, propertyId))) return;
+  const today = await propertyToday(pool, propertyId);
+  const { rows } = await pool.query(
+    `SELECT status FROM hk_job WHERE room_id = $1 AND date = $2 AND kind = 'checkout'`, [roomId, today]
+  );
+  if (['in_progress', 'done', 'passed'].includes(rows[0]?.status)) return;
+  if (!rows.length) {
+    await pool.query(
+      `INSERT INTO hk_job (property_id, room_id, date, kind, booking_id, linen_due)
+       VALUES ($1, $2, $3, 'checkout', $4, true) ON CONFLICT (room_id, date, kind) DO NOTHING`,
+      [propertyId, roomId, today, bookingId]
+    );
+  }
   await setRoomStatus(pool, propertyId, roomId, 'dirty');
-  await module.exports.ensureJobs(pool, propertyId, await propertyToday(pool, propertyId));
+  await module.exports.ensureJobs(pool, propertyId, today);
 }
 
 // Inspection photos: public blob, random suffix (same call as

@@ -151,12 +151,19 @@ async function claimJob(req, res, next) {
       return res.status(409).json({ error: 'Already claimed', claimed_by: job.claimed_by, claimed_by_name: job.claimed_by_name });
     }
     const name = await hk.staffName(me);
+    // The ownership rule lives in the WHERE so two simultaneous taps can't
+    // both win: the second re-checks against the first's claim.
     const { rows } = await pool.query(
       `UPDATE hk_job SET status = 'claimed', claimed_by = $1, claimed_by_name = $2
-       WHERE id = $3 AND status IN ('open', 'claimed') RETURNING id`,
-      [me, name, job.id]
+       WHERE id = $3 AND (status = 'open' OR (status = 'claimed' AND (claimed_by = $1 OR $4::boolean)))
+       RETURNING id`,
+      [me, name, job.id, req.body?.force === true]
     );
-    if (!rows.length) return res.status(409).json({ error: `Job is ${job.status}` });
+    if (!rows.length) {
+      const now = await loadJob(pool, job.id, req.property_id);
+      if (now?.status === 'claimed') return res.status(409).json({ error: 'Already claimed', claimed_by: now.claimed_by, claimed_by_name: now.claimed_by_name });
+      return res.status(409).json({ error: `Job is ${now?.status ?? job.status}` });
+    }
     await respondJob(req, res, job.id);
   } catch (err) { next(err); }
 }

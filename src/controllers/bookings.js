@@ -433,7 +433,7 @@ async function updateBooking(req, res, next) {
       // guest name / room line on every status change, not just creation.
       publishBookingStatusChanged(req.property_id, bookedFull).catch((err) => console.error('Ably publish failed:', err.message));
       if (rows[0].status === 'checked_out') {
-        housekeeping.onCheckedOut(req.property_id, rows[0].room_id).catch((err) => console.error('Housekeeping checkout failed:', err.message));
+        housekeeping.onCheckedOut(req.property_id, rows[0].room_id, rows[0].id).catch((err) => console.error('Housekeeping checkout failed:', err.message));
       }
     }
 
