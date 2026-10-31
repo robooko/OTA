@@ -687,15 +687,81 @@ const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toI
       const server9 = require('../src/app').listen(0);
       const base9 = `http://127.0.0.1:${server9.address().port}`;
       try {
-        await check('staff endpoints refuse the site API key; the public minibar list takes it', async () => {
-          const KEY = `hk_key_${run}`;
-          const h = { 'x-api-key': KEY, 'content-type': 'application/json' };
-          for (const [method, url] of [['GET', '/board'], ['POST', `/jobs/${J101}/claim`], ['PUT', `/jobs/${J107}/minibar`], ['PUT', '/settings'],
-            ['PUT', `/rooms/${room['101']}/status`], ['GET', '/reports?from=2031-01-01&to=2031-02-01'], ['POST', `/booking-extras/${BE3}/placed`]]) {
-            const r = await fetch(`${base9}/api/housekeeping${url}`, { method, headers: h, body: method === 'GET' ? undefined : '{}' });
-            assert.equal(r.status, 401, `${method} ${url}`);
+        const KEY = `hk_key_${run}`;
+        const SCOPED = `hk_scoped_${run}`;
+        await apiKeys.create(pool, { property_id: P }, { key: SCOPED, name: 'Website', permissions: [] });
+        const hdr = (k) => ({ 'x-api-key': k, 'content-type': 'application/json' });
+        const hit = (k, method, url, body) => fetch(`${base9}/api/housekeeping${url}`, { method, headers: hdr(k), body: method === 'GET' ? undefined : JSON.stringify(body ?? {}) });
+        await check('cleaning flow refuses API keys (it records who did the work)', async () => {
+          for (const [method, url] of [['POST', `/jobs/${J101}/claim`], ['DELETE', `/jobs/${J101}/claim`], ['POST', `/jobs/${J101}/start`], ['POST', `/jobs/${J101}/finish`],
+            ['POST', `/jobs/${J101}/inspections`], ['PUT', `/jobs/${J107}/minibar`], ['POST', `/booking-extras/${BE3}/placed`], ['POST', '/photos']]) {
+            assert.equal((await hit(KEY, method, url)).status, 401, `${method} ${url}`);
           }
-          assert.equal((await fetch(`${base9}/api/housekeeping/minibar/list?room_type_id=${RT}`, { headers: h })).status, 200);
+        });
+        await check('a full key reaches setup and reads; a scoped key does not', async () => {
+          const reads = ['/board?date=' + D, '/reports?from=2031-01-01&to=2031-02-01', '/settings', '/check-items', '/minibar/items'];
+          for (const url of reads) {
+            assert.equal((await hit(KEY, 'GET', url)).status, 200, `full GET ${url}`);
+            assert.equal((await hit(SCOPED, 'GET', url)).status, 403, `scoped GET ${url}`);
+          }
+          const s = await hit(KEY, 'PUT', '/settings', { linen_every_days: 4 });
+          assert.equal(s.status, 200);
+          assert.equal((await hit(SCOPED, 'PUT', '/settings', { linen_every_days: 4 })).status, 403);
+          const rs = await hit(KEY, 'PUT', `/rooms/${room['104']}/status`, { housekeeping_status: 'ready' });
+          assert.equal(rs.status, 200);
+          assert.equal((await hit(SCOPED, 'PUT', `/rooms/${room['104']}/status`, { housekeeping_status: 'ready' })).status, 403);
+          const ov = await hit(KEY, 'PUT', '/overrides', { room_id: room['104'], date: addDays(D, 1), action: 'clean' });
+          assert.equal(ov.status, 200); assert.equal((await ov.json()).created_by, null);
+          assert.equal((await hit(SCOPED, 'GET', `/minibar/list?room_type_id=${RT}`)).status, 200); // booking site
+          assert.equal((await hit(KEY, 'GET', `/minibar/list?room_type_id=${RT}`)).status, 200);
+        });
+        await check('MCP tools map to the housekeeping endpoints', async () => {
+          const calls = [];
+          const tools = require('../mcp-server/tools').createTools(async (method, path, opts) => { calls.push([method, path, opts]); return {}; });
+          const t = (name) => { const x = tools.find((y) => y.name === name); assert.ok(x, `missing tool ${name}`); return x; };
+          await t('get_housekeeping_board').run({ date: D });
+          await t('get_housekeeping_settings').run({});
+          await t('update_housekeeping_settings').run({ inspection_required: true, service_every_days: null });
+          await t('set_room_housekeeping_status').run({ room_id: 'r1', housekeeping_status: 'dirty' });
+          await t('set_housekeeping_override').run({ room_id: 'r1', date: D, action: 'skip' });
+          await t('delete_housekeeping_override').run({ room_id: 'r1', date: D });
+          await t('list_inspection_checklist').run({});
+          await t('create_inspection_checklist_item').run({ name: 'Floor', pass_mark: 4 });
+          await t('update_inspection_checklist_item').run({ id: 'c1', status: 'archived' });
+          await t('list_minibar_items').run({});
+          await t('create_minibar_item').run({ name: 'Prosecco', price: 30 });
+          await t('update_minibar_item').run({ id: 'm1', price: 32 });
+          await t('get_minibar_list').run({ room_type_id: 'rt1', rate_plan_id: 'rp1' });
+          await t('set_minibar_list').run({ room_type_id: 'rt1', rate_plan_id: null, items: [{ minibar_item_id: 'm1', quantity: 1, included: true }] });
+          await t('get_housekeeping_report').run({ from: '2031-01-01', to: '2031-02-01' });
+          await t('create_extra').run({ name: 'Roses', price: 120, place_in_room: true });
+          assert.deepEqual(calls.map(([m, p]) => `${m} ${p}`), [
+            'GET /api/housekeeping/board', 'GET /api/housekeeping/settings', 'PUT /api/housekeeping/settings',
+            'PUT /api/housekeeping/rooms/r1/status', 'PUT /api/housekeeping/overrides', `DELETE /api/housekeeping/overrides/r1/${D}`,
+            'GET /api/housekeeping/check-items', 'POST /api/housekeeping/check-items', 'PUT /api/housekeeping/check-items/c1',
+            'GET /api/housekeeping/minibar/items', 'POST /api/housekeeping/minibar/items', 'PUT /api/housekeeping/minibar/items/m1',
+            'GET /api/housekeeping/minibar/list', 'PUT /api/housekeeping/minibar/lists', 'GET /api/housekeeping/reports', 'POST /api/extras',
+          ]);
+          assert.deepEqual(calls[0][2].query, { date: D });
+          assert.deepEqual(calls[2][2].body, { inspection_required: true, service_every_days: null });
+          assert.deepEqual(calls[3][2].body, { housekeeping_status: 'dirty' });
+          assert.deepEqual(calls[8][2].body, { status: 'archived' });
+          assert.deepEqual(calls[12][2].query, { room_type_id: 'rt1', rate_plan_id: 'rp1' });
+          assert.equal(calls[13][2].body.rate_plan_id, null);
+          assert.deepEqual(calls[14][2].query, { from: '2031-01-01', to: '2031-02-01' });
+          assert.equal(calls[15][2].body.place_in_room, true);
+        });
+        await check('MCP endpoint: tools listed, board read end to end over a full key', async () => {
+          process.env.PORT = String(server9.address().port); // routes/mcp.js loops back to localhost:PORT
+          const rpc = (k, method, params) => fetch(`${base9}/api/mcp`, {
+            method: 'POST', headers: { 'X-Api-Key': k, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+          }).then((r) => r.text());
+          const list = await rpc(KEY, 'tools/list', {});
+          for (const n of ['get_housekeeping_board', 'set_minibar_list', 'get_housekeeping_report']) assert.ok(list.includes(`"${n}"`), `tools/list missing ${n}`);
+          const call = await rpc(KEY, 'tools/call', { name: 'get_housekeeping_board', arguments: { date: D } });
+          assert.ok(call.includes(room['101']), 'board came back through MCP');
+          assert.ok(!call.includes('"isError":true'), call.slice(0, 300));
         });
       } finally {
         server9.close();

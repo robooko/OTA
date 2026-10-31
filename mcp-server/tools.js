@@ -1700,7 +1700,7 @@ function createTools(apiRequest) {
   {
     name: 'create_extra',
     description: 'Create an extra catalogue item',
-    inputSchema: { name: z.string(), description: z.string().optional(), price: z.number() },
+    inputSchema: { name: z.string(), description: z.string().optional(), price: z.number(), place_in_room: z.boolean().optional().describe('Housekeeping puts it in the room before the guest arrives (flowers, champagne)') },
     run: (args) => apiRequest('POST', '/api/extras', { body: args }),
   },
   {
@@ -1712,8 +1712,118 @@ function createTools(apiRequest) {
       description: z.string().optional(),
       price: z.number().optional(),
       status: z.enum(['active', 'inactive']).optional(),
+      place_in_room: z.boolean().optional().describe('Housekeeping puts it in the room before the guest arrives'),
     },
     run: ({ id, ...body }) => apiRequest('PUT', `/api/extras/${id}`, { body }),
+  },
+  // ── Housekeeping (rooms) ─────────────────────────────────────────────────
+  // Setup and reading only, over a full API key or staff session. Cleaning
+  // itself (claim/start/finish/inspect/minibar count) records which person
+  // did it, so it stays in the staff app. Only for properties whose
+  // enabled_modules lists 'housekeeping' (update_property).
+  {
+    name: 'get_housekeeping_board',
+    description: "The day's housekeeping jobs: checkout, stayover, arrival (empty room with extras to place) and extra cleans, dirty rooms with an arrival first. Each job has status (open/claimed/in_progress/done/passed/failed/skipped), the room and its housekeeping_status (dirty/cleaning/clean/ready), the departing or in-house guest, the arriving guest, extras to place, the minibar list, cleaning attempts with times, and inspections. Empty when housekeeping is off.",
+    inputSchema: { date: z.string().optional().describe("YYYY-MM-DD; defaults to today in the property's timezone") },
+    run: (args) => apiRequest('GET', '/api/housekeeping/board', { query: args }),
+  },
+  {
+    name: 'get_housekeeping_settings',
+    description: 'Housekeeping settings: inspection_required, service_every_days (stayover clean interval in nights, null = none), linen_every_days',
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/housekeeping/settings'),
+  },
+  {
+    name: 'update_housekeeping_settings',
+    description: 'Change housekeeping settings. Omit a field to leave it. inspection_required off (default) = a finished clean makes the room ready and inspections are spot checks; on = checkout cleans wait until an inspector passes them.',
+    inputSchema: {
+      inspection_required: z.boolean().optional(),
+      service_every_days: z.number().int().min(1).max(365).nullable().optional().describe('Stayover clean every n nights; null = no automatic stayover cleans'),
+      linen_every_days: z.number().int().min(1).max(365).nullable().optional().describe('Change sheets on stayovers every n nights; null = never'),
+    },
+    run: (args) => apiRequest('PUT', '/api/housekeeping/settings', { body: args }),
+  },
+  {
+    name: 'set_room_housekeeping_status',
+    description: "Set a room's housekeeping status by hand (e.g. dirty after a maintenance visit). Not availability -- the room stays bookable.",
+    inputSchema: { room_id: z.string(), housekeeping_status: z.enum(['dirty', 'cleaning', 'clean', 'ready']) },
+    run: ({ room_id, ...body }) => apiRequest('PUT', `/api/housekeeping/rooms/${room_id}/status`, { body }),
+  },
+  {
+    name: 'set_housekeeping_override',
+    description: "For one room on one date: 'skip' its stayover clean (guest declined service) or add an extra 'clean'. Replaces any earlier override for that room and date.",
+    inputSchema: { room_id: z.string(), date: z.string().describe('YYYY-MM-DD'), action: z.enum(['skip', 'clean']) },
+    run: (args) => apiRequest('PUT', '/api/housekeeping/overrides', { body: args }),
+  },
+  {
+    name: 'delete_housekeeping_override',
+    description: 'Remove a room/date override; a lifted skip reopens the stayover clean',
+    inputSchema: { room_id: z.string(), date: z.string().describe('YYYY-MM-DD') },
+    run: ({ room_id, date }) => apiRequest('DELETE', `/api/housekeeping/overrides/${room_id}/${date}`),
+  },
+  {
+    name: 'list_inspection_checklist',
+    description: "The property's active inspection checklist: items graded 1-5, each with the pass mark a room must reach",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/housekeeping/check-items'),
+  },
+  {
+    name: 'create_inspection_checklist_item',
+    description: 'Add an inspection checklist item, e.g. "Vacuum/floor" with pass_mark 4. Any item scored under its pass mark fails the room back to the cleaner.',
+    inputSchema: { name: z.string().max(100), pass_mark: z.number().int().min(1).max(5), sort_order: z.number().int().optional() },
+    run: (args) => apiRequest('POST', '/api/housekeeping/check-items', { body: args }),
+  },
+  {
+    name: 'update_inspection_checklist_item',
+    description: 'Edit a checklist item, or set status "archived" to drop it from new inspections (past inspections keep their scores)',
+    inputSchema: {
+      id: z.string(), name: z.string().max(100).optional(), pass_mark: z.number().int().min(1).max(5).optional(),
+      sort_order: z.number().int().optional(), status: z.enum(['active', 'archived']).optional(),
+    },
+    run: ({ id, ...body }) => apiRequest('PUT', `/api/housekeeping/check-items/${id}`, { body }),
+  },
+  {
+    name: 'list_minibar_items',
+    description: "The property's minibar catalogue (active items with price)",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/housekeeping/minibar/items'),
+  },
+  {
+    name: 'create_minibar_item',
+    description: 'Add a minibar catalogue item. Whether it is included or charged is set per list (set_minibar_list), not here.',
+    inputSchema: { name: z.string().max(100), price: z.number().min(0), description: z.string().optional(), image_url: z.string().optional().describe('https image URL for the booking site') },
+    run: (args) => apiRequest('POST', '/api/housekeeping/minibar/items', { body: args }),
+  },
+  {
+    name: 'update_minibar_item',
+    description: 'Edit a minibar item, or set status "archived" to remove it from lists',
+    inputSchema: {
+      id: z.string(), name: z.string().max(100).optional(), price: z.number().min(0).optional(), description: z.string().optional(),
+      image_url: z.string().optional(), status: z.enum(['active', 'archived']).optional(),
+    },
+    run: ({ id, ...body }) => apiRequest('PUT', `/api/housekeeping/minibar/items/${id}`, { body }),
+  },
+  {
+    name: 'get_minibar_list',
+    description: "What's in the minibar for a room type (and rate plan): the plan's own list if it has one, else the room type's. Each item says included (free) or charged, with price -- what the booking site markets.",
+    inputSchema: { room_type_id: z.string(), rate_plan_id: z.string().optional() },
+    run: (args) => apiRequest('GET', '/api/housekeeping/minibar/list', { query: args }),
+  },
+  {
+    name: 'set_minibar_list',
+    description: "Replace a minibar list. rate_plan_id null = the room type's list; a rate plan's list replaces the room type's entirely for that plan (e.g. Prosecco included on Flex, charged on Saver). Included items are never charged; charged items go on the guest's folio when housekeeping records them.",
+    inputSchema: {
+      room_type_id: z.string(),
+      rate_plan_id: z.string().nullable().optional(),
+      items: z.array(z.object({ minibar_item_id: z.string(), quantity: z.number().int().min(1).max(99), included: z.boolean() })),
+    },
+    run: (args) => apiRequest('PUT', '/api/housekeeping/minibar/lists', { body: args }),
+  },
+  {
+    name: 'get_housekeeping_report',
+    description: 'Cleaner and room performance over a date range: jobs done, average and median minutes per clean, average inspection score, first-time pass rate, average guest cleanliness rating',
+    inputSchema: { from: z.string().describe('YYYY-MM-DD'), to: z.string().describe('YYYY-MM-DD, exclusive') },
+    run: (args) => apiRequest('GET', '/api/housekeeping/reports', { query: args }),
   },
   {
     name: 'list_booking_extras',
