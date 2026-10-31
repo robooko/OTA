@@ -1,4 +1,5 @@
-// MCP backfill: guests, bookings, payments, folio, property settings,
+// MCP backfill: guests, bookings, payments, folio, availability, rate plans,
+// billing, property settings,
 // restaurant orders and the marina catalogue. The staff routes take a full
 // API key and refuse a scoped one, each tool maps to its endpoint, and
 // bookings and marina setup run end to end through /api/mcp. Fixtures live under a
@@ -135,6 +136,23 @@ const apiKeys = require('../src/lib/apiKeys');
       const bad = await rpc('create_marina_season', { marina_id: M, name: 'Odd', valid_from: '2031-09-01', valid_to: '2031-08-01' });
       assert.ok(bad.includes('"isError":true'), 'API validation reaches the agent');
     });
+
+    await check('availability, rate plan and billing routes: full key in, scoped key 403; room reads take any key', async () => {
+      for (const url of ['/api/availability/overrides', '/api/billing', '/api/billing/ledger']) {
+        assert.equal((await hit(KEY, 'GET', url)).status, 200, `full GET ${url}`);
+        assert.equal((await hit(SCOPED, 'GET', url)).status, 403, `scoped GET ${url}`);
+      }
+      assert.equal((await hit(SCOPED, 'POST', '/api/availability/refresh')).status, 403);
+      assert.equal((await hit(KEY, 'POST', '/api/availability/refresh')).status, 200);
+      for (const url of [`/api/rooms/${ROOM}`, `/api/room-types/${RT}`]) assert.equal((await hit(SCOPED, 'GET', url)).status, 200, url);
+      const plan = { name: 'Saver', refundable: false, payment_mode: 'full', adjustment_pct: -10 };
+      assert.equal((await hit(SCOPED, 'POST', `/api/room-types/${RT}/rate-plans`, plan)).status, 403);
+      const made = await hit(KEY, 'POST', `/api/room-types/${RT}/rate-plans`, plan);
+      assert.equal(made.status, 201);
+      const { id } = await made.json();
+      assert.equal((await hit(SCOPED, 'PUT', `/api/room-types/${RT}/rate-plans/${id}`, { sort_order: 2 })).status, 403);
+      assert.equal((await hit(KEY, 'PUT', `/api/room-types/${RT}/rate-plans/${id}`, { status: 'archived' })).status, 200);
+    });
   } finally {
     server.close();
     if (P) {
@@ -144,6 +162,7 @@ const apiKeys = require('../src/lib/apiKeys');
       await q('DELETE FROM booking WHERE property_id = $1');
       await q('DELETE FROM room_availability WHERE room_id IN (SELECT id FROM room WHERE property_id = $1)');
       await q('DELETE FROM room WHERE property_id = $1');
+      await q('DELETE FROM rate_plan WHERE property_id = $1');
       await q('DELETE FROM room_type WHERE property_id = $1');
       await q('DELETE FROM guest WHERE property_id = $1');
       await q('DELETE FROM marina WHERE property_id = $1'); // children cascade

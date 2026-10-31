@@ -2281,13 +2281,13 @@ function createTools(apiRequest) {
   },
   {
     name: 'get_billing',
-    description: "The property's BUXS token balance and billing settings",
+    description: "The property's BUXS balance (its org's wallet), feature costs, price and fallback settings",
     inputSchema: {},
     run: () => apiRequest('GET', '/api/billing'),
   },
   {
     name: 'list_billing_ledger',
-    description: 'Recent BUXS token ledger entries (grants, top-ups, usage), newest first',
+    description: "Recent BUXS balance changes for the org's wallet, newest first",
     inputSchema: { limit: z.number().int().min(1).max(200).optional() },
     run: ({ limit }) => apiRequest('GET', '/api/billing/ledger', { query: { limit } }),
   },

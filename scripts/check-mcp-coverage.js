@@ -1,12 +1,10 @@
-// MCP coverage: every API route needs a tool in mcp-server/tools.js, an
-// entry in EXCLUDE (never a tool), or a line in mcp-coverage-baseline.json
-// (known gap, to backfill). Fails on any route that is none of these. No DB.
+// MCP coverage: every API route needs a tool in mcp-server/tools.js or an
+// EXCLUDE rule below (never a tool, with the reason). Fails on any route
+// that is neither. No DB.
 //   node -r dotenv/config scripts/check-mcp-coverage.js
-//   node -r dotenv/config scripts/check-mcp-coverage.js --update   (rewrite the baseline)
 process.env.CLERK_SECRET_KEY ||= 'x';
-const fs = require('fs');
-const path = require('path');
 const app = require('../src/app');
+const { createTools } = require('../mcp-server/tools');
 
 // Routes that should never be agent tools.
 const EXCLUDE = [
@@ -34,8 +32,7 @@ const EXCLUDE = [
   /^GET \/api\/golf\/bookings\/live$/,                 // dashboard feed; list_golf_bookings covers it
 ];
 
-const BASELINE = path.join(__dirname, 'mcp-coverage-baseline.json');
-const norm = (p) => p.replace(/\$\{[^}]+\}/g, ':p').replace(/:\w+/g, ':p').replace(/(.)\/$/, '$1');
+const norm = (p) => p.replace(/:\w+/g, ':p').replace(/(.)\/$/, '$1');
 const mountPath = (re) => re.source.replace(/^\^/, '').replace(/\\\/\?\(\?=\\\/\|\$\)$/, '').replace(/\\\//g, '/');
 
 const routes = new Set();
@@ -47,33 +44,20 @@ const routes = new Set();
 })(app._router.stack, '');
 
 // Every tool runs once with every argument 'X1'; a route is covered when a
-// tool called it with 'X1' in each :param slot. Catches generated paths
-// (`/marinas/${id}/${kind}`) the source scan below can't read.
+// tool called it with 'X1' in each :param slot.
 const traced = new Set();
 const dummy = new Proxy({}, { get: (_, k) => (typeof k === 'string' ? 'X1' : undefined) });
-for (const tool of require('../mcp-server/tools').createTools((method, p) => { traced.add(`${method} ${p.split('?')[0].replace(/(.)\/$/, '$1')}`); return Promise.resolve({}); })) {
-  try { Promise.resolve(tool.run(dummy)).catch(() => {}); } catch { /* the source scan still sees it */ }
-}
-// Fallback for tools that throw on dummy args.
-const toolsSrc = fs.readFileSync(path.join(__dirname, '../mcp-server/tools.js'), 'utf8');
-const scanned = new Set([...toolsSrc.matchAll(/apiRequest\(\s*'(\w+)',\s*[`'"]([^`'"?]+)/g)].map((m) => `${m[1]} ${norm(m[2].replace(/\$\{[^}]*$/, ''))}`)); // drop a cut-off `${q ? '?..' : ''}`
-const isCovered = (r) => scanned.has(r) || traced.has(r.replace(/:p/g, 'X1'));
-
-const gaps = [...routes].filter((r) => !isCovered(r) && !EXCLUDE.some((re) => re.test(r))).sort();
-
-if (process.argv.includes('--update')) {
-  fs.writeFileSync(BASELINE, JSON.stringify(gaps, null, 2) + '\n');
-  console.log(`baseline: ${gaps.length} known gaps written`);
-  process.exit(0);
+const tools = createTools((method, p) => { traced.add(`${method} ${p.split('?')[0].replace(/(.)\/$/, '$1')}`); return Promise.resolve({}); });
+const broken = [];
+for (const tool of tools) {
+  try { Promise.resolve(tool.run(dummy)).catch(() => {}); } catch (err) { broken.push(`${tool.name}: ${err.message}`); }
 }
 
-const baseline = new Set(JSON.parse(fs.readFileSync(BASELINE, 'utf8')));
-const fresh = gaps.filter((r) => !baseline.has(r));
-const stale = [...baseline].filter((r) => !gaps.includes(r));
-console.log(`${routes.size} routes, ${traced.size} tool paths, ${gaps.length} known gaps`);
-if (stale.length) console.log(`no longer gaps (run --update to drop):\n  ${stale.join('\n  ')}`);
-if (fresh.length) {
-  console.error(`routes with no MCP tool -- add one to mcp-server/tools.js or an EXCLUDE rule:\n  ${fresh.join('\n  ')}`);
+const gaps = [...routes].filter((r) => !traced.has(r.replace(/:p/g, 'X1')) && !EXCLUDE.some((re) => re.test(r))).sort();
+console.log(`${routes.size} routes, ${tools.length} tools, ${traced.size} tool paths`);
+if (broken.length) console.log(`tools that threw on dummy args (their routes may show as gaps):\n  ${broken.join('\n  ')}`);
+if (gaps.length) {
+  console.error(`routes with no MCP tool -- add one to mcp-server/tools.js or an EXCLUDE rule:\n  ${gaps.join('\n  ')}`);
   process.exit(1);
 }
 console.log('ok');
