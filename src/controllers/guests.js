@@ -1,4 +1,6 @@
 const pool = require('../db');
+const { publishBookingStatusChanged } = require('../lib/ably');
+const { fetchJoinedBooking } = require('../lib/roomPayments');
 
 async function listGuests(req, res, next) {
   try {
@@ -109,9 +111,20 @@ async function updateGuest(req, res, next) {
     );
     if (!rows.length) return res.status(404).json({ error: 'Guest not found' });
     res.json(rows[0]);
+    republishGuestBookings(req.property_id, rows[0].id).catch((err) => console.error('Ably publish failed:', err.message));
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Email already exists' });
     next(err);
+  }
+}
+
+// Booking feed cards carry the guest's name/email/phone; the feed only
+// refreshes a card on a booking event, so re-send each of their bookings.
+async function republishGuestBookings(propertyId, guestId) {
+  const { rows } = await pool.query('SELECT id FROM booking WHERE guest_id = $1 AND property_id = $2', [guestId, propertyId]);
+  for (const { id } of rows) {
+    const booking = await fetchJoinedBooking(id);
+    if (booking) await publishBookingStatusChanged(propertyId, booking);
   }
 }
 
