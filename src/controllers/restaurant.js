@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { isValidDate, isValidTime, isValidCurrencyCode, isValidTimezone } = require('../middleware/validate');
+const { isValidDate, isValidTime, isValidUuid, isValidCurrencyCode, isValidTimezone } = require('../middleware/validate');
 const { publishNewReservation, publishReservationStatusChanged, publishTableSessionOpened } = require('../lib/ably');
 const { generateJoinCode } = require('../lib/joinCode');
 const { escapeHtml } = require('../lib/resend');
@@ -294,7 +294,9 @@ async function setServicePeriods(req, res, next) {
 // directly (no HTTP hop) by the AI reply pipeline's check_availability tool
 // (see aiReplyTools.js), so the two paths can never drift apart on what
 // "available" means.
-async function findRestaurantAvailability(restaurantId, from, to, partySize, location = null) {
+// excludeReservationId: the reservation being edited, so its own table and
+// time count as free when staff move it.
+async function findRestaurantAvailability(restaurantId, from, to, partySize, location = null, excludeReservationId = null) {
     const { rows } = await pool.query(
       `WITH r AS (
          SELECT slot_interval_minutes, default_duration_minutes, closed_days
@@ -342,11 +344,12 @@ async function findRestaurantAvailability(restaurantId, from, to, partySize, loc
              AND rr.status != 'cancelled'
              AND rr.start_time < ct.start_time + (r.default_duration_minutes || ' minutes')::interval
              AND rr.end_time   > ct.start_time
+             AND ($6::uuid IS NULL OR rr.id <> $6)
          )
        GROUP BY cd.reservation_date, ct.start_time, rt.location
        HAVING COUNT(rt.id) > 0
        ORDER BY cd.reservation_date, ct.start_time, rt.location`,
-      [restaurantId, from, to, partySize, location]
+      [restaurantId, from, to, partySize, location, excludeReservationId]
     );
 
     const byDate = new Map();
@@ -364,7 +367,7 @@ async function findRestaurantAvailability(restaurantId, from, to, partySize, loc
 async function searchAvailability(req, res, next) {
   try {
     const { restaurant_id } = req.params;
-    const { from, to, party_size, location } = req.query;
+    const { from, to, party_size, location, exclude_reservation_id } = req.query;
 
     if (!from || !to || !party_size) {
       return res.status(400).json({ error: 'from, to, and party_size are required' });
@@ -379,7 +382,10 @@ async function searchAvailability(req, res, next) {
     const restaurantRes = await pool.query("SELECT id FROM restaurant WHERE id = $1 AND status = 'active'", [restaurant_id]);
     if (!restaurantRes.rows.length) return res.status(404).json({ error: 'Restaurant not found' });
 
-    const result = await findRestaurantAvailability(restaurant_id, from, to, partySize, location ?? null);
+    if (exclude_reservation_id && !isValidUuid(exclude_reservation_id)) {
+      return res.status(400).json({ error: 'exclude_reservation_id must be a UUID' });
+    }
+    const result = await findRestaurantAvailability(restaurant_id, from, to, partySize, location ?? null, exclude_reservation_id ?? null);
     res.json(result);
   } catch (err) { next(err); }
 }
@@ -533,6 +539,57 @@ async function getReservationPaymentIntent(req, res, next) {
   }
 }
 
+// Validates date/time against closed days and service hours, then locks and
+// picks the smallest free table that seats the party. Runs inside the
+// caller's transaction. When moving an existing reservation, `exclude` is its
+// id (so it doesn't clash with itself) and `preferTableId` its current table.
+async function assignTable(client, restaurant, { reservation_date, start_time, party_size, location = null, exclude = null, preferTableId = null }) {
+  if (restaurant.closed_days.includes(isoDayOfWeek(reservation_date))) {
+    return { status: 400, error: 'Restaurant is closed on this day' };
+  }
+  const seasonRes = await client.query(
+    `SELECT 1 FROM restaurant_seasonal_closure
+     WHERE restaurant_id = $1
+       AND ROW(EXTRACT(MONTH FROM $2::date)::int, EXTRACT(DAY FROM $2::date)::int)
+           BETWEEN ROW(start_month, start_day) AND ROW(end_month, end_day)`,
+    [restaurant.id, reservation_date]
+  );
+  if (seasonRes.rows.length) return { status: 400, error: 'Restaurant is closed on this day' };
+
+  const end_time = addMinutesToTime(start_time, restaurant.default_duration_minutes);
+  const periodsRes = await client.query(
+    'SELECT start_time, end_time FROM service_period WHERE restaurant_id = $1',
+    [restaurant.id]
+  );
+  const fitsAPeriod = periodsRes.rows.some((p) => start_time >= p.start_time.slice(0, 5) && end_time <= p.end_time.slice(0, 5));
+  if (!fitsAPeriod) return { status: 400, error: 'start_time is outside service hours' };
+
+  const { rows: candidates } = await client.query(
+    `SELECT id FROM restaurant_table
+     WHERE restaurant_id = $1
+       AND status = 'active'
+       AND seats >= $2
+       AND ($3::varchar IS NULL OR location = $3)
+     ORDER BY (id = $4::uuid) DESC NULLS LAST, seats ASC
+     FOR UPDATE SKIP LOCKED`,
+    [restaurant.id, party_size, location, preferTableId]
+  );
+  for (const table of candidates) {
+    const overlapRes = await client.query(
+      `SELECT id FROM restaurant_reservation
+       WHERE table_id = $1
+         AND reservation_date = $2
+         AND status != 'cancelled'
+         AND start_time < $4
+         AND end_time   > $3
+         AND ($5::uuid IS NULL OR id <> $5)`,
+      [table.id, reservation_date, start_time, end_time, exclude]
+    );
+    if (!overlapRes.rows.length) return { tableId: table.id, end_time };
+  }
+  return { status: 409, error: 'No tables available for this time' };
+}
+
 async function createReservation(req, res, next) {
   const { restaurant_id } = req.params;
   const { reservation_date, start_time, location, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata, stripe_payment_intent_id } = req.body;
@@ -573,67 +630,12 @@ async function createReservation(req, res, next) {
       }
     }
 
-    if (restaurant.closed_days.includes(isoDayOfWeek(reservation_date))) {
+    const slot = await assignTable(client, restaurant, { reservation_date, start_time, party_size, location });
+    if (slot.error) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Restaurant is closed on this day' });
+      return res.status(slot.status).json({ error: slot.error });
     }
-
-    const seasonRes = await client.query(
-      `SELECT 1 FROM restaurant_seasonal_closure
-       WHERE restaurant_id = $1
-         AND ROW(EXTRACT(MONTH FROM $2::date)::int, EXTRACT(DAY FROM $2::date)::int)
-             BETWEEN ROW(start_month, start_day) AND ROW(end_month, end_day)`,
-      [restaurant_id, reservation_date]
-    );
-    if (seasonRes.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Restaurant is closed on this day' });
-    }
-
-    const end_time = addMinutesToTime(start_time, restaurant.default_duration_minutes);
-    const periodsRes = await client.query(
-      'SELECT start_time, end_time FROM service_period WHERE restaurant_id = $1',
-      [restaurant_id]
-    );
-    const fitsAPeriod = periodsRes.rows.some((p) => {
-      const periodStart = p.start_time.slice(0, 5);
-      const periodEnd = p.end_time.slice(0, 5);
-      return start_time >= periodStart && end_time <= periodEnd;
-    });
-    if (!fitsAPeriod) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'start_time is outside service hours' });
-    }
-
-    const { rows: candidates } = await client.query(
-      `SELECT id FROM restaurant_table
-       WHERE restaurant_id = $1
-         AND status = 'active'
-         AND seats >= $2
-         AND ($3::varchar IS NULL OR location = $3)
-       ORDER BY seats ASC
-       FOR UPDATE SKIP LOCKED`,
-      [restaurant_id, party_size, location ?? null]
-    );
-
-    let assignedTableId = null;
-    for (const table of candidates) {
-      const overlapRes = await client.query(
-        `SELECT id FROM restaurant_reservation
-         WHERE table_id = $1
-           AND reservation_date = $2
-           AND status != 'cancelled'
-           AND start_time < $4
-           AND end_time   > $3`,
-        [table.id, reservation_date, start_time, end_time]
-      );
-      if (!overlapRes.rows.length) { assignedTableId = table.id; break; }
-    }
-
-    if (!assignedTableId) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'No tables available for this time' });
-    }
+    const { tableId: assignedTableId, end_time } = slot;
 
     const { rows } = await client.query(
       `INSERT INTO restaurant_reservation
@@ -668,12 +670,59 @@ async function createReservation(req, res, next) {
 }
 
 async function updateReservation(req, res, next) {
+  const { status, notes, contact_name, contact_email, contact_phone, metadata, stripe_payment_intent_id, reservation_date, start_time, party_size } = req.body;
+  if (metadata !== undefined && !isValidMetadata(metadata)) {
+    return res.status(400).json({ error: 'metadata must be a JSON object' });
+  }
+  if (reservation_date !== undefined && !isValidDate(reservation_date)) return res.status(400).json({ error: 'Invalid date format' });
+  if (start_time !== undefined && !isValidTime(start_time)) return res.status(400).json({ error: 'Invalid start_time format, use HH:MM' });
+  if (party_size !== undefined && (!Number.isInteger(party_size) || party_size <= 0)) {
+    return res.status(400).json({ error: 'party_size must be a positive integer' });
+  }
+  const moving = reservation_date !== undefined || start_time !== undefined || party_size !== undefined;
+
+  const client = await pool.connect();
   try {
-    const { status, notes, contact_name, contact_email, contact_phone, metadata, stripe_payment_intent_id } = req.body;
-    if (metadata !== undefined && !isValidMetadata(metadata)) {
-      return res.status(400).json({ error: 'metadata must be a JSON object' });
+    await client.query('BEGIN');
+
+    // Moving date/time/party size re-runs the same checks as a new booking
+    // and may land on a different table (the current one is kept if free).
+    let move = {};
+    if (moving) {
+      const { rows: cur } = await client.query(
+        `SELECT rr.id, rr.table_id, rr.status, rr.party_size, rt.restaurant_id,
+                to_char(rr.reservation_date, 'YYYY-MM-DD') AS reservation_date,
+                to_char(rr.start_time, 'HH24:MI') AS start_time
+         FROM restaurant_reservation rr
+         JOIN restaurant_table rt ON rt.id = rr.table_id
+         WHERE rr.id = $1 AND rr.property_id = $2
+         FOR UPDATE OF rr`,
+        [req.params.id, req.property_id]
+      );
+      if (!cur.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Reservation not found' });
+      }
+      if (cur[0].status === 'cancelled') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'A cancelled reservation cannot be moved' });
+      }
+      const { rows: restaurant } = await client.query('SELECT * FROM restaurant WHERE id = $1', [cur[0].restaurant_id]);
+      move = {
+        reservation_date: reservation_date ?? cur[0].reservation_date,
+        start_time: start_time ?? cur[0].start_time,
+        party_size: party_size ?? cur[0].party_size,
+      };
+      const slot = await assignTable(client, restaurant[0], { ...move, exclude: cur[0].id, preferTableId: cur[0].table_id });
+      if (slot.error) {
+        await client.query('ROLLBACK');
+        return res.status(slot.status).json({ error: slot.error });
+      }
+      move.table_id = slot.tableId;
+      move.end_time = slot.end_time;
     }
-    const { rows } = await pool.query(
+
+    const { rows } = await client.query(
       `UPDATE restaurant_reservation SET
          status                   = COALESCE($1, status),
          notes                    = COALESCE($2, notes),
@@ -681,32 +730,46 @@ async function updateReservation(req, res, next) {
          contact_email            = COALESCE($4, contact_email),
          contact_phone            = COALESCE($5, contact_phone),
          metadata                 = COALESCE($6::jsonb, metadata),
-         stripe_payment_intent_id = COALESCE($7, stripe_payment_intent_id)
+         stripe_payment_intent_id = COALESCE($7, stripe_payment_intent_id),
+         table_id                 = COALESCE($10, table_id),
+         reservation_date         = COALESCE($11, reservation_date),
+         start_time               = COALESCE($12, start_time),
+         end_time                 = COALESCE($13, end_time),
+         party_size               = COALESCE($14, party_size)
        WHERE id = $8 AND property_id = $9 RETURNING *`,
-      [status, notes, contact_name, contact_email, contact_phone, metadata ?? null, stripe_payment_intent_id ?? null, req.params.id, req.property_id]
+      [status, notes, contact_name, contact_email, contact_phone, metadata ?? null, stripe_payment_intent_id ?? null, req.params.id, req.property_id,
+       move.table_id ?? null, move.reservation_date ?? null, move.start_time ?? null, move.end_time ?? null, move.party_size ?? null]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Reservation not found' });
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Reservation not found' });
+    }
+    await client.query('COMMIT');
 
-    if (status !== undefined) {
-      // live-reservations-feed's upsert replaces the whole list item for an
-      // id on every event (same as every other hotal-ui feed) -- re-fetch
-      // the joined shape so status-changed doesn't blank out table_number/
-      // location on an otherwise-unrelated field.
-      const { rows: full } = await pool.query(
-        `SELECT rr.*, rt.table_number, rt.seats, rt.location, rt.restaurant_id
-         FROM restaurant_reservation rr
-         JOIN restaurant_table rt ON rt.id = rr.table_id
-         WHERE rr.id = $1`,
-        [rows[0].id]
-      );
-      if (full.length) {
-        publishReservationStatusChanged(full[0].restaurant_id, req.property_id, full[0])
-          .catch((err) => console.error('Ably publish failed:', err.message));
-      }
+    // live-reservations-feed's upsert replaces the whole list item for an
+    // id on every event (same as every other hotal-ui feed) -- re-fetch
+    // the joined shape so the update doesn't blank out table_number/
+    // location. Published for any edit, not just status, so a moved or
+    // renamed reservation shows up too.
+    const { rows: full } = await pool.query(
+      `SELECT rr.*, rt.table_number, rt.seats, rt.location, rt.restaurant_id
+       FROM restaurant_reservation rr
+       JOIN restaurant_table rt ON rt.id = rr.table_id
+       WHERE rr.id = $1`,
+      [rows[0].id]
+    );
+    if (full.length) {
+      publishReservationStatusChanged(full[0].restaurant_id, req.property_id, full[0])
+        .catch((err) => console.error('Ably publish failed:', err.message));
     }
 
-    res.json(rows[0]);
-  } catch (err) { next(err); }
+    res.json(full[0] ?? rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
 }
 
 async function seatReservation(req, res, next) {
