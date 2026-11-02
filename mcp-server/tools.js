@@ -898,6 +898,14 @@ function createTools(apiRequest) {
     run: (args) => apiRequest('GET', '/api/proshop/baskets', { query: args }),
   },
   {
+    name: 'list_room_baskets',
+    description: 'List open room baskets: unpaid website room checkouts from the last 7 days whose guest has not booked since (default 5, max 50)',
+    inputSchema: {
+      limit: z.number().int().min(1).max(50).optional(),
+    },
+    run: (args) => apiRequest('GET', '/api/bookings/baskets', { query: args }),
+  },
+  {
     name: 'get_proshop_order',
     description: 'Get a pro shop order with its line items',
     inputSchema: { id: z.string() },

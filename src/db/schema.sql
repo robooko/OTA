@@ -325,11 +325,15 @@ CREATE TABLE IF NOT EXISTS booking (
   rate_plan_terms          JSONB,        -- plan snapshot at booking time
   payment_due_at           TIMESTAMPTZ,  -- set while pending_payment
   stripe_payment_intent_id VARCHAR(255), -- the booking's card PI
+  website_checkout         BOOLEAN NOT NULL DEFAULT false, -- API-key card checkout: a room basket until paid
+  basket_reminder_sent_at  TIMESTAMPTZ,
+  basket_reminder_resend_email_id VARCHAR(255),
   created_at  TIMESTAMPTZ   DEFAULT now(),
   CONSTRAINT booking_no_overlap EXCLUDE USING gist (room_id WITH =, daterange(check_in, check_out) WITH &&) WHERE (status NOT IN ('cancelled', 'expired'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_booking_pending_due ON booking(payment_due_at) WHERE status = 'pending_payment';
+CREATE INDEX IF NOT EXISTS idx_booking_website_checkout ON booking (property_id, created_at) WHERE website_checkout;
 
 -- Payments
 CREATE TABLE IF NOT EXISTS payment (

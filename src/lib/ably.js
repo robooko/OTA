@@ -197,16 +197,25 @@ async function publishAiDraftUpdatedForSpa(spaId, payload) {
   await channel.publish('ai-draft-updated', payload);
 }
 
+// Every booking create/status change routes through these two, so they also
+// refresh the guest's room baskets (lazy require: roomBaskets requires this module).
 async function publishNewBooking(propertyId, booking) {
   if (!client) return;
+  require('./roomBaskets').publishRoomBaskets(require('../db'), propertyId, booking?.guest_id);
   const channel = client.channels.get(`property:${propertyId}:bookings`);
   await channel.publish('new-booking', booking);
 }
 
 async function publishBookingStatusChanged(propertyId, payload) {
   if (!client) return;
+  require('./roomBaskets').publishRoomBaskets(require('../db'), propertyId, payload?.guest_id);
   const channel = client.channels.get(`property:${propertyId}:bookings`);
   await channel.publish('booking-status-changed', payload);
+}
+
+async function publishRoomBasketUpdated(propertyId, basket) {
+  if (!client) return;
+  await client.channels.get(`property:${propertyId}:room-baskets`).publish('basket-updated', basket);
 }
 
 async function publishNewAppointment(spaId, appointment) {
@@ -374,6 +383,7 @@ module.exports = {
   publishAiDraftReadyForSpa,
   publishAiDraftUpdatedForSpa,
   publishNewBooking,
+  publishRoomBasketUpdated,
   publishBookingStatusChanged,
   publishNewAppointment,
   publishAppointmentStatusChanged,

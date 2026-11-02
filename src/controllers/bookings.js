@@ -1,6 +1,7 @@
 const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
 const { publishNewBooking, publishBookingStatusChanged } = require('../lib/ably');
+const { listOpenRoomBaskets } = require('../lib/roomBaskets');
 const { computeFolio, toCents } = require('../lib/folio');
 const { applyAdjustment, termsSnapshot, guestCancelDecision, PAY_WINDOW_MINUTES } = require('../lib/ratePlans');
 const roomEmails = require('../lib/roomBookingEmails');
@@ -293,11 +294,11 @@ async function createBooking(req, res, next) {
       try {
         const bookingRes = await client.query(
           `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata,
-                                status, rate_plan_id, rate_plan_terms, payment_due_at)
+                                status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                   CASE WHEN $12::int IS NULL THEN NULL ELSE now() + make_interval(mins => $12::int) END) RETURNING *`,
+                   CASE WHEN $12::int IS NULL THEN NULL ELSE now() + make_interval(mins => $12::int) END, $13) RETURNING *`,
           [req.property_id, guest_id, candidate.id, check_in, check_out, guests || 1, total.toFixed(2), metadata ?? {},
-            status, plan?.id ?? null, terms, payWindow]
+            status, plan?.id ?? null, terms, payWindow, card && viaApiKey]
         );
         await client.query('RELEASE SAVEPOINT attempt');
         booked = bookingRes.rows[0];
@@ -522,4 +523,12 @@ async function confirmPayment(req, res, next) {
   }
 }
 
-module.exports = { listBookings, getBooking, createBooking, updateBooking, cancelBooking, createPaymentIntent, confirmPayment };
+// Unpaid website checkouts, newest first -- see src/lib/roomBaskets.js.
+async function listRoomBaskets(req, res, next) {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 5, 1), 50);
+    res.json(await listOpenRoomBaskets(pool, req.property_id, limit));
+  } catch (err) { next(err); }
+}
+
+module.exports = { listRoomBaskets, listBookings, getBooking, createBooking, updateBooking, cancelBooking, createPaymentIntent, confirmPayment };

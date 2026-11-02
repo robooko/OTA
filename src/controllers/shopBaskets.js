@@ -45,11 +45,16 @@ async function optOut(db, propertyId, email) {
 
 // GET, unauthenticated -- the basket UUID is the capability (only ever in
 // that guest's own reminder email). Same shape as reviews.js reviewOptOut.
+// A room basket's id is its booking's (src/lib/roomBaskets.js).
 async function basketReminderOptOut(req, res, next) {
   try {
     const { rows: [r] } = await pool.query(
       `SELECT b.property_id, b.contact_email, p.name AS property_name
-       FROM shop_basket b JOIN property p ON p.id = b.property_id WHERE b.id = $1`,
+       FROM shop_basket b JOIN property p ON p.id = b.property_id WHERE b.id = $1
+       UNION ALL
+       SELECT b.property_id, g.email, p.name
+       FROM booking b JOIN guest g ON g.id = b.guest_id JOIN property p ON p.id = b.property_id
+       WHERE b.id = $1 AND b.website_checkout`,
       [req.params.basket_id]
     );
     if (!r) return res.status(404).send('<p>That link is no longer valid.</p>');

@@ -3,6 +3,7 @@ const pool = require('../db');
 const resend = require('./resend');
 const { publishBasket } = require('./shopBaskets');
 const spa = require('../controllers/spa');
+const roomBaskets = require('./roomBaskets');
 
 const OTA_API_BASE_URL = 'https://ota-u6ii.onrender.com';
 
@@ -77,7 +78,8 @@ async function sweep(db = pool, at = new Date()) {
 
 function startBasketReminderJob() {
   const run = () =>
-    sweep()
+    Promise.all([sweep(), roomBaskets.sweep()])
+      .then(([shop, rooms]) => shop + rooms)
       .then((n) => { if (n > 0) console.log(`Basket reminders: sent ${n}`); })
       .catch((err) => console.error('Basket reminder sweep failed:', err.message));
   run();

@@ -8,6 +8,7 @@ const { authenticate, authenticateOrApiKey, requireRoleOrApiKey } = require('../
 const staffOrFullKey = [authenticateOrApiKey, requireRoleOrApiKey('admin', 'staff')];
 
 router.get('/', authenticateOrApiKey, ctrl.listBookings);
+router.get('/baskets', authenticateOrApiKey, ctrl.listRoomBaskets);
 router.get('/:id', authenticateOrApiKey, ctrl.getBooking);
 router.post('/', authenticateOrApiKey, ctrl.createBooking);
 router.put('/:id', staffOrFullKey, ctrl.updateBooking);
