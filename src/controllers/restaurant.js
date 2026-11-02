@@ -418,20 +418,33 @@ async function listAllReservations(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// The tab a reservation was seated into, for the restaurant dashboard.
+// bill_total: non-cancelled orders across every session seated from it (null
+// until seated with an order) -- same join as reservationGuestStats' avg_bill.
+// session_*: the latest such session (null until seated); closing it never
+// changes the reservation's own status, which stays 'seated'.
+const RESERVATION_TAB_COLUMNS = `
+  (SELECT sum(o.total_price)
+   FROM restaurant_table_session s
+   JOIN restaurant_order o ON o.table_session_id = s.id AND o.status <> 'cancelled'
+   WHERE s.reservation_id = rr.id) AS bill_total,
+  ts.status AS session_status, ts.payment_status AS session_payment_status,
+  ts.payment_method AS session_payment_method, ts.paid_at AS session_paid_at`;
+const RESERVATION_TAB_JOIN = `
+  LEFT JOIN LATERAL (
+    SELECT status, payment_status, payment_method, paid_at FROM restaurant_table_session
+    WHERE reservation_id = rr.id ORDER BY opened_at DESC LIMIT 1
+  ) ts ON true`;
+
 async function listReservations(req, res, next) {
   try {
     const { restaurant_id } = req.params;
     const { date, date_from, date_to, status, guest_id, clerk_user_id, cursor, limit } = req.query;
-    // bill_total: same subquery as getReservation's -- the dashboard feed's
-    // tiles show it.
     let query = `
-      SELECT rr.*, rt.table_number, rt.seats, rt.location,
-             (SELECT sum(o.total_price)
-              FROM restaurant_table_session s
-              JOIN restaurant_order o ON o.table_session_id = s.id AND o.status <> 'cancelled'
-              WHERE s.reservation_id = rr.id) AS bill_total
+      SELECT rr.*, rt.table_number, rt.seats, rt.location, ${RESERVATION_TAB_COLUMNS}
       FROM restaurant_reservation rr
       JOIN restaurant_table rt ON rt.id = rr.table_id
+      ${RESERVATION_TAB_JOIN}
       WHERE rt.restaurant_id = $1 AND rr.property_id = $2
     `;
     const params = [restaurant_id, req.property_id];
@@ -460,16 +473,10 @@ async function listReservations(req, res, next) {
 async function getReservation(req, res, next) {
   try {
     const { rows } = await pool.query(
-      // bill_total: non-cancelled orders across the table sessions seated
-      // from this reservation (null until it's been seated with an order) --
-      // same join as reservationGuestStats' avg_bill.
-      `SELECT rr.*, rt.table_number, rt.seats, rt.location, rt.restaurant_id,
-              (SELECT sum(o.total_price)
-               FROM restaurant_table_session s
-               JOIN restaurant_order o ON o.table_session_id = s.id AND o.status <> 'cancelled'
-               WHERE s.reservation_id = rr.id) AS bill_total
+      `SELECT rr.*, rt.table_number, rt.seats, rt.location, rt.restaurant_id, ${RESERVATION_TAB_COLUMNS}
        FROM restaurant_reservation rr
        JOIN restaurant_table rt ON rt.id = rr.table_id
+       ${RESERVATION_TAB_JOIN}
        WHERE rr.id = $1 AND rr.property_id = $2`,
       [req.params.id, req.property_id]
     );
