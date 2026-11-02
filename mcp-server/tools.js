@@ -1425,7 +1425,7 @@ function createTools(apiRequest) {
     description: 'Restaurant and room service orders, newest first, with items',
     inputSchema: {
       restaurant_id: z.string().optional(), booking_id: z.string().optional(), table_id: z.string().optional(), guest_id: z.string().optional(),
-      status: z.enum(['pending', 'confirmed', 'preparing', 'delivered', 'cancelled']).optional(),
+      status: z.enum(['pending', 'confirmed', 'preparing', 'ready', 'delivered', 'cancelled']).optional(),
       date_from: z.string().optional().describe('YYYY-MM-DD'), date_to: z.string().optional().describe('YYYY-MM-DD'),
       skip: z.number().int().min(0).optional(), take: z.number().int().min(1).optional(),
     },
@@ -1458,8 +1458,8 @@ function createTools(apiRequest) {
   },
   {
     name: 'set_restaurant_order_status',
-    description: 'Move an order through pending, confirmed, preparing, delivered, or cancel it. Orders on an open table tab with a join code need staff (the code is asked of API keys).',
-    inputSchema: { id: z.string(), status: z.enum(['pending', 'confirmed', 'preparing', 'delivered', 'cancelled']) },
+    description: 'Move an order through pending, confirmed, preparing, ready (waiting for a waiter or runner to collect), delivered, or cancel it. Orders on an open table tab with a join code need staff (the code is asked of API keys).',
+    inputSchema: { id: z.string(), status: z.enum(['pending', 'confirmed', 'preparing', 'ready', 'delivered', 'cancelled']) },
     run: ({ id, status }) => apiRequest('PUT', `/api/restaurant-orders/${id}/status`, { body: { status } }),
   },
   {

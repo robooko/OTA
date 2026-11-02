@@ -439,7 +439,7 @@ async function createOrder(req, res, next) {
 async function updateOrderStatus(req, res, next) {
   try {
     const { status } = req.body;
-    const valid = ['pending', 'confirmed', 'preparing', 'delivered', 'cancelled'];
+    const valid = ['pending', 'confirmed', 'preparing', 'ready', 'delivered', 'cancelled'];
     if (!valid.includes(status)) {
       return res.status(400).json({ error: `status must be one of: ${valid.join(', ')}` });
     }

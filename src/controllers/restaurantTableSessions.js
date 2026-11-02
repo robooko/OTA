@@ -131,7 +131,7 @@ async function createSessionPaymentIntent(req, res, next) {
           });
         }
         const { rows: active } = await pool.query(
-          `SELECT COUNT(*) FROM restaurant_order WHERE table_session_id = $1 AND status IN ('pending', 'confirmed', 'preparing')`,
+          `SELECT COUNT(*) FROM restaurant_order WHERE table_session_id = $1 AND status IN ('pending', 'confirmed', 'preparing', 'ready')`,
           [session.id]
         );
         if (parseInt(active[0].count, 10) > 0) {
@@ -348,7 +348,7 @@ async function closeSession(req, res, next) {
     if (denied) return res.status(denied.status).json(denied.body);
 
     const { rows: active } = await pool.query(
-      `SELECT COUNT(*) FROM restaurant_order WHERE table_session_id = $1 AND status IN ('pending', 'confirmed', 'preparing')`,
+      `SELECT COUNT(*) FROM restaurant_order WHERE table_session_id = $1 AND status IN ('pending', 'confirmed', 'preparing', 'ready')`,
       [req.params.id]
     );
     const activeCount = parseInt(active[0].count, 10);
