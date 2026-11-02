@@ -19,6 +19,31 @@ function announceClosed(session, tableNumber) {
     .catch((err) => console.error('Ably publish failed:', err.message));
 }
 
+// Cash is recorded by the waiter, never by a guest device: staff bearer or a
+// full api key (same rule as POST /api/payments).
+function isStaffOrFullKey(req) {
+  if (req.auth_method === 'api_key') return req.api_key?.permissions === null;
+  return ['admin', 'staff'].includes(req.user?.role);
+}
+
+// Before settling in cash, the tab's Stripe intent (if any) must not be able
+// to charge too: an untouched one is cancelled; a succeeded or mid-flight one
+// blocks the cash close. Returns a 409 body, or null when clear.
+async function cancelOpenIntent(session) {
+  if (!session.stripe_payment_intent_id || !session.stripe_secret_key) return null;
+  const stripe = require('stripe')(session.stripe_secret_key);
+  const intent = await stripe.paymentIntents.retrieve(session.stripe_payment_intent_id);
+  if (intent.status === 'canceled') return null;
+  if (intent.status === 'requires_payment_method') {
+    await stripe.paymentIntents.cancel(intent.id);
+    return null;
+  }
+  return {
+    error: intent.status === 'succeeded' ? 'This tab was already paid by card' : 'A card payment is in progress on this tab',
+    payment_intent_id: intent.id,
+  };
+}
+
 async function sessionTotalCents(sessionId) {
   const { rows } = await pool.query(
     // A voided round must not be charged for.
@@ -141,7 +166,7 @@ async function createSessionPaymentIntent(req, res, next) {
           });
         }
         const { rows: settled } = await pool.query(
-          `UPDATE restaurant_table_session SET status = 'closed', closed_at = now(), payment_status = 'paid', paid_at = now()
+          `UPDATE restaurant_table_session SET status = 'closed', closed_at = now(), payment_status = 'paid', paid_at = now(), payment_method = 'card'
            WHERE id = $1 RETURNING *`,
           [session.id]
         );
@@ -330,7 +355,10 @@ async function getSession(req, res, next) {
 
 async function closeSession(req, res, next) {
   try {
-    const { stripe_payment_intent_id } = req.body ?? {};
+    const { stripe_payment_intent_id, paid_with } = req.body ?? {};
+    if (paid_with !== undefined && paid_with !== 'cash') return res.status(400).json({ error: "paid_with must be 'cash'" });
+    if (paid_with && stripe_payment_intent_id) return res.status(400).json({ error: 'Send stripe_payment_intent_id or paid_with, not both' });
+    if (paid_with && !isStaffOrFullKey(req)) return res.status(403).json({ error: 'Only staff can record a cash payment' });
 
     const { rows: sessions } = await pool.query(
       `SELECT rts.*, p.stripe_secret_key, rt.table_number
@@ -378,7 +406,13 @@ async function closeSession(req, res, next) {
         return res.status(409).json({ error: 'Payment amount does not match the current session total' });
       }
 
-      paymentColumns = `, payment_status = 'paid', paid_at = now()`;
+      paymentColumns = `, payment_status = 'paid', paid_at = now(), payment_method = 'card'`;
+    }
+    if (paid_with === 'cash') {
+      if (session.payment_status === 'paid') return res.status(409).json({ error: 'Session already paid' });
+      const blocked = await cancelOpenIntent(session);
+      if (blocked) return res.status(409).json(blocked);
+      paymentColumns = `, payment_status = 'paid', paid_at = now(), payment_method = 'cash'`;
     }
 
     const { rows } = await pool.query(

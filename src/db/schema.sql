@@ -607,6 +607,7 @@ CREATE TABLE IF NOT EXISTS restaurant_table_session (
   payment_status            VARCHAR(20) NOT NULL DEFAULT 'unpaid',
   paid_at                   TIMESTAMPTZ,
   stripe_payment_intent_id  VARCHAR(255),
+  payment_method            VARCHAR(20),  -- 'card' | 'cash' once paid
   -- Scan-to-order join code (see migrate-2026-08-26-table-session-join-code):
   -- plaintext by design -- 4 digits gain nothing from hashing; protection is
   -- the attempt lockout. NULL = uncoded session, no enforcement.
@@ -614,6 +615,7 @@ CREATE TABLE IF NOT EXISTS restaurant_table_session (
   join_code_attempts        INT NOT NULL DEFAULT 0,
   CONSTRAINT restaurant_table_session_status CHECK (status IN ('open', 'closed')),
   CONSTRAINT restaurant_table_session_payment_status CHECK (payment_status IN ('unpaid', 'paid')),
+  CONSTRAINT restaurant_table_session_payment_method CHECK (payment_method IN ('card', 'cash')),
   CONSTRAINT restaurant_table_session_join_code_format CHECK (join_code ~ '^[0-9]{4}$')
 );
 
@@ -817,6 +819,7 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
   payment_status                VARCHAR(20)  NOT NULL DEFAULT 'unpaid',
   paid_at                       TIMESTAMPTZ,
   stripe_payment_intent_id      VARCHAR(255),
+  payment_method                VARCHAR(20),  -- 'card' | 'cash' once paid
   -- Review-request send record -- see migrate-2026-09-03-spa-review-requests.sql.
   -- sent_at is set in the same statement that claims the row (the sweep's
   -- idempotency guarantee), so it is both the send record and the lock.
@@ -838,7 +841,8 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
   hold_expires_at          TIMESTAMPTZ,
   pending_email_opts       JSONB,
   created_at                    TIMESTAMPTZ  DEFAULT now(),
-  CONSTRAINT spa_appointment_payment_status CHECK (payment_status IN ('unpaid', 'paid'))
+  CONSTRAINT spa_appointment_payment_status CHECK (payment_status IN ('unpaid', 'paid')),
+  CONSTRAINT spa_appointment_payment_method CHECK (payment_method IN ('card', 'cash'))
 );
 
 -- Property-scoped: opting out of one venue's review request says nothing

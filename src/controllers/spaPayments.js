@@ -52,7 +52,7 @@ async function createAppointmentPaymentIntent(req, res, next) {
         if (existing.amount !== stripeAmount) {
           return res.status(409).json({ error: 'A payment already succeeded for a different amount', payment_intent_id: existing.id });
         }
-        await pool.query(`UPDATE spa_appointment SET payment_status = 'paid', paid_at = now() WHERE id = $1`, [appt.id]);
+        await pool.query(`UPDATE spa_appointment SET payment_status = 'paid', paid_at = now(), payment_method = 'card' WHERE id = $1`, [appt.id]);
         return res.json({ already_paid: true, payment_intent_id: existing.id });
       }
       // canceled -> fall through and mint a fresh intent
@@ -77,7 +77,8 @@ async function createAppointmentPaymentIntent(req, res, next) {
 
 async function confirmAppointmentPayment(req, res, next) {
   try {
-    const { stripe_payment_intent_id } = req.body ?? {};
+    const { stripe_payment_intent_id, paid_with } = req.body ?? {};
+    if (paid_with !== undefined) return recordCashPayment(req, res, next);
     if (!stripe_payment_intent_id) return res.status(400).json({ error: 'stripe_payment_intent_id is required' });
 
     const appt = await loadAppointmentForPayment(req.params.id, req.params.spa_id, req.property_id);
@@ -97,9 +98,61 @@ async function confirmAppointmentPayment(req, res, next) {
     }
 
     const { rows } = await pool.query(
-      `UPDATE spa_appointment SET payment_status = 'paid', paid_at = now() WHERE id = $1 RETURNING *`,
+      `UPDATE spa_appointment SET payment_status = 'paid', paid_at = now(), payment_method = 'card' WHERE id = $1 RETURNING *`,
       [appt.id]
     );
+    res.json(rows[0]);
+  } catch (err) {
+    if (err.type?.startsWith('Stripe')) {
+      return res.status(502).json({ error: `Stripe error: ${err.message}` });
+    }
+    next(err);
+  }
+}
+
+// Cash taken at the spa desk (staff bearer or a full api key only). Nothing
+// on Stripe may still be able to charge for it: an untouched terminal intent
+// is cancelled and a pending bill line removed; a succeeded or mid-flight
+// tap, or a sent invoice, is a 409 for staff to sort out first.
+async function recordCashPayment(req, res, next) {
+  try {
+    const { paid_with, stripe_payment_intent_id } = req.body;
+    if (paid_with !== 'cash') return res.status(400).json({ error: "paid_with must be 'cash'" });
+    if (stripe_payment_intent_id) return res.status(400).json({ error: 'Send stripe_payment_intent_id or paid_with, not both' });
+    const staff = req.auth_method === 'api_key' ? req.api_key?.permissions === null : ['admin', 'staff'].includes(req.user?.role);
+    if (!staff) return res.status(403).json({ error: 'Only staff can record a cash payment' });
+
+    const appt = await loadAppointmentForPayment(req.params.id, req.params.spa_id, req.property_id);
+    if (!appt) return res.status(404).json({ error: 'Appointment not found' });
+    if (appt.status === 'cancelled') return res.status(409).json({ error: 'Appointment is cancelled' });
+    if (appt.payment_status === 'paid') return res.status(409).json({ error: 'Appointment already paid' });
+
+    if (appt.stripe_secret_key) {
+      const stripe = require('stripe')(appt.stripe_secret_key);
+      if (appt.stripe_payment_intent_id) {
+        const intent = await stripe.paymentIntents.retrieve(appt.stripe_payment_intent_id);
+        if (intent.status === 'requires_payment_method') await stripe.paymentIntents.cancel(intent.id);
+        else if (intent.status !== 'canceled') {
+          return res.status(409).json({
+            error: intent.status === 'succeeded' ? 'Appointment was already paid by card' : 'A card payment is in progress on this appointment',
+            payment_intent_id: intent.id,
+          });
+        }
+      }
+      const customer = appt.contact_email ? await findCustomer(stripe, appt.contact_email) : null;
+      if (customer) {
+        const { pendingItem, invoice } = await findAppointmentBilling(stripe, customer.id, appt.id);
+        if (invoice) return res.status(409).json({ error: 'Appointment is on a Stripe invoice -- void it in Stripe first', invoice_id: invoice.id });
+        if (pendingItem) await stripe.invoiceItems.del(pendingItem.id);
+      }
+    }
+
+    const { rows } = await pool.query(
+      `UPDATE spa_appointment SET payment_status = 'paid', paid_at = now(), payment_method = 'cash'
+       WHERE id = $1 AND payment_status = 'unpaid' RETURNING *`,
+      [appt.id]
+    );
+    if (!rows.length) return res.status(409).json({ error: 'Appointment already paid' });
     res.json(rows[0]);
   } catch (err) {
     if (err.type?.startsWith('Stripe')) {
@@ -146,7 +199,7 @@ async function settlePaidInvoice(stripe, invoice, propertyId) {
   }
   if (!lines.length) return { settled: [], mismatched: [] };
   const { rows } = await pool.query(
-    `UPDATE spa_appointment sa SET payment_status = 'paid', paid_at = COALESCE(sa.paid_at, now())
+    `UPDATE spa_appointment sa SET payment_status = 'paid', paid_at = COALESCE(sa.paid_at, now()), payment_method = COALESCE(sa.payment_method, 'card')
      FROM unnest($1::text[], $2::int[]) AS l(id, amount)
      WHERE sa.id::text = l.id AND sa.property_id = $3 AND round(sa.price * 100) = l.amount
      RETURNING sa.id::text AS id`,
