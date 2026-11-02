@@ -295,8 +295,9 @@ async function setServicePeriods(req, res, next) {
 // (see aiReplyTools.js), so the two paths can never drift apart on what
 // "available" means.
 // excludeReservationId: the reservation being edited, so its own table and
-// time count as free when staff move it.
-async function findRestaurantAvailability(restaurantId, from, to, partySize, location = null, excludeReservationId = null) {
+// time count as free when staff move it. tableId: only that table (staff
+// booking a specific table from the dashboard floor plan).
+async function findRestaurantAvailability(restaurantId, from, to, partySize, location = null, excludeReservationId = null, tableId = null) {
     const { rows } = await pool.query(
       `WITH r AS (
          SELECT slot_interval_minutes, default_duration_minutes, closed_days
@@ -336,6 +337,7 @@ async function findRestaurantAvailability(restaurantId, from, to, partySize, loc
          AND rt.status = 'active'
          AND rt.seats >= $4
          AND ($5::varchar IS NULL OR rt.location = $5)
+         AND ($7::uuid IS NULL OR rt.id = $7)
          AND NOT EXISTS (
            SELECT 1 FROM restaurant_reservation rr
            CROSS JOIN r
@@ -349,7 +351,7 @@ async function findRestaurantAvailability(restaurantId, from, to, partySize, loc
        GROUP BY cd.reservation_date, ct.start_time, rt.location
        HAVING COUNT(rt.id) > 0
        ORDER BY cd.reservation_date, ct.start_time, rt.location`,
-      [restaurantId, from, to, partySize, location, excludeReservationId]
+      [restaurantId, from, to, partySize, location, excludeReservationId, tableId]
     );
 
     const byDate = new Map();
@@ -367,7 +369,7 @@ async function findRestaurantAvailability(restaurantId, from, to, partySize, loc
 async function searchAvailability(req, res, next) {
   try {
     const { restaurant_id } = req.params;
-    const { from, to, party_size, location, exclude_reservation_id } = req.query;
+    const { from, to, party_size, location, exclude_reservation_id, table_id } = req.query;
 
     if (!from || !to || !party_size) {
       return res.status(400).json({ error: 'from, to, and party_size are required' });
@@ -385,7 +387,8 @@ async function searchAvailability(req, res, next) {
     if (exclude_reservation_id && !isValidUuid(exclude_reservation_id)) {
       return res.status(400).json({ error: 'exclude_reservation_id must be a UUID' });
     }
-    const result = await findRestaurantAvailability(restaurant_id, from, to, partySize, location ?? null, exclude_reservation_id ?? null);
+    if (table_id && !isValidUuid(table_id)) return res.status(400).json({ error: 'table_id must be a UUID' });
+    const result = await findRestaurantAvailability(restaurant_id, from, to, partySize, location ?? null, exclude_reservation_id ?? null, table_id ?? null);
     res.json(result);
   } catch (err) { next(err); }
 }
@@ -543,7 +546,8 @@ async function getReservationPaymentIntent(req, res, next) {
 // picks the smallest free table that seats the party. Runs inside the
 // caller's transaction. When moving an existing reservation, `exclude` is its
 // id (so it doesn't clash with itself) and `preferTableId` its current table.
-async function assignTable(client, restaurant, { reservation_date, start_time, party_size, location = null, exclude = null, preferTableId = null }) {
+// `tableId` restricts the pick to that one table (no fallback to another).
+async function assignTable(client, restaurant, { reservation_date, start_time, party_size, location = null, exclude = null, preferTableId = null, tableId = null }) {
   if (restaurant.closed_days.includes(isoDayOfWeek(reservation_date))) {
     return { status: 400, error: 'Restaurant is closed on this day' };
   }
@@ -570,9 +574,10 @@ async function assignTable(client, restaurant, { reservation_date, start_time, p
        AND status = 'active'
        AND seats >= $2
        AND ($3::varchar IS NULL OR location = $3)
+       AND ($5::uuid IS NULL OR id = $5)
      ORDER BY (id = $4::uuid) DESC NULLS LAST, seats ASC
      FOR UPDATE SKIP LOCKED`,
-    [restaurant.id, party_size, location, preferTableId]
+    [restaurant.id, party_size, location, preferTableId, tableId]
   );
   for (const table of candidates) {
     const overlapRes = await client.query(
@@ -592,7 +597,7 @@ async function assignTable(client, restaurant, { reservation_date, start_time, p
 
 async function createReservation(req, res, next) {
   const { restaurant_id } = req.params;
-  const { reservation_date, start_time, location, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata, stripe_payment_intent_id } = req.body;
+  const { reservation_date, start_time, location, table_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, party_size, notes, metadata, stripe_payment_intent_id } = req.body;
 
   if (!reservation_date || !start_time || !contact_name || !party_size) {
     return res.status(400).json({ error: 'reservation_date, start_time, contact_name, and party_size are required' });
@@ -605,6 +610,7 @@ async function createReservation(req, res, next) {
   if (metadata !== undefined && !isValidMetadata(metadata)) {
     return res.status(400).json({ error: 'metadata must be a JSON object' });
   }
+  if (table_id && !isValidUuid(table_id)) return res.status(400).json({ error: 'table_id must be a UUID' });
 
   const client = await pool.connect();
   try {
@@ -630,7 +636,7 @@ async function createReservation(req, res, next) {
       }
     }
 
-    const slot = await assignTable(client, restaurant, { reservation_date, start_time, party_size, location });
+    const slot = await assignTable(client, restaurant, { reservation_date, start_time, party_size, location, tableId: table_id ?? null });
     if (slot.error) {
       await client.query('ROLLBACK');
       return res.status(slot.status).json({ error: slot.error });
