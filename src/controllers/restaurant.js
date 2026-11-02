@@ -422,8 +422,14 @@ async function listReservations(req, res, next) {
   try {
     const { restaurant_id } = req.params;
     const { date, date_from, date_to, status, guest_id, clerk_user_id, cursor, limit } = req.query;
+    // bill_total: same subquery as getReservation's -- the dashboard feed's
+    // tiles show it.
     let query = `
-      SELECT rr.*, rt.table_number, rt.seats, rt.location
+      SELECT rr.*, rt.table_number, rt.seats, rt.location,
+             (SELECT sum(o.total_price)
+              FROM restaurant_table_session s
+              JOIN restaurant_order o ON o.table_session_id = s.id AND o.status <> 'cancelled'
+              WHERE s.reservation_id = rr.id) AS bill_total
       FROM restaurant_reservation rr
       JOIN restaurant_table rt ON rt.id = rr.table_id
       WHERE rt.restaurant_id = $1 AND rr.property_id = $2
