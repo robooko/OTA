@@ -13,6 +13,7 @@ const {
 } = require('../lib/ably');
 const { generateJoinCode, verifyJoinCode } = require('../lib/joinCode');
 const { computeOrderTax } = require('../lib/tax');
+const { isValidUuid } = require('../middleware/validate');
 
 function isValidTranslations(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -27,7 +28,7 @@ async function listMenuItems(req, res, next) {
     const params = [req.property_id];
     if (category) { params.push(category); query += ` AND category = $${params.length}`; }
     if (restaurant_id) { params.push(restaurant_id); query += ` AND restaurant_id = $${params.length}`; }
-    query += ' ORDER BY category, name';
+    query += ' ORDER BY category, position, name';
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) { next(err); }
@@ -56,8 +57,9 @@ async function createMenuItem(req, res, next) {
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO restaurant_menu_item (property_id, restaurant_id, name, description, category, price, allergens, variants, translations)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      `INSERT INTO restaurant_menu_item (property_id, restaurant_id, name, description, category, price, allergens, variants, translations, position)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+         (SELECT COALESCE(MAX(position), -1) + 1 FROM restaurant_menu_item WHERE property_id = $1)) RETURNING *`,
       [req.property_id, restaurant_id || null, name, description || null, category || null, price, allergens ?? [], variants ?? [], translations ?? {}]
     );
     res.status(201).json(rows[0]);
@@ -115,6 +117,23 @@ async function bulkDeleteMenuItems(req, res, next) {
       [ids, req.property_id]
     );
     res.json({ deleted: rows.length, ids: rows.map((r) => r.id) });
+  } catch (err) { next(err); }
+}
+
+// ids in display order; each gets its index as position. Ids not listed keep theirs.
+async function reorderMenuItems(req, res, next) {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || !ids.length || !ids.every(isValidUuid)) {
+      return res.status(400).json({ error: 'ids must be a non-empty array of menu item ids' });
+    }
+    const { rows } = await pool.query(
+      `UPDATE restaurant_menu_item m SET position = o.n - 1
+         FROM unnest($1::uuid[]) WITH ORDINALITY AS o(id, n)
+       WHERE m.id = o.id AND m.property_id = $2 RETURNING m.id`,
+      [ids, req.property_id]
+    );
+    res.json({ reordered: rows.length, ids: rows.map((r) => r.id) });
   } catch (err) { next(err); }
 }
 
@@ -783,4 +802,4 @@ async function getOrderAblyToken(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, renameMenuCategory, listBoardItems, createBoardItem, updateBoardItem, getBoardAblyToken, listOrders, getOrder, createOrder, updateOrder, updateOrderStatus, createOrderPaymentIntent, confirmOrderPayment, getAblyToken, getOrderAblyToken };
+module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, reorderMenuItems, renameMenuCategory, listBoardItems, createBoardItem, updateBoardItem, getBoardAblyToken, listOrders, getOrder, createOrder, updateOrder, updateOrderStatus, createOrderPaymentIntent, confirmOrderPayment, getAblyToken, getOrderAblyToken };

@@ -738,6 +738,12 @@ function createTools(apiRequest) {
     run: (args) => apiRequest('PUT', '/api/restaurant-orders/menu/bulk-delete', { body: args }),
   },
   {
+    name: 'reorder_restaurant_menu_items',
+    description: 'Set the display order of menu items. The menu lists by category, then this order, so to reorder one category pass just its item ids, first to last.',
+    inputSchema: { ids: z.array(z.string()).min(1) },
+    run: (args) => apiRequest('PUT', '/api/restaurant-orders/menu/reorder', { body: args }),
+  },
+  {
     name: 'rename_restaurant_menu_category',
     description: 'Rename a menu category on every item that has it, e.g. to merge duplicates like "cocktail" and "Cocktails" into one name',
     inputSchema: {

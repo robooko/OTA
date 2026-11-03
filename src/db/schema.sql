@@ -1222,7 +1222,8 @@ CREATE TABLE IF NOT EXISTS restaurant_menu_item (
   allergens     TEXT[]        NOT NULL DEFAULT '{}',
   variants      TEXT[]        NOT NULL DEFAULT '{}',
   status        VARCHAR(20)   DEFAULT 'active',
-  translations  JSONB         NOT NULL DEFAULT '{}'
+  translations  JSONB         NOT NULL DEFAULT '{}',
+  position      INTEGER       NOT NULL DEFAULT 0
 );
 
 -- The in-shop board: what's on today / sold out. Unpriced, copy lives in
