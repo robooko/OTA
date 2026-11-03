@@ -577,6 +577,7 @@ CREATE TABLE IF NOT EXISTS restaurant (
   payment_protection_amount NUMERIC(10,2),
   website_id                UUID REFERENCES property_website(id), -- NULL = no guest website; table QR codes then carry only the table id
   require_join_code         BOOLEAN      NOT NULL DEFAULT false, -- opt-in: newly opened table sessions get a 4-digit join code that api-key (guest-rail) callers must present
+  menu_category_order       TEXT[]       NOT NULL DEFAULT '{}', -- menu category names in display order; unlisted ones follow, by name
   created_at                TIMESTAMPTZ DEFAULT now(),
   CONSTRAINT restaurant_payment_protection_check CHECK (payment_protection IN ('none', 'hold', 'deposit'))
 );

@@ -739,9 +739,15 @@ function createTools(apiRequest) {
   },
   {
     name: 'reorder_restaurant_menu_items',
-    description: 'Set the display order of menu items. The menu lists by category, then this order, so to reorder one category pass just its item ids, first to last.',
+    description: 'Set the display order of menu items. The menu lists by category (see reorder_restaurant_menu_categories), then this order, so to reorder one category pass just its item ids, first to last.',
     inputSchema: { ids: z.array(z.string()).min(1) },
     run: (args) => apiRequest('PUT', '/api/restaurant-orders/menu/reorder', { body: args }),
+  },
+  {
+    name: 'reorder_restaurant_menu_categories',
+    description: "Set the order of a restaurant's menu categories: category names, first to last. Replaces the whole list; categories left out follow, by name.",
+    inputSchema: { restaurant_id: z.string(), categories: z.array(z.string()) },
+    run: (args) => apiRequest('PUT', '/api/restaurant-orders/menu/reorder-categories', { body: args }),
   },
   {
     name: 'rename_restaurant_menu_category',

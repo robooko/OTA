@@ -1,6 +1,9 @@
 // Menu item display order: new items go last, reorder sets positions, the list
 // follows category then position, and other properties' items are untouched.
-// Local DB only, with migrate-2026-11-03-menu-item-position.sql applied.
+// Category order: a restaurant's menu_category_order leads the list, and a
+// rename keeps the category's place.
+// Local DB only, with migrate-2026-11-03-menu-item-position.sql and
+// migrate-2026-11-03-restaurant-menu-category-order.sql applied.
 //   node -r dotenv/config scripts/check-menu-item-position.js
 const assert = require('node:assert/strict');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
@@ -55,8 +58,39 @@ const ctrl = require('../src/controllers/restaurantOrders');
       assert.equal((await call(ctrl.reorderMenuItems, { body: { ids: ['nope'] } })).status, 400);
       assert.equal((await call(ctrl.reorderMenuItems, { body: {} })).status, 400);
     });
+
+    // A restaurant's own menu, so its category order applies.
+    const R = (await one(`INSERT INTO restaurant (property_id, name, default_duration_minutes) VALUES ($1, 'Grill', 90) RETURNING id`, [P])).id;
+    for (const [name, category] of [['Fries', 'Sides'], ['Ribeye', 'Steaks'], ['Spritz', 'Cocktails'], ['Pie', null]]) {
+      await call(ctrl.createMenuItem, { body: { name, category, price: 5, restaurant_id: R } });
+    }
+    const menu = async () => (await call(ctrl.listMenuItems, { query: { restaurant_id: R } })).body.map((i) => i.name);
+
+    await check('no category order yet: categories by name, uncategorised last', async () => {
+      assert.deepEqual(await menu(), ['Spritz', 'Fries', 'Ribeye', 'Pie']);
+    });
+
+    await check('category order leads, unlisted categories follow by name', async () => {
+      const r = await call(ctrl.reorderMenuCategories, { body: { restaurant_id: R, categories: ['Steaks', 'Sides'] } });
+      assert.deepEqual(r.body.menu_category_order, ['Steaks', 'Sides']);
+      assert.deepEqual(await menu(), ['Ribeye', 'Fries', 'Spritz', 'Pie']);
+    });
+
+    await check('renaming a category keeps its place', async () => {
+      await call(ctrl.renameMenuCategory, { body: { restaurant_id: R, from: 'Steaks', to: 'Grill' } });
+      assert.deepEqual((await one('SELECT menu_category_order FROM restaurant WHERE id = $1', [R])).menu_category_order, ['Grill', 'Sides']);
+      assert.deepEqual(await menu(), ['Ribeye', 'Fries', 'Spritz', 'Pie']);
+    });
+
+    await check('bad category reorders are a 400/404', async () => {
+      assert.equal((await call(ctrl.reorderMenuCategories, { body: { categories: [] } })).status, 400);
+      assert.equal((await call(ctrl.reorderMenuCategories, { body: { restaurant_id: R, categories: [''] } })).status, 400);
+      assert.equal((await call(ctrl.reorderMenuCategories, { body: { restaurant_id: R } })).status, 400);
+      assert.equal((await call(ctrl.reorderMenuCategories, { property_id: Q, body: { restaurant_id: R, categories: [] } })).status, 404);
+    });
   } finally {
     await pool.query('DELETE FROM restaurant_menu_item WHERE property_id = ANY($1)', [[P, Q]]);
+    await pool.query('DELETE FROM restaurant WHERE property_id = ANY($1)', [[P, Q]]);
     await pool.query('DELETE FROM property WHERE id = ANY($1)', [[P, Q]]);
     await pool.end();
   }

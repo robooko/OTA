@@ -28,7 +28,10 @@ async function listMenuItems(req, res, next) {
     const params = [req.property_id];
     if (category) { params.push(category); query += ` AND category = $${params.length}`; }
     if (restaurant_id) { params.push(restaurant_id); query += ` AND restaurant_id = $${params.length}`; }
-    query += ' ORDER BY category, position, name';
+    // Categories in their restaurant's menu_category_order (unlisted ones after,
+    // by name), then position within each.
+    query += ` ORDER BY array_position((SELECT r.menu_category_order FROM restaurant r WHERE r.id = restaurant_menu_item.restaurant_id), category) NULLS LAST,
+      category, position, name`;
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) { next(err); }
@@ -137,6 +140,23 @@ async function reorderMenuItems(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// One restaurant's category names in display order; replaces the whole list.
+async function reorderMenuCategories(req, res, next) {
+  try {
+    const { restaurant_id, categories } = req.body;
+    if (!isValidUuid(restaurant_id)) return res.status(400).json({ error: 'restaurant_id is required' });
+    if (!Array.isArray(categories) || !categories.every((c) => typeof c === 'string' && c.trim())) {
+      return res.status(400).json({ error: 'categories must be an array of category names' });
+    }
+    const { rows } = await pool.query(
+      `UPDATE restaurant SET menu_category_order = $1 WHERE id = $2 AND property_id = $3 RETURNING menu_category_order`,
+      [categories, restaurant_id, req.property_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+}
+
 async function renameMenuCategory(req, res, next) {
   try {
     const { restaurant_id, from, to } = req.body;
@@ -148,6 +168,12 @@ async function renameMenuCategory(req, res, next) {
     query += ' RETURNING id';
 
     const { rows } = await pool.query(query, params);
+    // Keep the renamed category's place in the menu order.
+    await pool.query(
+      `UPDATE restaurant SET menu_category_order = array_replace(menu_category_order, $1, $2)
+       WHERE property_id = $3 AND ($4::uuid IS NULL OR id = $4)`,
+      [from, to, req.property_id, restaurant_id || null]
+    );
     res.json({ renamed: rows.length, ids: rows.map((r) => r.id) });
   } catch (err) { next(err); }
 }
@@ -802,4 +828,4 @@ async function getOrderAblyToken(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, reorderMenuItems, renameMenuCategory, listBoardItems, createBoardItem, updateBoardItem, getBoardAblyToken, listOrders, getOrder, createOrder, updateOrder, updateOrderStatus, createOrderPaymentIntent, confirmOrderPayment, getAblyToken, getOrderAblyToken };
+module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, reorderMenuItems, reorderMenuCategories, renameMenuCategory, listBoardItems, createBoardItem, updateBoardItem, getBoardAblyToken, listOrders, getOrder, createOrder, updateOrder, updateOrderStatus, createOrderPaymentIntent, confirmOrderPayment, getAblyToken, getOrderAblyToken };
