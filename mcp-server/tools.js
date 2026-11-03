@@ -688,8 +688,8 @@ function createTools(apiRequest) {
   },
   {
     name: 'list_restaurant_table_sessions',
-    description: 'List table sessions (tabs) for a restaurant -- which tables are seated now and whether each tab is paid. Defaults to open sessions.',
-    inputSchema: { restaurant_id: z.string(), status: z.enum(['open', 'closed']).optional() },
+    description: 'List table sessions (tabs) for a restaurant -- which tables are seated now, each tab total and whether it is paid. Defaults to open sessions; pass from+to (ISO timestamps) for every session overlapping that window instead.',
+    inputSchema: { restaurant_id: z.string(), status: z.enum(['open', 'closed']).optional(), from: z.string().optional(), to: z.string().optional() },
     run: (query) => apiRequest('GET', '/api/restaurant-table-sessions', { query }),
   },
   {

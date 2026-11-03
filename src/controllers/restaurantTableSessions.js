@@ -309,21 +309,37 @@ const SESSION_SELECT = `SELECT rts.*, t.table_number
 
 async function getOpenSession(req, res, next) {
   try {
-    const { table_id, restaurant_id, status } = req.query;
+    const { table_id, restaurant_id, status, from, to } = req.query;
     if (!table_id && !restaurant_id) return res.status(400).json({ error: 'table_id or restaurant_id is required' });
 
     // Bulk mode (restaurant_id, no table_id): the Tables grid needs to know
     // which tables are occupied, not the full "what's on this tab" detail
     // loadSessionDetails builds for a single table -- a lightweight row per
     // open session is enough and avoids an orders+reservation join per table.
+    // from/to (ISO timestamps) switch to history: every session overlapping
+    // that window, any status unless one is given -- the dashboard calendar.
     if (!table_id) {
+      const params = [restaurant_id, req.property_id];
+      let where = 'rts.restaurant_id = $1 AND rts.property_id = $2';
+      if (from && to) {
+        if (isNaN(Date.parse(from)) || isNaN(Date.parse(to))) return res.status(400).json({ error: 'from and to must be ISO timestamps' });
+        params.push(from, to);
+        where += ` AND rts.opened_at < $${params.length} AND (rts.closed_at IS NULL OR rts.closed_at >= $${params.length - 1})`;
+        if (status) { params.push(status); where += ` AND rts.status = $${params.length}`; }
+      } else {
+        params.push(status || 'open');
+        where += ` AND rts.status = $${params.length}`;
+      }
       const { rows } = await pool.query(
-        `SELECT rts.id, rts.table_id, rt.table_number, rts.status, rts.payment_status, rts.opened_at
+        `SELECT rts.id, rts.table_id, rt.table_number, rts.status, rts.payment_status, rts.payment_method,
+                rts.opened_at, rts.closed_at, rts.reservation_id,
+                (SELECT COALESCE(SUM(o.total_price), 0) FROM restaurant_order o
+                  WHERE o.table_session_id = rts.id AND o.status <> 'cancelled') AS total
          FROM restaurant_table_session rts
          JOIN restaurant_table rt ON rt.id = rts.table_id
-         WHERE rts.restaurant_id = $1 AND rts.property_id = $2 AND rts.status = $3
+         WHERE ${where}
          ORDER BY rts.opened_at`,
-        [restaurant_id, req.property_id, status || 'open']
+        params
       );
       return res.json(rows);
     }

@@ -48,6 +48,16 @@ const ctrl = require('../src/controllers/restaurantTableSessions');
       assert.deepEqual((await call({ query: { restaurant_id: R, status: 'closed' } })).body.map((s) => s.id), [s3]);
     });
 
+    await check('from/to lists every session overlapping the window, with total', async () => {
+      const r = await call({ query: { restaurant_id: R, from: '2026-11-03T19:30:00Z', to: '2026-11-04T00:00:00Z' } });
+      // s3 opened 18:00 and closed now() -- still overlaps; all three, oldest first.
+      assert.deepEqual(r.body.map((s) => s.id), [s3, s2, s1]);
+      assert.equal(Number(r.body[0].total), 0);
+      const early = await call({ query: { restaurant_id: R, from: '2026-11-03T00:00:00Z', to: '2026-11-03T18:30:00Z' } });
+      assert.deepEqual(early.body.map((s) => s.id), [s3]);
+      assert.equal((await call({ query: { restaurant_id: R, from: 'nope', to: 'nope' } })).status, 400);
+    });
+
     await check("another property sees none of them", async () => {
       assert.deepEqual((await call({ property_id: Q, query: { restaurant_id: R } })).body, []);
     });
