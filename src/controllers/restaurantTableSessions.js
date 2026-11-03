@@ -318,8 +318,11 @@ async function getOpenSession(req, res, next) {
     // open session is enough and avoids an orders+reservation join per table.
     if (!table_id) {
       const { rows } = await pool.query(
-        `SELECT id, table_id, status, opened_at FROM restaurant_table_session
-         WHERE restaurant_id = $1 AND property_id = $2 AND status = $3`,
+        `SELECT rts.id, rts.table_id, rt.table_number, rts.status, rts.payment_status, rts.opened_at
+         FROM restaurant_table_session rts
+         JOIN restaurant_table rt ON rt.id = rts.table_id
+         WHERE rts.restaurant_id = $1 AND rts.property_id = $2 AND rts.status = $3
+         ORDER BY rts.opened_at`,
         [restaurant_id, req.property_id, status || 'open']
       );
       return res.json(rows);

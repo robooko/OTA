@@ -687,6 +687,12 @@ function createTools(apiRequest) {
     run: ({ restaurant_id, id, ...body }) => apiRequest('PUT', `/api/restaurant/${restaurant_id}/tables/${id}`, { body }),
   },
   {
+    name: 'list_restaurant_table_sessions',
+    description: 'List table sessions (tabs) for a restaurant -- which tables are seated now and whether each tab is paid. Defaults to open sessions.',
+    inputSchema: { restaurant_id: z.string(), status: z.enum(['open', 'closed']).optional() },
+    run: (query) => apiRequest('GET', '/api/restaurant-table-sessions', { query }),
+  },
+  {
     name: 'list_restaurant_menu',
     description: 'List menu items for room/table service, optionally filtered by restaurant or category',
     inputSchema: {
