@@ -71,7 +71,7 @@ async function createMenuItem(req, res, next) {
 
 async function updateMenuItem(req, res, next) {
   try {
-    const { name, description, category, price, status, restaurant_id, allergens, variants, translations } = req.body;
+    const { name, description, category, price, status, restaurant_id, allergens, variants, translations, sold_out } = req.body;
     if (allergens !== undefined && !Array.isArray(allergens)) {
       return res.status(400).json({ error: 'allergens must be an array of strings' });
     }
@@ -81,6 +81,7 @@ async function updateMenuItem(req, res, next) {
     if (translations !== undefined && !isValidTranslations(translations)) {
       return res.status(400).json({ error: 'translations must be a JSON object keyed by language code' });
     }
+    if (sold_out !== undefined && typeof sold_out !== 'boolean') return res.status(400).json({ error: 'sold_out must be a boolean' });
 
     if (restaurant_id) {
       const restaurantRes = await pool.query('SELECT id FROM restaurant WHERE id = $1 AND property_id = $2', [
@@ -100,9 +101,10 @@ async function updateMenuItem(req, res, next) {
          restaurant_id = COALESCE($6, restaurant_id),
          allergens     = COALESCE($7, allergens),
          variants      = COALESCE($8, variants),
-         translations  = COALESCE($9::jsonb, translations)
+         translations  = COALESCE($9::jsonb, translations),
+         sold_out      = COALESCE($12, sold_out)
        WHERE id = $10 AND property_id = $11 RETURNING *`,
-      [name, description, category, price, status, restaurant_id, allergens ?? null, variants ?? null, translations ?? null, req.params.id, req.property_id]
+      [name, description, category, price, status, restaurant_id, allergens ?? null, variants ?? null, translations ?? null, req.params.id, req.property_id, sold_out ?? null]
     );
     if (!rows.length) return res.status(404).json({ error: 'Item not found' });
     res.json(rows[0]);
@@ -399,12 +401,16 @@ async function createOrder(req, res, next) {
       for (const item of items) {
         const { item_id, quantity = 1, variant } = item;
         const { rows: found } = await client.query(
-          `SELECT id, name, price FROM restaurant_menu_item WHERE id = $1 AND property_id = $2 AND status = 'active'`,
+          `SELECT id, name, price, sold_out FROM restaurant_menu_item WHERE id = $1 AND property_id = $2 AND status = 'active'`,
           [item_id, req.property_id]
         );
         if (!found.length) {
           await client.query('ROLLBACK');
           return res.status(404).json({ error: `Item ${item_id} not found` });
+        }
+        if (found[0].sold_out) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: `${found[0].name} is sold out` });
         }
         const unit_price = parseFloat(found[0].price);
         itemsSubtotal += unit_price * quantity;

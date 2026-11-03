@@ -1224,7 +1224,8 @@ CREATE TABLE IF NOT EXISTS restaurant_menu_item (
   variants      TEXT[]        NOT NULL DEFAULT '{}',
   status        VARCHAR(20)   DEFAULT 'active',
   translations  JSONB         NOT NULL DEFAULT '{}',
-  position      INTEGER       NOT NULL DEFAULT 0
+  position      INTEGER       NOT NULL DEFAULT 0,
+  sold_out      BOOLEAN       NOT NULL DEFAULT false
 );
 
 -- The in-shop board: what's on today / sold out. Unpriced, copy lives in

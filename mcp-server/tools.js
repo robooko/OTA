@@ -728,6 +728,7 @@ function createTools(apiRequest) {
         .optional()
         .describe('Keyed by language code -- replaces the whole object, not a per-language merge'),
       status: z.enum(['active', 'inactive']).optional(),
+      sold_out: z.boolean().optional().describe('Still listed, but orders for it are refused'),
     },
     run: ({ id, ...body }) => apiRequest('PUT', `/api/restaurant-orders/menu/${id}`, { body }),
   },

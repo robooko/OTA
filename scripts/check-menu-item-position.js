@@ -1,9 +1,10 @@
 // Menu item display order: new items go last, reorder sets positions, the list
 // follows category then position, and other properties' items are untouched.
 // Category order: a restaurant's menu_category_order leads the list, and a
-// rename keeps the category's place.
-// Local DB only, with migrate-2026-11-03-menu-item-position.sql and
-// migrate-2026-11-03-restaurant-menu-category-order.sql applied.
+// rename keeps the category's place. Sold out: listed, not orderable.
+// Local DB only, with migrate-2026-11-03-menu-item-position.sql,
+// migrate-2026-11-03-restaurant-menu-category-order.sql and
+// migrate-2026-11-03-menu-item-sold-out.sql applied.
 //   node -r dotenv/config scripts/check-menu-item-position.js
 const assert = require('node:assert/strict');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
@@ -87,6 +88,18 @@ const ctrl = require('../src/controllers/restaurantOrders');
       assert.equal((await call(ctrl.reorderMenuCategories, { body: { restaurant_id: R, categories: [''] } })).status, 400);
       assert.equal((await call(ctrl.reorderMenuCategories, { body: { restaurant_id: R } })).status, 400);
       assert.equal((await call(ctrl.reorderMenuCategories, { property_id: Q, body: { restaurant_id: R, categories: [] } })).status, 404);
+    });
+
+    await check('a sold-out item stays listed but cannot be ordered', async () => {
+      const soup = (await call(ctrl.createMenuItem, { body: { name: 'Soup', price: 5, restaurant_id: R } })).body;
+      assert.equal(soup.sold_out, false);
+      assert.equal((await call(ctrl.updateMenuItem, { params: { id: soup.id }, body: { sold_out: 'yes' } })).status, 400);
+      assert.equal((await call(ctrl.updateMenuItem, { params: { id: soup.id }, body: { sold_out: true } })).body.sold_out, true);
+      assert.equal((await call(ctrl.updateMenuItem, { params: { id: soup.id }, body: { price: 6 } })).body.sold_out, true);
+      assert.ok((await menu()).includes('Soup'));
+      const r = await call(ctrl.createOrder, { body: { restaurant_id: R, items: [{ item_id: soup.id }] } });
+      assert.equal(r.status, 409);
+      assert.equal(r.body.error, 'Soup is sold out');
     });
   } finally {
     await pool.query('DELETE FROM restaurant_menu_item WHERE property_id = ANY($1)', [[P, Q]]);
