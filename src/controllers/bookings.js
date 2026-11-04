@@ -8,6 +8,7 @@ const roomEmails = require('../lib/roomBookingEmails');
 const roomPayments = require('../lib/roomPayments');
 const housekeeping = require('../lib/housekeeping');
 const { fetchJoinedBooking } = roomPayments;
+const { stayNights, placeBooking } = require('../lib/roomPlacement');
 
 function isValidMetadata(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -135,14 +136,7 @@ async function createBooking(req, res, next) {
     return res.status(400).json({ error: 'pay_at_hotel needs a rate_plan_id' });
   }
 
-  // Build set of required dates (shared by every candidate room)
-  const required = new Set();
-  const d = new Date(check_in);
-  const end = new Date(check_out);
-  while (d < end) {
-    required.add(d.toISOString().slice(0, 10));
-    d.setDate(d.getDate() + 1);
-  }
+  const nights = stayNights(check_in, check_out);
 
   const client = await pool.connect();
   try {
@@ -242,56 +236,25 @@ async function createBooking(req, res, next) {
     const typeRates = {};
     for (const row of typeRateRows) typeRates[row.date] = parseFloat(row.rate);
 
-    let booked = null;
-    let lastUnavailableDate = null;
-
-    for (const candidate of candidates) {
-      await client.query('SAVEPOINT attempt');
-
-      const availRes = await client.query(
-        `SELECT date, is_available, override_rate
-         FROM room_availability
-         WHERE room_id = $1 AND date >= $2 AND date < $3
-         ORDER BY date`,
-        [candidate.id, check_in, check_out]
-      );
-      const availMap = {};
-      for (const row of availRes.rows) {
-        availMap[row.date] = row;
-      }
-
-      let allAvailable = true;
-      for (const date of required) {
-        const entry = availMap[date];
-        if (!entry || !entry.is_available) {
-          allAvailable = false;
-          lastUnavailableDate = date;
-          break;
+    const { booked, lastUnavailableDate } = await placeBooking(client, {
+      candidates,
+      nights,
+      insert: async (candidate, availMap) => {
+        let total = 0;
+        const baseRate = parseFloat(candidate.base_rate);
+        for (const date of nights) {
+          const entry = availMap[date];
+          let night;
+          if (entry && entry.override_rate != null) night = parseFloat(entry.override_rate);
+          else if (typeRates[date] != null) night = typeRates[date];
+          else night = baseRate;
+          total += plan ? applyAdjustment(night, plan.adjustment_pct) : night;
         }
-      }
-
-      if (!allAvailable) {
-        await client.query('ROLLBACK TO SAVEPOINT attempt');
-        continue;
-      }
-
-      let total = 0;
-      const baseRate = parseFloat(candidate.base_rate);
-      for (const date of required) {
-        const entry = availMap[date];
-        let night;
-        if (entry && entry.override_rate != null) night = parseFloat(entry.override_rate);
-        else if (typeRates[date] != null) night = typeRates[date];
-        else night = baseRate;
-        total += plan ? applyAdjustment(night, plan.adjustment_pct) : night;
-      }
-      // Stripe refuses a zero charge: a free stay on a plan needs no card.
-      const card = needsCard && toCents(total) > 0;
-      const status = card ? 'pending_payment' : 'confirmed';
-      const payWindow = card ? PAY_WINDOW_MINUTES[viaApiKey ? 'api_key' : 'staff'] : null;
-      const terms = plan ? termsSnapshot(plan, { pay_at_hotel: !card }) : null;
-
-      try {
+        // Stripe refuses a zero charge: a free stay on a plan needs no card.
+        const card = needsCard && toCents(total) > 0;
+        const status = card ? 'pending_payment' : 'confirmed';
+        const payWindow = card ? PAY_WINDOW_MINUTES[viaApiKey ? 'api_key' : 'staff'] : null;
+        const terms = plan ? termsSnapshot(plan, { pay_at_hotel: !card }) : null;
         const bookingRes = await client.query(
           `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata,
                                 status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout)
@@ -300,17 +263,9 @@ async function createBooking(req, res, next) {
           [req.property_id, guest_id, candidate.id, check_in, check_out, guests || 1, total.toFixed(2), metadata ?? {},
             status, plan?.id ?? null, terms, payWindow, card && viaApiKey]
         );
-        await client.query('RELEASE SAVEPOINT attempt');
-        booked = bookingRes.rows[0];
-        break;
-      } catch (err) {
-        if (err.code === '23P01') {
-          await client.query('ROLLBACK TO SAVEPOINT attempt');
-          continue;
-        }
-        throw err;
-      }
-    }
+        return bookingRes.rows[0];
+      },
+    });
 
     if (!booked) {
       await client.query('ROLLBACK');
@@ -319,14 +274,6 @@ async function createBooking(req, res, next) {
       }
       return res.status(409).json({ error: 'No rooms of this type available for the requested dates' });
     }
-
-    // Mark availability as unavailable
-    await client.query(
-      `UPDATE room_availability
-       SET is_available = false
-       WHERE room_id = $1 AND date >= $2 AND date < $3`,
-      [booked.room_id, check_in, check_out]
-    );
 
     await client.query('COMMIT');
 

@@ -250,6 +250,35 @@ const apiKeys = require('../src/lib/apiKeys');
         await pool.query('UPDATE room_availability SET is_available = true WHERE property_id = $1', [P]);
       }
     });
+
+    // ---- Task 4: shared room placement ----
+    const { placeBooking, stayNights } = require('../src/lib/roomPlacement');
+    await check('stayNights: [check_in, check_out)', async () => {
+      assert.deepEqual(stayNights('2030-12-30', '2031-01-02'), ['2030-12-30', '2030-12-31', '2031-01-01']);
+      assert.deepEqual(stayNights('2030-01-01', '2030-01-01'), []);
+    });
+    await check('placeBooking: skips a taken room, fails cleanly when none free', async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('UPDATE room_availability SET is_available = false WHERE room_id = $1 AND date = $2', [R101, d0]);
+        const candidates = [{ id: R101, base_rate: '100' }, { id: R102, base_rate: '100' }];
+        const insert = async (c, availMap) => {
+          assert.equal(availMap[d0].is_available, true);
+          return (await client.query(
+            `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price) VALUES ($1, $2, $3, $4, $5, 100) RETURNING *`,
+            [P, G, c.id, d0, d1])).rows[0];
+        };
+        let r = await placeBooking(client, { candidates, nights: [d0], insert });
+        assert.equal(r.booked.room_id, R102);
+        assert.equal((await client.query('SELECT is_available FROM room_availability WHERE room_id = $1 AND date = $2', [R102, d0])).rows[0].is_available, false);
+        r = await placeBooking(client, { candidates, nights: [d0], insert });
+        assert.deepEqual([r.booked, r.lastUnavailableDate], [null, d0]);
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
+    });
   } finally {
     const props = [P, Q];
     const has = async (t) => (await one('SELECT to_regclass($1) AS r', [t])).r;
