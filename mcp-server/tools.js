@@ -123,6 +123,18 @@ function createTools(apiRequest) {
     run: ({ id }) => apiRequest('GET', `/api/bookings/${id}`),
   },
   {
+    name: 'add_booking_cancel_scores',
+    description: 'Record ML cancellation-risk scores (0-1) for bookings, up to 500. Bookings then show the latest as cancel_score. Ids outside this property come back in unknown.',
+    inputSchema: {
+      scores: z.array(z.object({
+        booking_id: z.string(),
+        score: z.number().min(0).max(1),
+        model: z.string().describe("Model version, e.g. 'xgb-2026-11-04'"),
+      })).min(1).max(500),
+    },
+    run: ({ scores }) => apiRequest('POST', '/api/bookings/cancel-scores', { body: { scores } }),
+  },
+  {
     name: 'cancel_booking',
     description: 'Cancel a booking and restore its room availability. A booking from a sales channel must be cancelled on the channel; force: true cancels it in OTA only.',
     inputSchema: { id: z.string(), force: z.boolean().optional() },

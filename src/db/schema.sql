@@ -334,6 +334,18 @@ CREATE TABLE IF NOT EXISTS booking (
   CONSTRAINT booking_no_overlap EXCLUDE USING gist (room_id WITH =, daterange(check_in, check_out) WITH &&) WHERE (status NOT IN ('cancelled', 'expired'))
 );
 
+-- Cancellation-risk scores from an external ML job. Append-only (keeps the
+-- pre-cancel score for evaluation); booking payloads show the latest.
+CREATE TABLE IF NOT EXISTS booking_cancel_score (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  property_id UUID         NOT NULL REFERENCES property(id),
+  booking_id  UUID         NOT NULL REFERENCES booking(id) ON DELETE CASCADE,
+  score       NUMERIC(4,3) NOT NULL CHECK (score BETWEEN 0 AND 1),
+  model       VARCHAR(100) NOT NULL,
+  scored_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_booking_cancel_score_latest ON booking_cancel_score(booking_id, scored_at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_booking_pending_due ON booking(payment_due_at) WHERE status = 'pending_payment';
 CREATE INDEX IF NOT EXISTS idx_booking_website_checkout ON booking (property_id, created_at) WHERE website_checkout;
 

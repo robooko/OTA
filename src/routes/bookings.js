@@ -9,6 +9,8 @@ const staffOrFullKey = [authenticateOrApiKey, requireRoleOrApiKey('admin', 'staf
 
 router.get('/', authenticateOrApiKey, ctrl.listBookings);
 router.get('/baskets', authenticateOrApiKey, ctrl.listRoomBaskets);
+// ML cancellation-risk scores from an external job.
+router.post('/cancel-scores', staffOrFullKey, ctrl.addCancelScores);
 router.get('/:id', authenticateOrApiKey, ctrl.getBooking);
 router.post('/', authenticateOrApiKey, ctrl.createBooking);
 router.put('/:id', staffOrFullKey, ctrl.updateBooking);

@@ -19,6 +19,12 @@ const stripeOf = (secretKey) => marinaStripe.stripeFor(secretKey);
 const PAID = ['succeeded', 'requires_capture'];
 const OPEN = ['requires_payment_method', 'requires_confirmation', 'requires_action'];
 
+// Latest ML cancellation-risk score for booking b, or null. Shared by every
+// booking payload (list, detail, live feed).
+const CANCEL_SCORE_SQL = `(SELECT json_build_object('score', s.score, 'model', s.model, 'scored_at', s.scored_at)
+     FROM booking_cancel_score s WHERE s.booking_id = b.id
+     ORDER BY s.scored_at DESC LIMIT 1) AS cancel_score`;
+
 // Same JOINs as getBooking, minus the extras query -- used everywhere a
 // booking gets published to a live feed. Consumers (hotal-ui's
 // <live-room-bookings-feed>) upsert-by-replace on every event, so a payload
@@ -29,7 +35,8 @@ async function fetchJoinedBooking(id) {
     `SELECT b.*,
             g.first_name, g.last_name, g.email, g.phone,
             r.room_number, r.floor, r.status AS room_status,
-            rt.id AS room_type_id, rt.name AS room_type_name, rt.code AS room_type_code, rt.base_rate
+            rt.id AS room_type_id, rt.name AS room_type_name, rt.code AS room_type_code, rt.base_rate,
+            ${CANCEL_SCORE_SQL}
      FROM booking b
      JOIN guest     g  ON g.id  = b.guest_id
      JOIN room      r  ON r.id  = b.room_id
@@ -420,7 +427,7 @@ function startRoomPaymentJobs() {
 }
 
 module.exports = {
-  fetchJoinedBooking, releaseAvailability, refreshAvailabilityView, lockBooking, deadlineOf,
+  CANCEL_SCORE_SQL, fetchJoinedBooking, releaseAvailability, refreshAvailabilityView, lockBooking, deadlineOf,
   confirmPaidLocked, afterConfirmed, paymentIntentFor, confirmPaid, settleByHand, stripeForCancel,
   expireOnce, captureHoldsOnce, startRoomPaymentJobs,
 };

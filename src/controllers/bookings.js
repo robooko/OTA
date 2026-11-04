@@ -7,7 +7,7 @@ const { applyAdjustment, termsSnapshot, guestCancelDecision, PAY_WINDOW_MINUTES 
 const roomEmails = require('../lib/roomBookingEmails');
 const roomPayments = require('../lib/roomPayments');
 const housekeeping = require('../lib/housekeeping');
-const { fetchJoinedBooking } = roomPayments;
+const { fetchJoinedBooking, CANCEL_SCORE_SQL } = roomPayments;
 const { stayNights, placeBooking } = require('../lib/roomPlacement');
 
 function isValidMetadata(v) {
@@ -25,6 +25,7 @@ async function listBookings(req, res, next) {
              r.room_number, r.floor,
              rt.id AS room_type_id, rt.name AS room_type_name, rt.code AS room_type_code,
              rt.description AS room_type_description, rt.max_occupancy, rt.base_rate,
+             ${CANCEL_SCORE_SQL},
              COALESCE(
                json_agg(
                  json_build_object(
@@ -99,7 +100,8 @@ async function getBooking(req, res, next) {
       `SELECT b.*,
               g.first_name, g.last_name, g.email, g.phone,
               r.room_number, r.floor, r.status AS room_status,
-              rt.id AS room_type_id, rt.name AS room_type_name, rt.code AS room_type_code, rt.base_rate
+              rt.id AS room_type_id, rt.name AS room_type_name, rt.code AS room_type_code, rt.base_rate,
+              ${CANCEL_SCORE_SQL}
        FROM booking b
        JOIN guest     g  ON g.id  = b.guest_id
        JOIN room      r  ON r.id  = b.room_id
@@ -496,4 +498,32 @@ async function listRoomBaskets(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listRoomBaskets, listBookings, getBooking, createBooking, updateBooking, cancelBooking, createPaymentIntent, confirmPayment };
+// Bulk-record ML cancellation-risk scores (append-only; payloads show the
+// latest). Booking ids not in this property come back in unknown.
+async function addCancelScores(req, res, next) {
+  try {
+    const list = req.body?.scores;
+    if (!Array.isArray(list) || !list.length || list.length > 500) {
+      return res.status(400).json({ error: 'scores must be an array of 1-500 scores' });
+    }
+    for (const [i, x] of list.entries()) {
+      if (!x || !isValidUuid(x.booking_id)) return res.status(400).json({ error: `scores[${i}].booking_id must be a uuid` });
+      if (typeof x.score !== 'number' || !(x.score >= 0 && x.score <= 1)) return res.status(400).json({ error: `scores[${i}].score must be a number from 0 to 1` });
+      if (typeof x.model !== 'string' || !x.model.trim() || x.model.length > 100) return res.status(400).json({ error: `scores[${i}].model must be a string of 1-100 characters` });
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO booking_cancel_score (property_id, booking_id, score, model)
+       SELECT $1, b.id, x.score, x.model
+       FROM unnest($2::uuid[], $3::numeric[], $4::text[]) AS x(booking_id, score, model)
+       JOIN booking b ON b.id = x.booking_id AND b.property_id = $1
+       RETURNING booking_id`,
+      [req.property_id, list.map((x) => x.booking_id), list.map((x) => x.score), list.map((x) => x.model.trim())]
+    );
+    const saved = new Set(rows.map((r) => r.booking_id));
+    res.json({ saved: rows.length, unknown: [...new Set(list.map((x) => x.booking_id).filter((id) => !saved.has(id)))] });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { addCancelScores, listRoomBaskets, listBookings, getBooking, createBooking, updateBooking, cancelBooking, createPaymentIntent, confirmPayment };
