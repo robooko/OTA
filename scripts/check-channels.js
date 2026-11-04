@@ -279,6 +279,139 @@ const apiKeys = require('../src/lib/apiKeys');
         client.release();
       }
     });
+
+    // ---- Task 5: inbound reservations ----
+    const { receiveReservation } = require('../src/lib/channels/reservations');
+    const { computeFolio } = require('../src/lib/folio');
+    const day = async (n) => (await one(`SELECT (CURRENT_DATE + $1::int)::text AS d`, [n])).d;
+    const [d3, d5, d6, d8] = [await day(3), await day(5), await day(6), await day(8)];
+    await fresh();
+    const res = (o) => ({
+      channel_ref: 'R1', action: 'new', room_code: 'DBL', rate_code: 'BAR', check_in: d3, check_out: d5, guests: 2,
+      total_price: 180, currency: 'EUR', guest: { first_name: 'Ana', last_name: 'Silva', email: 'ana@example.com' }, ...o,
+    });
+    const byRef = (ref) => one('SELECT * FROM booking WHERE channel_id = $1 AND channel_ref = $2', [ch.id, ref]);
+    const nightOpen = async (bookingRoom, date) => (await one(
+      'SELECT is_available FROM room_availability WHERE room_id = $1 AND date = $2', [bookingRoom, date])).is_available;
+    const logOf = async (ref) => (await pool.query(
+      'SELECT outcome, reason FROM channel_reservation_log WHERE channel_id = $1 AND channel_ref = $2 ORDER BY received_at, id', [ch.id, ref])).rows;
+
+    await check('inbound: new → confirmed booking with source, hotel collect owes full stay', async () => {
+      const r = await receiveReservation(ch, res());
+      assert.equal(r.outcome, 'created');
+      const b = await one('SELECT * FROM booking WHERE id = $1', [r.booking_id]);
+      assert.deepEqual([b.status, b.channel_id, b.channel_ref, Number(b.total_price), b.guests], ['confirmed', ch.id, 'R1', 180, 2]);
+      assert.equal(b.rate_plan_id, null);
+      assert.equal(await nightOpen(b.room_id, d3), false);
+      assert.equal(Number((await computeFolio(b.id, P)).balance), 180);
+      assert.deepEqual(await logOf('R1'), [{ outcome: 'created', reason: null }]);
+    });
+    await check('inbound: resend is duplicate, same booking', async () => {
+      const first = await byRef('R1');
+      const r = await receiveReservation(ch, res());
+      assert.deepEqual([r.outcome, r.booking_id], ['duplicate', first.id]);
+      assert.equal((await pool.query('SELECT 1 FROM booking WHERE channel_ref = $1', ['R1'])).rows.length, 1);
+    });
+    await check('inbound: rate plan mapping sets rate_plan_id', async () => {
+      const r = await receiveReservation(ch, res({ channel_ref: 'RP', rate_code: 'SAVER', check_in: d8, check_out: await day(9) }));
+      assert.equal(r.outcome, 'created');
+      assert.equal((await byRef('RP')).rate_plan_id, SAVER);
+    });
+    await check('inbound: channel collect → folio balance 0', async () => {
+      const r = await receiveReservation(ch, res({ channel_ref: 'R2', collect: 'channel', total_price: 190 }));
+      assert.equal(r.outcome, 'created');
+      assert.equal(Number((await computeFolio(r.booking_id, P)).balance), 0);
+      const pay = await one('SELECT * FROM payment WHERE booking_id = $1', [r.booking_id]);
+      assert.deepEqual([pay.method, pay.status, Number(pay.amount)], ['channel', 'completed', 190]);
+    });
+    await check('inbound: last room twice → one booking, one rejected + log', async () => {
+      const a = await receiveReservation(ch, res({ channel_ref: 'R3', room_code: 'STE' }));
+      const b = await receiveReservation(ch, res({ channel_ref: 'R4', room_code: 'STE' }));
+      assert.equal(a.outcome, 'created');
+      assert.deepEqual([b.outcome, b.reason], ['rejected', 'no room available']);
+      assert.equal(await byRef('R4'), undefined);
+      assert.deepEqual(await logOf('R4'), [{ outcome: 'rejected', reason: 'no room available' }]);
+    });
+    await check('inbound: unknown code / currency mismatch / missing fields rejected', async () => {
+      assert.equal((await receiveReservation(ch, res({ channel_ref: 'X1', room_code: 'NOPE' }))).reason, 'unknown room/rate code');
+      assert.equal((await receiveReservation(ch, res({ channel_ref: 'X2', currency: 'USD' }))).reason, 'currency mismatch');
+      assert.match((await receiveReservation(ch, res({ channel_ref: 'X3', check_in: 'bad' }))).reason, /^invalid reservation: check_in/);
+      assert.match((await receiveReservation(ch, res({ channel_ref: 'X4', total_price: -1 }))).reason, /^invalid reservation: total_price/);
+      assert.match((await receiveReservation(ch, res({ channel_ref: '', }))).reason, /^invalid reservation: channel_ref/);
+      assert.match((await receiveReservation(ch, res({ channel_ref: 'X5', action: 'upsert' }))).reason, /^invalid reservation: action/);
+      assert.match((await receiveReservation(ch, res({ channel_ref: 'X6', guest: { first_name: 'A' } }))).reason, /^invalid reservation: guest/);
+      assert.equal((await pool.query(`SELECT 1 FROM booking WHERE channel_ref LIKE 'X%'`)).rows.length, 0);
+    });
+    await check('inbound: closing mapping code rejected', async () => {
+      await pool.query(`UPDATE channel_mapping SET status = 'closing' WHERE channel_id = $1 AND rate_code = 'SAVER'`, [ch.id]);
+      try {
+        assert.equal((await receiveReservation(ch, res({ channel_ref: 'X7', rate_code: 'SAVER' }))).reason, 'unknown room/rate code');
+      } finally {
+        await pool.query(`UPDATE channel_mapping SET status = 'active' WHERE channel_id = $1`, [ch.id]);
+      }
+    });
+    await check('inbound: missing email gets a stable placeholder', async () => {
+      const r = await receiveReservation(ch, res({ channel_ref: 'R5', check_in: d6, check_out: d8, guest: { first_name: 'No', last_name: 'Mail' } }));
+      assert.equal(r.outcome, 'created');
+      const g = await one('SELECT g.email FROM guest g JOIN booking b ON b.guest_id = g.id WHERE b.id = $1', [r.booking_id]);
+      assert.equal(g.email, `r5@channel-${ch.id}.invalid`);
+    });
+    await check('inbound: modify moves dates; impossible modify keeps original', async () => {
+      const before = await byRef('R1');
+      const r = await receiveReservation(ch, res({ action: 'modify', check_in: d5, check_out: d6, total_price: 95 }));
+      assert.equal(r.outcome, 'modified');
+      const after = await byRef('R1');
+      assert.deepEqual([after.id, after.check_in, after.check_out, Number(after.total_price)], [before.id, d5, d6, 95]);
+      assert.equal(await nightOpen(before.room_id, d3), true);
+      assert.equal(await nightOpen(after.room_id, d5), false);
+      const bad = await receiveReservation(ch, res({ action: 'modify', room_code: 'STE' })); // STE d3..d5 held by R3
+      assert.deepEqual([bad.outcome, bad.reason], ['rejected', 'no room available']);
+      const still = await byRef('R1');
+      assert.deepEqual([still.room_id, still.check_in, still.check_out], [after.room_id, d5, d6]);
+      assert.equal(await nightOpen(after.room_id, d5), false);
+    });
+    await check('inbound: modify updates the channel payment amount', async () => {
+      await receiveReservation(ch, res({ channel_ref: 'R2', action: 'modify', collect: 'channel', total_price: 210 }));
+      const b = await byRef('R2');
+      assert.equal(Number((await one('SELECT amount FROM payment WHERE booking_id = $1', [b.id])).amount), 210);
+      assert.equal(Number((await computeFolio(b.id, P)).balance), 0);
+    });
+    await check('inbound: cancel frees nights, refunds channel payment; repeat is duplicate', async () => {
+      const b = await byRef('R2');
+      const r = await receiveReservation(ch, { channel_ref: 'R2', action: 'cancel' });
+      assert.equal(r.outcome, 'cancelled');
+      assert.equal((await byRef('R2')).status, 'cancelled');
+      assert.equal((await one('SELECT status FROM payment WHERE booking_id = $1', [b.id])).status, 'refunded');
+      assert.equal(await nightOpen(b.room_id, d3), true);
+      assert.equal((await receiveReservation(ch, { channel_ref: 'R2', action: 'cancel' })).outcome, 'duplicate');
+    });
+    await check('inbound: modify/cancel unknown ref or in-house booking rejected', async () => {
+      assert.equal((await receiveReservation(ch, { channel_ref: 'ZZ', action: 'cancel' })).reason, 'unknown reservation');
+      assert.equal((await receiveReservation(ch, res({ channel_ref: 'ZZ', action: 'modify' }))).reason, 'unknown reservation');
+      await pool.query(`UPDATE booking SET status = 'checked_in' WHERE channel_id = $1 AND channel_ref = 'R1'`, [ch.id]);
+      try {
+        assert.equal((await receiveReservation(ch, { channel_ref: 'R1', action: 'cancel' })).reason, 'booking already in house');
+        assert.equal((await byRef('R1')).status, 'checked_in');
+      } finally {
+        await pool.query(`UPDATE booking SET status = 'confirmed' WHERE channel_id = $1 AND channel_ref = 'R1'`, [ch.id]);
+      }
+    });
+    await check('inbound: paused channel still accepts', async () => {
+      await pool.query(`UPDATE channel SET status = 'paused' WHERE id = $1`, [ch.id]);
+      try {
+        const r = await receiveReservation(await chRow(ch.id), res({ channel_ref: 'R6', check_in: await day(10), check_out: await day(11) }));
+        assert.equal(r.outcome, 'created');
+      } finally {
+        await pool.query(`UPDATE channel SET status = 'active' WHERE id = $1`, [ch.id]);
+      }
+    });
+    await check('staff DELETE of a channel booking needs force', async () => {
+      const id = (await byRef('R6')).id;
+      const r = await api('DELETE', `/api/bookings/${id}`);
+      assert.equal(r.status, 409);
+      assert.equal(r.body.error, 'This booking came from a channel; cancel it on the channel');
+      assert.equal((await api('DELETE', `/api/bookings/${id}?force=true`)).status, 200);
+    });
   } finally {
     const props = [P, Q];
     const has = async (t) => (await one('SELECT to_regclass($1) AS r', [t])).r;

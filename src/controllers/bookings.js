@@ -395,6 +395,13 @@ async function cancelBooking(req, res, next) {
       return res.status(404).json({ error: 'Booking not found or already cancelled' });
     }
 
+    // A channel booking is cancelled on the channel (which then tells us);
+    // cancelling only here would leave the guest holding it there.
+    if (booking.channel_id && !(req.body?.force === true || req.query.force === 'true')) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'This booking came from a channel; cancel it on the channel', details: 'Pass force: true to cancel it in OTA only' });
+    }
+
     // Rate plan bookings (rate plans spec §9): a website cancelling for a
     // guest gets the plan's terms; staff can always cancel, with no
     // automatic refund. Stripe goes first, so a failure changes nothing.

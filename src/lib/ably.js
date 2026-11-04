@@ -213,6 +213,12 @@ async function publishBookingStatusChanged(propertyId, payload) {
   await channel.publish('booking-status-changed', payload);
 }
 
+// A channel reservation OTA couldn't place (overbooking): staff need to act.
+async function publishChannelReservationRejected(propertyId, payload) {
+  if (!client) return;
+  await client.channels.get(`property:${propertyId}:bookings`).publish('channel-reservation-rejected', payload);
+}
+
 async function publishRoomBasketUpdated(propertyId, basket) {
   if (!client) return;
   await client.channels.get(`property:${propertyId}:room-baskets`).publish('basket-updated', basket);
@@ -361,6 +367,7 @@ async function createSubscribeTokenRequest(channels) {
 }
 
 module.exports = {
+  publishChannelReservationRejected,
   publishHousekeeping,
   publishMarinaBooking,
   publishMarinaGuestUpdate,
