@@ -2,6 +2,8 @@ const pool = require('../db');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { resolveSiteProperty, siteSelectors } = require('../lib/propertyResolver');
 const { applyAdjustment, cancelDeadline, effectiveMode } = require('../lib/ratePlans');
+const { refreshAvailabilityView } = require('../lib/roomPayments');
+const { requestSync } = require('../lib/channels/sync');
 
 async function getRoomAvailability(req, res, next) {
   try {
@@ -189,14 +191,8 @@ async function upsertRoomAvailability(req, res, next) {
         results.push(rows[0]);
       }
       await client.query('COMMIT');
-      // After COMMIT: older Postgres rejects CONCURRENTLY inside a
-      // transaction block, and the committed write must not 500 on a
-      // failed refresh -- the view self-heals on the next refresh.
-      try {
-        await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
-      } catch (e) {
-        console.error('MV refresh failed after commit:', e.message);
-      }
+      // After COMMIT (see refreshAvailabilityView); also nudges channel sync.
+      await refreshAvailabilityView();
       res.json(results);
     } catch (err) {
       await client.query('ROLLBACK');
@@ -239,7 +235,7 @@ async function deleteOverride(req, res, next) {
       [id, req.property_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Availability record not found' });
-    await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
+    await refreshAvailabilityView();
     res.json(rows[0]);
   } catch (err) { next(err); }
 }
@@ -247,6 +243,7 @@ async function deleteOverride(req, res, next) {
 async function refreshView(req, res, next) {
   try {
     await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
+    requestSync();
     res.json({ message: 'Materialized view refreshed' });
   } catch (err) {
     next(err);

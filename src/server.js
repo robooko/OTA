@@ -12,6 +12,7 @@ const { startHoldExpiryJob } = require('./lib/spaBookingGuard');
 const { startMarinaHoldExpiryJob } = require('./lib/marinaLifecycle');
 const { startRoomPaymentJobs } = require('./lib/roomPayments');
 const { startCleanlinessRatingJob } = require('./lib/cleanlinessRatings');
+const { startChannelSyncJob } = require('./lib/channels/sync');
 
 const PORT = process.env.PORT || 3000;
 
@@ -29,4 +30,5 @@ app.listen(PORT, '0.0.0.0', () => {
   startMarinaHoldExpiryJob();
   startRoomPaymentJobs();
   startCleanlinessRatingJob();
+  startChannelSyncJob();
 });

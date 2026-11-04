@@ -330,15 +330,8 @@ async function createBooking(req, res, next) {
 
     await client.query('COMMIT');
 
-    // After COMMIT: older Postgres rejects CONCURRENTLY inside a transaction
-    // block, and a failed refresh must not turn a committed booking into a
-    // 500 -- the exclusion constraint guards double-booking, not the view,
-    // and the view self-heals on the next refresh from any call site.
-    try {
-      await client.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
-    } catch (e) {
-      console.error('MV refresh failed after commit:', e.message);
-    }
+    // After COMMIT (see refreshAvailabilityView); also nudges channel sync.
+    await roomPayments.refreshAvailabilityView();
 
     // `booked` is only the raw `booking` row (INSERT ... RETURNING *) -- no
     // guest/room/room_type fields. Re-fetch the joined shape so both the Ably

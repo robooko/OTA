@@ -1,18 +1,12 @@
 const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
 const { HORIZON_DAYS } = require('../lib/availabilitySeeder');
+const { refreshAvailabilityView } = require('../lib/roomPayments');
 
 function isValidFloorPlan(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-async function refreshAvailabilityView() {
-  try {
-    await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
-  } catch (e) {
-    console.error('MV refresh failed:', e.message);
-  }
-}
 
 async function listRoomTypes(req, res, next) {
   try {

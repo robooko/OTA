@@ -146,6 +146,110 @@ const apiKeys = require('../src/lib/apiKeys');
       assert.equal(ADAPTERS.test.validateConfig({ fail_pushes: 'yes' }).length, 1);
       assert.equal(ADAPTERS.test.validateConfig({ other: 1 }).length, 1);
     });
+
+    // ---- Task 3: sync engine ----
+    const sync = require('../src/lib/channels/sync');
+    const { drift, syncChannel } = sync;
+    const api = async (method, path, body, key = KEY) => {
+      const r = await fetch(base + path, {
+        method, headers: { 'Content-Type': 'application/json', 'X-Api-Key': key }, body: body ? JSON.stringify(body) : undefined,
+      });
+      const text = await r.text();
+      return { status: r.status, body: text ? JSON.parse(text) : null };
+    };
+    const G = (await one(
+      `INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'Dee', 'Rect', 'direct@example.com') RETURNING id`, [P])).id;
+    const fresh = async () => {
+      await pool.query('DELETE FROM booking WHERE property_id = $1 AND channel_id IS NOT NULL', [P]);
+      await pool.query('DELETE FROM channel WHERE property_id = $1', [P]);
+      ch = await newChannel();
+      return ch;
+    };
+    const snapshot = async (id) => (await pool.query(
+      `SELECT a.* FROM channel_ari a JOIN channel_mapping m ON m.id = a.mapping_id WHERE m.channel_id = $1`, [id])).rows;
+
+    await check('sync: first sync sends the whole grid, drift then empty', async () => {
+      await fresh();
+      const r = await syncChannel(ch.id);
+      assert.deepEqual(r, { pushed: 90, ok: 90, failed: 0 });
+      assert.equal((await snapshot(ch.id)).length, 90);
+      const d = await drift(pool, await chRow(ch.id));
+      assert.deepEqual([d.changes.length, d.failed, d.oldest_failing_date], [0, 0, null]);
+    });
+    await check('sync: direct booking shows as drift for exactly its nights', async () => {
+      const b = await api('POST', '/api/bookings', { guest_id: G, room_type_id: RT2, check_in: d0, check_out: d2 });
+      assert.equal(b.status, 201);
+      try {
+        const d = await drift(pool, await chRow(ch.id));
+        assert.deepEqual(d.changes.map((c) => `${c.room_code}/${c.date}`).sort(), [`STE/${d0}`, `STE/${d1}`]);
+        assert.equal(d.changes[0].available, 0);
+        assert.equal(d.changes[0].previous.available, 1);
+        assert.equal((await syncChannel(ch.id)).pushed, 2);
+      } finally {
+        await api('DELETE', `/api/bookings/${b.body.id}`);
+        await pool.query('DELETE FROM booking WHERE id = $1', [b.body.id]);
+      }
+      assert.equal((await syncChannel(ch.id)).pushed, 2);
+    });
+    await check('sync: rate edit shows as drift', async () => {
+      const d5 = (await one(`SELECT (CURRENT_DATE + 5)::text AS d`)).d;
+      const d6 = (await one(`SELECT (CURRENT_DATE + 6)::text AS d`)).d;
+      assert.equal((await api('PUT', `/api/room-types/${RT}/rates`, { rates: [{ from: d5, to: d6, rate: 130 }] })).status, 200);
+      const d = await drift(pool, await chRow(ch.id));
+      assert.deepEqual(d.changes.map((c) => `${c.rate_code}/${c.date}/${c.rate}`).sort(), [`BAR/${d5}/130`, `SAVER/${d5}/117`]);
+      await syncChannel(ch.id);
+    });
+    await check('sync: fail_pushes → failed counted, keeps old values; clearing it heals', async () => {
+      const d5 = (await one(`SELECT (CURRENT_DATE + 5)::text AS d`)).d;
+      await pool.query(`UPDATE channel SET config = '{"fail_pushes": true}' WHERE id = $1`, [ch.id]);
+      await pool.query('UPDATE room_type_rate SET rate = 140 WHERE room_type_id = $1 AND date = $2', [RT, d5]);
+      const r = await syncChannel(ch.id);
+      assert.deepEqual(r, { pushed: 2, ok: 0, failed: 2 });
+      let d = await drift(pool, await chRow(ch.id));
+      assert.deepEqual([d.failed, d.oldest_failing_date, d.changes.length], [2, d5, 2]);
+      assert.equal(d.changes.find((c) => c.rate_code === 'BAR').previous.rate, 130);
+      assert.equal(d.changes[0].previous.error, 'test adapter: fail_pushes');
+      await pool.query(`UPDATE channel SET config = '{}' WHERE id = $1`, [ch.id]);
+      assert.deepEqual(await syncChannel(ch.id), { pushed: 2, ok: 2, failed: 0 });
+      d = await drift(pool, await chRow(ch.id));
+      assert.deepEqual([d.failed, d.changes.length], [0, 0]);
+    });
+    await check('sync: concurrent syncs push once', async () => {
+      const d5 = (await one(`SELECT (CURRENT_DATE + 5)::text AS d`)).d;
+      await pool.query('UPDATE room_type_rate SET rate = 150 WHERE room_type_id = $1 AND date = $2', [RT, d5]);
+      const [a, b] = await Promise.all([syncChannel(ch.id), syncChannel(ch.id)]);
+      assert.equal((a.pushed || 0) + (b.pushed || 0), 2); // the other run was skipped ('locked') or found nothing
+    });
+    await check('sync: pausing pushes close-out then becomes paused', async () => {
+      await pool.query(`UPDATE channel SET status = 'pausing' WHERE id = $1`, [ch.id]);
+      const r = await syncChannel(ch.id);
+      assert.equal(r.failed, 0);
+      assert.ok((await snapshot(ch.id)).every((a) => a.available === 0 && a.stop_sell));
+      assert.equal((await chRow(ch.id)).status, 'paused');
+      assert.deepEqual(await syncChannel(ch.id), { skipped: 'paused' });
+      assert.equal((await drift(pool, await chRow(ch.id))).changes.length, 0);
+    });
+    await check('sync: closing mapping is closed out then removed', async () => {
+      await fresh();
+      await syncChannel(ch.id);
+      const saver = (await one(`SELECT id FROM channel_mapping WHERE channel_id = $1 AND rate_code = 'SAVER'`, [ch.id])).id;
+      await pool.query(`UPDATE channel_mapping SET status = 'closing' WHERE id = $1`, [saver]);
+      assert.equal((await syncChannel(ch.id)).pushed, 30);
+      assert.equal(await one('SELECT id FROM channel_mapping WHERE id = $1', [saver]), undefined);
+      assert.equal((await snapshot(ch.id)).length, 60);
+    });
+    await check('sync: nudge after a booking', async () => {
+      const b = await api('POST', '/api/bookings', { guest_id: G, room_type_id: RT2, check_in: d1, check_out: d2 });
+      assert.equal(b.status, 201);
+      try {
+        await sync._flush();
+        assert.equal((await drift(pool, await chRow(ch.id))).changes.length, 0);
+        assert.equal((await snapshot(ch.id)).find((a) => a.date === d1 && a.available === 0) !== undefined, true);
+      } finally {
+        await pool.query('DELETE FROM booking WHERE id = $1', [b.body.id]);
+        await pool.query('UPDATE room_availability SET is_available = true WHERE property_id = $1', [P]);
+      }
+    });
   } finally {
     const props = [P, Q];
     const has = async (t) => (await one('SELECT to_regclass($1) AS r', [t])).r;

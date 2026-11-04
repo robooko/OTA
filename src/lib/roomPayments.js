@@ -50,13 +50,16 @@ async function releaseAvailability(client, booking) {
 
 // After COMMIT: older Postgres rejects CONCURRENTLY inside a transaction
 // block, and a failed refresh must not fail a committed change -- the
-// exclusion constraint guards double-booking, not the view.
+// exclusion constraint guards double-booking, not the view. Every
+// availability change comes through here, so it also nudges channel sync
+// (lazy require: channels/sync -> ... -> roomPayments).
 async function refreshAvailabilityView() {
   try {
     await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY room_type_availability');
   } catch (e) {
     console.error('MV refresh failed after commit:', e.message);
   }
+  require('./channels/sync').requestSync();
 }
 
 // The booking row (locked) with its property's payment settings. propertyId
