@@ -23,7 +23,7 @@ async function listBookings(req, res, next) {
     let query = `
       SELECT b.*, g.first_name, g.last_name, g.email, g.phone,
              r.room_number, r.floor,
-             rt.id AS room_type_id, rt.name AS room_type_name,
+             rt.id AS room_type_id, rt.name AS room_type_name, rt.code AS room_type_code,
              rt.description AS room_type_description, rt.max_occupancy, rt.base_rate,
              COALESCE(
                json_agg(
@@ -76,7 +76,7 @@ async function listBookings(req, res, next) {
 
     const filterParams = [...params]; // snapshot before pagination params are appended below
 
-    query += ' GROUP BY b.id, g.first_name, g.last_name, g.email, g.phone, r.room_number, r.floor, rt.id, rt.name, rt.description, rt.max_occupancy, rt.base_rate';
+    query += ' GROUP BY b.id, g.first_name, g.last_name, g.email, g.phone, r.room_number, r.floor, rt.id, rt.name, rt.code, rt.description, rt.max_occupancy, rt.base_rate';
     query += ' ORDER BY b.created_at DESC';
 
     if (take) { params.push(parseInt(take, 10)); query += ` LIMIT $${params.length}`; }
@@ -99,7 +99,7 @@ async function getBooking(req, res, next) {
       `SELECT b.*,
               g.first_name, g.last_name, g.email, g.phone,
               r.room_number, r.floor, r.status AS room_status,
-              rt.id AS room_type_id, rt.name AS room_type_name, rt.base_rate
+              rt.id AS room_type_id, rt.name AS room_type_name, rt.code AS room_type_code, rt.base_rate
        FROM booking b
        JOIN guest     g  ON g.id  = b.guest_id
        JOIN room      r  ON r.id  = b.room_id

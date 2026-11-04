@@ -29,7 +29,7 @@ async function fetchJoinedBooking(id) {
     `SELECT b.*,
             g.first_name, g.last_name, g.email, g.phone,
             r.room_number, r.floor, r.status AS room_status,
-            rt.id AS room_type_id, rt.name AS room_type_name, rt.base_rate
+            rt.id AS room_type_id, rt.name AS room_type_name, rt.code AS room_type_code, rt.base_rate
      FROM booking b
      JOIN guest     g  ON g.id  = b.guest_id
      JOIN room      r  ON r.id  = b.room_id
