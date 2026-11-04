@@ -69,6 +69,7 @@ app.post('/api/sms', express.urlencoded({ extended: false }), handleSmsWebhook);
 // Marina layouts, pontoon SVGs and berths/bulk exceed the 100 kB default.
 // express.json() below then skips these requests (body already parsed).
 app.use('/api/marina', express.json({ limit: '2mb' }));
+app.use('/api/channels', express.json({ limit: '2mb' })); // bulk reservation imports
 app.use(express.json());
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));

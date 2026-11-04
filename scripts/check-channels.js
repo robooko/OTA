@@ -541,6 +541,22 @@ const apiKeys = require('../src/lib/apiKeys');
       assert.ok(mineList.length > 0 && mineList.every((x) => x.channel_id === ch.id));
       assert.equal((await api('GET', '/api/bookings?channel_id=nope')).status, 400);
     });
+    await check('http: bulk reservation import', async () => {
+      const items = [
+        res({ channel_ref: 'B1', check_in: await day(14), check_out: await day(15) }),
+        res({ channel_ref: 'B1', action: 'cancel' }),
+        res({ channel_ref: 'B2', room_code: 'NOPE', check_in: await day(14), check_out: await day(15) }),
+        res({ channel_ref: 'H1', check_in: await day(12), check_out: await day(13) }),
+      ];
+      const r = await api('POST', `/api/channels/${ch.id}/reservations/import`, { reservations: items });
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.body.results.map((x) => [x.channel_ref, x.outcome]), [['B1', 'created'], ['B1', 'cancelled'], ['B2', 'rejected'], ['H1', 'duplicate']]);
+      assert.deepEqual(r.body.counts, { created: 1, cancelled: 1, rejected: 1, duplicate: 1 });
+      const again = await api('POST', `/api/channels/${ch.id}/reservations/import`, { reservations: items.slice(0, 1) });
+      assert.equal(again.body.results[0].outcome, 'duplicate');
+      assert.equal((await api('POST', `/api/channels/${ch.id}/reservations/import`, { reservations: [] })).status, 400);
+      assert.equal((await api('POST', `/api/channels/${ch.id}/reservations/import`, {})).status, 400);
+    });
     await check('http: pause → pausing → paused; delete rules', async () => {
       assert.equal((await api('DELETE', `/api/channels/${ch.id}`)).status, 409); // active
       const p = await api('PUT', `/api/channels/${ch.id}`, { status: 'paused' });

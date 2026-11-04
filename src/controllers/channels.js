@@ -6,6 +6,7 @@ const { HORIZON_DAYS } = require('../lib/availabilitySeeder');
 const { ADAPTERS } = require('../lib/channels');
 const { drift, syncChannel, requestSync } = require('../lib/channels/sync');
 const { receiveReservation } = require('../lib/channels/reservations');
+const roomPayments = require('../lib/roomPayments');
 
 const COLLECT = ['hotel', 'channel'];
 const DRIFT_MAX = 500;
@@ -250,7 +251,31 @@ async function testReservation(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Bulk import, e.g. the future bookings a channel already holds when it is
+// connected. Processed in order (put news before their modifies/cancels), each
+// one exactly as if the channel had delivered it; one availability refresh at
+// the end. Idempotent per channel_ref, so a re-run is safe.
+async function importReservations(req, res, next) {
+  try {
+    const list = req.body?.reservations;
+    if (!Array.isArray(list) || !list.length || list.length > 500) {
+      return res.status(400).json({ error: 'reservations must be an array of 1-500 reservations' });
+    }
+    const ch = await loadChannel(req, res);
+    if (!ch) return;
+    const results = [];
+    for (const r of list) {
+      results.push({ channel_ref: r?.channel_ref ?? null, ...(await receiveReservation(ch, r, { quiet: true })) });
+    }
+    await roomPayments.refreshAvailabilityView();
+    const counts = {};
+    for (const r of results) counts[r.outcome] = (counts[r.outcome] || 0) + 1;
+    res.json({ counts, results });
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   listChannels, createChannel, getChannel, updateChannel, deleteChannel, replaceMappings,
   listTrims, createTrim, deleteTrim, syncNow, getDrift, listInbound, testReservation,
+  importReservations,
 };

@@ -17,6 +17,7 @@ router.delete('/:id/trims/:trim_id', staffOrFullKey, ctrl.deleteTrim);
 router.post('/:id/sync', staffOrFullKey, ctrl.syncNow);
 router.get('/:id/drift', staffOrFullKey, ctrl.getDrift);
 router.get('/:id/inbound', staffOrFullKey, ctrl.listInbound);
+router.post('/:id/reservations/import', staffOrFullKey, ctrl.importReservations);
 router.post('/:id/test-reservations', staffOrFullKey, ctrl.testReservation);
 
 module.exports = router;

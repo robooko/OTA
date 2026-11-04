@@ -143,7 +143,9 @@ async function handleCancel(client, channel, r) {
 
 const HANDLERS = { new: handleNew, modify: handleModify, cancel: handleCancel };
 
-async function receiveReservation(channel, reservation) {
+// quiet: skip the per-reservation availability refresh and Ably events (a
+// bulk import refreshes once at the end and would otherwise flood the dashboard).
+async function receiveReservation(channel, reservation, { quiet = false } = {}) {
   const r = reservation && typeof reservation === 'object' && !Array.isArray(reservation) ? reservation : {};
   const bad = invalidField(r);
   if (bad) {
@@ -172,13 +174,13 @@ async function receiveReservation(channel, reservation) {
 
   if (result.outcome === 'rejected') {
     await log(pool, channel, r, result.outcome, result);
-    if (result.reason === 'no room available') {
+    if (result.reason === 'no room available' && !quiet) {
       publishChannelReservationRejected(channel.property_id, { channel_id: channel.id, channel_ref: r.channel_ref, reason: result.reason })
         .catch((err) => console.error('Ably publish failed:', err.message));
     }
     return result;
   }
-  if (result.outcome !== 'duplicate') {
+  if (result.outcome !== 'duplicate' && !quiet) {
     await roomPayments.refreshAvailabilityView();
     const full = await roomPayments.fetchJoinedBooking(result.booking_id);
     const publish = result.outcome === 'created' ? publishNewBooking : publishBookingStatusChanged;

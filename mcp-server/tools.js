@@ -229,6 +229,27 @@ function createTools(apiRequest) {
     run: ({ id, ...query }) => apiRequest('GET', `/api/channels/${id}/inbound`, { query }),
   },
   {
+    name: 'import_channel_reservations',
+    description: "Bulk import up to 500 reservations into a channel (e.g. the future bookings it already holds when connected). Same item shape as send_test_channel_reservation; processed in order, idempotent on channel_ref. Returns counts and a per-reservation outcome.",
+    inputSchema: {
+      id: z.string(),
+      reservations: z.array(z.object({
+        channel_ref: z.string(),
+        action: z.enum(['new', 'modify', 'cancel']),
+        room_code: z.string().optional(),
+        rate_code: z.string().optional(),
+        check_in: z.string().optional(),
+        check_out: z.string().optional(),
+        guests: z.number().int().optional(),
+        total_price: z.number().optional(),
+        currency: z.string().optional(),
+        collect: z.enum(['hotel', 'channel']).optional(),
+        guest: z.object({ first_name: z.string(), last_name: z.string(), email: z.string().optional(), phone: z.string().optional() }).optional(),
+      })).min(1).max(500),
+    },
+    run: ({ id, reservations }) => apiRequest('POST', `/api/channels/${id}/reservations/import`, { body: { reservations } }),
+  },
+  {
     name: 'send_test_channel_reservation',
     description: "Test channel only: deliver a reservation as a channel would (action new/modify/cancel), to exercise the inbound flow end to end.",
     inputSchema: {
