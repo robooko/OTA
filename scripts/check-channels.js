@@ -251,6 +251,56 @@ const apiKeys = require('../src/lib/apiKeys');
       }
     });
 
+    // ---- Final review fixes ----
+    await check("review: grid starts at the property's today, not the DB's", async () => {
+      // One of these is on a different calendar day from UTC at any instant.
+      const { utc, east, west } = await one(`SELECT (now() AT TIME ZONE 'UTC')::date::text AS utc,
+        (now() AT TIME ZONE 'Pacific/Kiritimati')::date::text AS east, (now() AT TIME ZONE 'Etc/GMT+12')::date::text AS west`);
+      const [tz, local] = east !== utc ? ['Pacific/Kiritimati', east] : ['Etc/GMT+12', west];
+      assert.notEqual(local, utc);
+      await pool.query('UPDATE property SET timezone = $2 WHERE id = $1', [P, tz]);
+      try {
+        await fresh();
+        const rows = await desiredAri(pool, ch);
+        assert.equal(rows.map((r) => r.date).sort()[0], local);
+        await syncChannel(ch.id);
+        assert.equal((await drift(pool, await chRow(ch.id))).changes.length, 0);
+        assert.ok((await snapshot(ch.id)).some((a) => a.date === local));
+      } finally {
+        await pool.query(`UPDATE property SET timezone = 'Europe/London' WHERE id = $1`, [P]);
+        await pool.query('DELETE FROM channel_ari WHERE mapping_id IN (SELECT id FROM channel_mapping WHERE channel_id = $1)', [ch.id]);
+      }
+    });
+    await check('review: a change made while a sync is pushing is sent by that sync', async () => {
+      await fresh();
+      await syncChannel(ch.id);
+      const d5 = (await one(`SELECT (CURRENT_DATE + 5)::text AS d`)).d;
+      await pool.query('UPDATE room_type_rate SET rate = 160 WHERE room_type_id = $1 AND date = $2', [RT, d5]);
+      const real = ADAPTERS.test.push;
+      let calls = 0;
+      ADAPTERS.test.push = async (c, changes) => {
+        if (calls++ === 0) await pool.query('UPDATE room_type_rate SET rate = 170 WHERE room_type_id = $1 AND date = $2', [RT, d5]);
+        return real(c, changes);
+      };
+      try {
+        await syncChannel(ch.id);
+      } finally {
+        ADAPTERS.test.push = real;
+      }
+      assert.equal((await drift(pool, await chRow(ch.id))).changes.length, 0);
+    });
+    await check('review: shortening the horizon closes out the dropped dates', async () => {
+      await fresh();
+      await syncChannel(ch.id);
+      await pool.query('UPDATE channel SET horizon_days = 10 WHERE id = $1', [ch.id]);
+      const d = await drift(pool, await chRow(ch.id));
+      assert.equal(d.changes.length, 60); // 3 mappings x 20 dropped dates
+      assert.ok(d.changes.every((c) => c.available === 0 && c.stop_sell));
+      assert.equal((await syncChannel(ch.id)).failed, 0);
+      assert.equal((await snapshot(ch.id)).length, 30);
+      assert.equal((await drift(pool, await chRow(ch.id))).changes.length, 0);
+    });
+
     // ---- Task 4: shared room placement ----
     const { placeBooking, stayNights } = require('../src/lib/roomPlacement');
     await check('stayNights: [check_in, check_out)', async () => {

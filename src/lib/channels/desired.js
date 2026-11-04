@@ -7,11 +7,19 @@
 //   rate      = room_type_rate else base_rate, plus the mapping's plan
 //               adjustment; per-room override_rate is never advertised
 // A closing mapping, or a pausing channel, is closed out: 0 + stop-sell.
+// "Today" is the property's local date, not the DB server's (UTC on Render):
+// a west-of-UTC hotel's tonight must stay on sale all evening.
 const { applyAdjustment } = require('../ratePlans');
 
-async function desiredAri(db, channel) {
-  const p = [channel.property_id, channel.horizon_days];
-  const range = `ra.date >= CURRENT_DATE AND ra.date < CURRENT_DATE + $2::int`;
+async function propertyToday(db, propertyId) {
+  return (await db.query(
+    `SELECT (now() AT TIME ZONE timezone)::date::text AS today FROM property WHERE id = $1`, [propertyId])).rows[0].today;
+}
+
+async function desiredAri(db, channel, today) {
+  today ??= await propertyToday(db, channel.property_id);
+  const p = [channel.property_id, channel.horizon_days, today];
+  const range = `ra.date >= $3::date AND ra.date < $3::date + $2::int`;
   const [{ rows: mappings }, { rows: dates }, { rows: free }, { rows: rates }, { rows: trims }] = await Promise.all([
     db.query(
       `SELECT m.id, m.room_type_id, m.room_code, m.rate_code, m.status, rt.base_rate, rp.adjustment_pct
@@ -19,7 +27,7 @@ async function desiredAri(db, channel) {
        JOIN room_type rt ON rt.id = m.room_type_id
        LEFT JOIN rate_plan rp ON rp.id = m.rate_plan_id
        WHERE m.channel_id = $1 ORDER BY m.room_code, m.rate_code`, [channel.id]),
-    db.query(`SELECT (CURRENT_DATE + i)::text AS date FROM generate_series(0, $1::int - 1) i`, [channel.horizon_days]),
+    db.query(`SELECT ($2::date + i)::text AS date FROM generate_series(0, $1::int - 1) i`, [channel.horizon_days, today]),
     db.query(
       `SELECT r.room_type_id, ra.date, COUNT(*)::int AS n
        FROM room r JOIN room_availability ra ON ra.room_id = r.id
@@ -30,7 +38,7 @@ async function desiredAri(db, channel) {
        WHERE property_id = $1 AND ${range}`, p),
     db.query(
       `SELECT room_type_id, date_from, date_to, max_available, stop_sell FROM channel_trim
-       WHERE channel_id = $1 AND date_to >= CURRENT_DATE`, [channel.id]),
+       WHERE channel_id = $1 AND date_to >= $2::date`, [channel.id, today]),
   ]);
 
   const freeOf = new Map(free.map((f) => [`${f.room_type_id}|${f.date}`, f.n]));
@@ -57,4 +65,4 @@ async function desiredAri(db, channel) {
   return rows;
 }
 
-module.exports = { desiredAri };
+module.exports = { desiredAri, propertyToday };

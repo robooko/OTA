@@ -5,31 +5,37 @@
 // so no change path can be missed and failures heal on the next run.
 const pool = require('../../db');
 const { ADAPTERS } = require('.');
-const { desiredAri } = require('./desired');
+const { desiredAri, propertyToday } = require('./desired');
 const { toCents } = require('../folio');
 
 const BATCH = 500;
 
 async function drift(db, channel, { from, to } = {}) {
   if (channel.status === 'paused') return { changes: [], failed: 0, oldest_failing_date: null };
+  const today = await propertyToday(db, channel.property_id);
   const [desired, { rows: sent }] = await Promise.all([
-    desiredAri(db, channel),
+    desiredAri(db, channel, today),
     db.query(
-      `SELECT a.mapping_id, a.date, a.available, a.rate, a.stop_sell, a.status, a.error
+      `SELECT a.mapping_id, m.room_code, m.rate_code, a.date, a.available, a.rate, a.stop_sell, a.status, a.error
        FROM channel_ari a JOIN channel_mapping m ON m.id = a.mapping_id
-       WHERE m.channel_id = $1 AND a.date >= CURRENT_DATE`, [channel.id]),
+       WHERE m.channel_id = $1 AND a.date >= $2::date`, [channel.id, today]),
   ]);
   const inRange = (date) => (!from || date >= from) && (!to || date <= to);
-  const sentOf = new Map(sent.map((s) => [`${s.mapping_id}|${s.date}`, s]));
+  const keyOf = (r) => `${r.mapping_id}|${r.date}`;
+  const sentOf = new Map(sent.map((s) => [keyOf(s), s]));
+  const previous = (s) => (s ? { available: s.available, rate: Number(s.rate), stop_sell: s.stop_sell, status: s.status, error: s.error } : null);
+  const taken = (s, row) => s && s.status === 'ok' && s.available === row.available && s.stop_sell === row.stop_sell && toCents(s.rate) === toCents(row.rate);
   const changes = [];
   for (const row of desired) {
-    if (!inRange(row.date)) continue;
-    const s = sentOf.get(`${row.mapping_id}|${row.date}`);
-    if (s && s.status === 'ok' && s.available === row.available && s.stop_sell === row.stop_sell && toCents(s.rate) === toCents(row.rate)) continue;
-    changes.push({
-      ...row,
-      previous: s ? { available: s.available, rate: Number(s.rate), stop_sell: s.stop_sell, status: s.status, error: s.error } : null,
-    });
+    const s = sentOf.get(keyOf(row));
+    sentOf.delete(keyOf(row));
+    if (inRange(row.date) && !taken(s, row)) changes.push({ ...row, previous: previous(s) });
+  }
+  // What's left was sent but is outside the grid now (horizon shortened):
+  // close it out, or the channel keeps selling on those old counts.
+  for (const s of sentOf.values()) {
+    const row = { mapping_id: s.mapping_id, room_code: s.room_code, rate_code: s.rate_code, date: s.date, available: 0, rate: Number(s.rate), stop_sell: true };
+    if (inRange(s.date) && !taken(s, row)) changes.push({ ...row, previous: previous(s) });
   }
   const failedDates = sent.filter((s) => s.status === 'failed' && inRange(s.date)).map((s) => s.date).sort();
   return { changes, failed: failedDates.length, oldest_failing_date: failedDates[0] ?? null };
@@ -72,23 +78,40 @@ async function syncChannel(channelId) {
     const adapter = ADAPTERS[channel.adapter];
     if (!adapter) throw new Error(`unknown channel adapter ${channel.adapter}`);
 
-    const { changes } = await drift(pool, channel);
+    // Re-diff after pushing: anything that changed while we were sending (a
+    // booking whose nudge found this lock held) goes out in this same run.
+    // Rows already sent this run with the same values (i.e. that just failed)
+    // aren't retried here -- the next run does that.
+    const sentNow = new Map();
+    const sig = (c) => `${c.available}|${toCents(c.rate)}|${c.stop_sell}`;
+    let pushed = 0;
     let ok = 0;
-    for (let i = 0; i < changes.length; i += BATCH) {
-      const batch = changes.slice(i, i + BATCH);
-      let results;
-      try {
-        results = await adapter.push(channel, batch);
-      } catch (err) {
-        results = batch.map(() => ({ ok: false, error: err.message }));
+    for (let round = 0; round < 3; round++) {
+      const todo = (await drift(pool, channel)).changes.filter((c) => sentNow.get(`${c.mapping_id}|${c.date}`) !== sig(c));
+      if (!todo.length) break;
+      for (let i = 0; i < todo.length; i += BATCH) {
+        const batch = todo.slice(i, i + BATCH);
+        let results;
+        try {
+          results = await adapter.push(channel, batch);
+        } catch (err) {
+          results = batch.map(() => ({ ok: false, error: err.message }));
+        }
+        await record(pool, batch, results);
+        ok += batch.filter((_, j) => results[j]?.ok).length;
       }
-      await record(pool, batch, results);
-      ok += batch.filter((_, j) => results[j]?.ok).length;
+      for (const c of todo) sentNow.set(`${c.mapping_id}|${c.date}`, sig(c));
+      pushed += todo.length;
     }
 
+    // Drop rows the channel no longer needs: past dates, and dates past the
+    // horizon once their close-out was taken.
+    const today = await propertyToday(pool, channel.property_id);
     await pool.query(
       `DELETE FROM channel_ari a USING channel_mapping m
-       WHERE m.id = a.mapping_id AND m.channel_id = $1 AND a.date < CURRENT_DATE`, [channel.id]);
+       WHERE m.id = a.mapping_id AND m.channel_id = $1
+         AND (a.date < $2::date OR (a.date >= $2::date + $3::int AND a.status = 'ok' AND a.available = 0 AND a.stop_sell))`,
+      [channel.id, today, channel.horizon_days]);
     // Close-outs that the channel has taken: a pausing channel becomes paused,
     // a closing mapping goes away (its snapshot rows cascade).
     const left = (await drift(pool, channel)).changes;
@@ -100,7 +123,7 @@ async function syncChannel(channelId) {
       `DELETE FROM channel_mapping WHERE channel_id = $1 AND status = 'closing' AND NOT (id = ANY($2::uuid[]))`,
       [channel.id, stillOpen]);
 
-    return { pushed: changes.length, ok, failed: changes.length - ok };
+    return { pushed, ok, failed: pushed - ok };
   } finally {
     if (locked) await client.query(`SELECT pg_advisory_unlock(hashtext('channel_sync:' || $1))`, [channelId]).catch(() => {});
     client.release();
