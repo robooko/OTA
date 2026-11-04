@@ -16,7 +16,7 @@ function isValidMetadata(v) {
 
 async function listBookings(req, res, next) {
   try {
-    const { status, guest_id, from, to, created_from, created_to, skip, take, channel_id } = req.query;
+    const { status, guest_id, from, to, on, created_from, created_to, skip, take, channel_id } = req.query;
     if (channel_id && channel_id !== 'direct' && !isValidUuid(channel_id)) {
       return res.status(400).json({ error: "channel_id must be a channel id or 'direct'" });
     }
@@ -55,6 +55,12 @@ async function listBookings(req, res, next) {
     if (guest_id) { params.push(guest_id); query += ` AND b.guest_id = $${params.length}`; countQuery += ` AND b.guest_id = $${params.length}`; }
     if (from) { params.push(from); query += ` AND b.check_in >= $${params.length}`; countQuery += ` AND b.check_in >= $${params.length}`; }
     if (to) { params.push(to); query += ` AND b.check_out <= $${params.length}`; countQuery += ` AND b.check_out <= $${params.length}`; }
+    // on: stays touching that date -- arriving, in-house or departing (the
+    // room-bookings day bar). Unlike from/to, which keep stays inside a range.
+    if (on) {
+      if (!isValidDate(on)) return res.status(400).json({ error: 'on must be YYYY-MM-DD' });
+      params.push(on); query += ` AND b.check_in <= $${params.length} AND b.check_out >= $${params.length}`; countQuery += ` AND b.check_in <= $${params.length} AND b.check_out >= $${params.length}`;
+    }
     // created_from/created_to are the main dashboard's Room total revenue
     // stat and Sales this week chart -- when the booking was made, not
     // when the stay happens (from/to above), same "revenue today" meaning
