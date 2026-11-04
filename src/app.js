@@ -110,6 +110,7 @@ app.use('/api/marina', marinaRoutes);
 app.use('/api/sailor/documents', sailorDocumentRoutes);
 app.use('/api/quickbooks', quickbooksRoutes);
 app.use('/api/integrations', integrationsRoutes);
+app.use('/api/channels', require('./routes/channels'));
 
 app.use(errorHandler);
 

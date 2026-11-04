@@ -412,6 +412,100 @@ const apiKeys = require('../src/lib/apiKeys');
       assert.equal(r.body.error, 'This booking came from a channel; cancel it on the channel');
       assert.equal((await api('DELETE', `/api/bookings/${id}?force=true`)).status, 200);
     });
+
+    // ---- Task 6: HTTP API ----
+    await check('http: create channel validates adapter/config, masks secrets', async () => {
+      assert.equal((await api('POST', '/api/channels', { adapter: 'nope', name: 'X' })).status, 400);
+      const badCfg = await api('POST', '/api/channels', { adapter: 'test', name: 'X', config: { fail_pushes: 'yes' } });
+      assert.equal(badCfg.status, 400);
+      assert.match(badCfg.body.details, /fail_pushes/);
+      assert.equal((await api('POST', '/api/channels', { adapter: 'test', name: 'X', horizon_days: 900 })).status, 400);
+      assert.equal((await api('POST', '/api/channels', { adapter: 'test', name: 'X', collect: 'guest' })).status, 400);
+      const ok = await api('POST', '/api/channels', { adapter: 'test', name: 'Web', collect: 'channel', config: { fail_pushes: false } });
+      assert.equal(ok.status, 201);
+      assert.deepEqual([ok.body.status, ok.body.horizon_days, ok.body.collect, ok.body.config], ['active', 365, 'channel', { fail_pushes: false }]);
+      const other = await one(`INSERT INTO channel (property_id, adapter, name, config) VALUES ($1, 'other', 'Other', '{"api_key":"s3cret"}') RETURNING id`, [P]);
+      const got = await api('GET', `/api/channels/${other.id}`);
+      assert.deepEqual(got.body.config, { api_key: '***' });
+      assert.ok((await api('GET', '/api/channels')).body.some((c) => c.id === ok.body.id));
+    });
+    await check('http: another property gets 404', async () => {
+      assert.equal((await api('GET', `/api/channels/${ch.id}`, null, `${KEY}_other`)).status, 404);
+      assert.equal((await api('POST', `/api/channels/${ch.id}/sync`, null, `${KEY}_other`)).status, 404);
+      assert.ok(!(await api('GET', '/api/channels', null, `${KEY}_other`)).body.some((c) => c.id === ch.id));
+    });
+    await check('http: replace mappings (validation, removed → closing)', async () => {
+      const QT = (await one(`INSERT INTO room_type (property_id, name, max_occupancy, base_rate) VALUES ($1, 'Q', 2, 1) RETURNING id`, [Q])).id;
+      try {
+        assert.equal((await api('PUT', `/api/channels/${ch.id}/mappings`, { mappings: [{ room_type_id: QT, room_code: 'Q', rate_code: 'BAR' }] })).status, 400);
+      } finally {
+        await pool.query('DELETE FROM room_type WHERE id = $1', [QT]);
+      }
+      assert.equal((await api('PUT', `/api/channels/${ch.id}/mappings`, { mappings: [{ room_type_id: RT2, rate_plan_id: SAVER, room_code: 'S', rate_code: 'S' }] })).status, 400);
+      const dup = [{ room_type_id: RT, room_code: 'DBL', rate_code: 'BAR' }, { room_type_id: RT, room_code: 'DBL', rate_code: 'BAR' }];
+      assert.equal((await api('PUT', `/api/channels/${ch.id}/mappings`, { mappings: dup })).status, 400);
+      const r = await api('PUT', `/api/channels/${ch.id}/mappings`, {
+        mappings: [{ room_type_id: RT, room_code: 'DBL', rate_code: 'BAR' }, { room_type_id: RT2, room_code: 'STE', rate_code: 'BAR' }],
+      });
+      assert.equal(r.status, 200);
+      const st = Object.fromEntries(r.body.map((m) => [`${m.room_code}/${m.rate_code}`, m.status]));
+      assert.deepEqual(st, { 'DBL/BAR': 'active', 'DBL/SAVER': 'closing', 'STE/BAR': 'active' });
+    });
+    await check('http: trims CRUD and validation', async () => {
+      assert.equal((await api('POST', `/api/channels/${ch.id}/trims`, { date_from: d5, date_to: d3, stop_sell: true })).status, 400);
+      assert.equal((await api('POST', `/api/channels/${ch.id}/trims`, { date_from: d3, date_to: d5 })).status, 400);
+      assert.equal((await api('POST', `/api/channels/${ch.id}/trims`, { date_from: d3, date_to: d5, max_available: -1 })).status, 400);
+      const t = await api('POST', `/api/channels/${ch.id}/trims`, { room_type_id: RT, date_from: d3, date_to: d3, max_available: 1 });
+      assert.equal(t.status, 201);
+      assert.equal((await api('GET', `/api/channels/${ch.id}/trims`)).body.length, 1);
+      assert.equal((await api('GET', `/api/channels/${ch.id}`)).body.trims.length, 1);
+      assert.equal((await api('DELETE', `/api/channels/${ch.id}/trims/${t.body.id}`)).status, 204);
+      assert.equal((await api('GET', `/api/channels/${ch.id}/trims`)).body.length, 0);
+    });
+    await check('http: sync then drift is empty', async () => {
+      const s = await api('POST', `/api/channels/${ch.id}/sync`);
+      assert.equal(s.status, 200);
+      assert.equal(s.body.failed, 0);
+      const d = await api('GET', `/api/channels/${ch.id}/drift`);
+      assert.deepEqual([d.status, d.body.changes, d.body.total, d.body.failed], [200, [], 0, 0]);
+      assert.equal((await api('GET', `/api/channels/${ch.id}/drift?from=bad`)).status, 400);
+    });
+    await check('http: test reservations, inbound log, bookings channel filter', async () => {
+      const body = res({ channel_ref: 'H1', check_in: await day(12), check_out: await day(13) });
+      const a = await api('POST', `/api/channels/${ch.id}/test-reservations`, body);
+      assert.deepEqual([a.status, a.body.outcome], [201, 'created']);
+      const b = await api('POST', `/api/channels/${ch.id}/test-reservations`, body);
+      assert.deepEqual([b.status, b.body.outcome], [200, 'duplicate']);
+      const c = await api('POST', `/api/channels/${ch.id}/test-reservations`, { ...body, channel_ref: 'H2', room_code: 'NOPE' });
+      assert.deepEqual([c.status, c.body.reason], [409, 'unknown room/rate code']);
+      const log = await api('GET', `/api/channels/${ch.id}/inbound?limit=2`);
+      assert.deepEqual(log.body.map((l) => l.channel_ref), ['H2', 'H1']);
+      const other = await one(`SELECT id FROM channel WHERE property_id = $1 AND adapter = 'other'`, [P]);
+      assert.equal((await api('POST', `/api/channels/${other.id}/test-reservations`, body)).status, 404);
+      assert.equal((await api('POST', '/api/bookings', { guest_id: G, room_type_id: RT2, check_in: await day(20), check_out: await day(21) })).status, 201);
+      const direct = (await api('GET', '/api/bookings?channel_id=direct&take=200')).body;
+      const list = direct.bookings ?? direct.data ?? direct;
+      assert.ok(list.length > 0 && list.every((x) => x.channel_id === null));
+      const mine = (await api('GET', `/api/bookings?channel_id=${ch.id}&take=200`)).body;
+      const mineList = mine.bookings ?? mine.data ?? mine;
+      assert.ok(mineList.length > 0 && mineList.every((x) => x.channel_id === ch.id));
+      assert.equal((await api('GET', '/api/bookings?channel_id=nope')).status, 400);
+    });
+    await check('http: pause → pausing → paused; delete rules', async () => {
+      assert.equal((await api('DELETE', `/api/channels/${ch.id}`)).status, 409); // active
+      const p = await api('PUT', `/api/channels/${ch.id}`, { status: 'paused' });
+      assert.equal(p.body.status, 'pausing');
+      await api('POST', `/api/channels/${ch.id}/sync`);
+      assert.equal((await api('GET', `/api/channels/${ch.id}`)).body.status, 'paused');
+      assert.equal((await api('DELETE', `/api/channels/${ch.id}`)).status, 409); // has bookings
+      const spare = (await api('POST', '/api/channels', { adapter: 'test', name: 'Spare' })).body;
+      await api('PUT', `/api/channels/${spare.id}`, { status: 'paused' });
+      await api('POST', `/api/channels/${spare.id}/sync`);
+      assert.equal((await api('DELETE', `/api/channels/${spare.id}`)).status, 204);
+      assert.equal((await api('GET', `/api/channels/${spare.id}`)).status, 404);
+      const r = await api('PUT', `/api/channels/${ch.id}`, { status: 'active', name: 'Renamed' });
+      assert.deepEqual([r.body.status, r.body.name], ['active', 'Renamed']);
+    });
   } finally {
     const props = [P, Q];
     const has = async (t) => (await one('SELECT to_regclass($1) AS r', [t])).r;

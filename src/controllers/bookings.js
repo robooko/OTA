@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { isValidDate } = require('../middleware/validate');
+const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { publishNewBooking, publishBookingStatusChanged } = require('../lib/ably');
 const { listOpenRoomBaskets } = require('../lib/roomBaskets');
 const { computeFolio, toCents } = require('../lib/folio');
@@ -16,7 +16,10 @@ function isValidMetadata(v) {
 
 async function listBookings(req, res, next) {
   try {
-    const { status, guest_id, from, to, created_from, created_to, skip, take } = req.query;
+    const { status, guest_id, from, to, created_from, created_to, skip, take, channel_id } = req.query;
+    if (channel_id && channel_id !== 'direct' && !isValidUuid(channel_id)) {
+      return res.status(400).json({ error: "channel_id must be a channel id or 'direct'" });
+    }
     let query = `
       SELECT b.*, g.first_name, g.last_name, g.email, g.phone,
              r.room_number, r.floor,
@@ -46,6 +49,9 @@ async function listBookings(req, res, next) {
     let countQuery = 'SELECT COUNT(*) AS total FROM booking b WHERE b.property_id = $1';
 
     if (status) { params.push(status); query += ` AND b.status = $${params.length}`; countQuery += ` AND b.status = $${params.length}`; }
+    // channel_id: one channel's bookings, or 'direct' for bookings made in OTA.
+    if (channel_id === 'direct') { query += ' AND b.channel_id IS NULL'; countQuery += ' AND b.channel_id IS NULL'; }
+    else if (channel_id) { params.push(channel_id); query += ` AND b.channel_id = $${params.length}`; countQuery += ` AND b.channel_id = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND b.guest_id = $${params.length}`; countQuery += ` AND b.guest_id = $${params.length}`; }
     if (from) { params.push(from); query += ` AND b.check_in >= $${params.length}`; countQuery += ` AND b.check_in >= $${params.length}`; }
     if (to) { params.push(to); query += ` AND b.check_out <= $${params.length}`; countQuery += ` AND b.check_out <= $${params.length}`; }
