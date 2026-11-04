@@ -139,6 +139,7 @@ const swaggerSpec = {
         properties: {
           id: { type: 'string', format: 'uuid' },
           name: { type: 'string' },
+          code: { type: 'string', maxLength: 3, nullable: true, description: "Optional short code, e.g. 'DBL'. Unique per property." },
           description: { type: 'string' },
           max_occupancy: { type: 'integer' },
           base_rate: { type: 'number' },
@@ -466,11 +467,11 @@ const swaggerSpec = {
     // ── Room Types ───────────────────────────────────────────────────────────
     '/api/room-types': {
       get: { tags: ['Room Types'], summary: 'List all room types', responses: { 200: { description: 'Array of room types' } } },
-      post: { tags: ['Room Types'], summary: 'Create room type', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'max_occupancy', 'base_rate'], properties: { name: { type: 'string' }, description: { type: 'string' }, max_occupancy: { type: 'integer' }, base_rate: { type: 'number' } } } } } }, responses: { 201: { description: 'Created' } } },
+      post: { tags: ['Room Types'], summary: 'Create room type', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', required: ['name', 'max_occupancy', 'base_rate'], properties: { name: { type: 'string' }, code: { type: 'string', minLength: 1, maxLength: 3, description: 'Optional short code, unique per property' }, description: { type: 'string' }, max_occupancy: { type: 'integer' }, base_rate: { type: 'number' } } } } } }, responses: { 201: { description: 'Created' }, 400: { description: 'Missing fields or bad code' }, 409: { description: 'Code already used by another room type' } } },
     },
     '/api/room-types/{id}': {
       get: { tags: ['Room Types'], summary: 'Get room type by ID', security: [{ bearerAuth: [] }, { apiKeyAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Room type' } } },
-      put: { tags: ['Room Types'], summary: 'Update room type', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' }, max_occupancy: { type: 'integer' }, base_rate: { type: 'number' }, status: { type: 'string', enum: ['active', 'inactive'] }, floor_plan: { type: 'object' } } } } } }, responses: { 200: { description: 'Updated' } } },
+      put: { tags: ['Room Types'], summary: 'Update room type', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, code: { type: 'string', minLength: 1, maxLength: 3, nullable: true, description: 'null clears it' }, description: { type: 'string' }, max_occupancy: { type: 'integer' }, base_rate: { type: 'number' }, status: { type: 'string', enum: ['active', 'inactive'] }, floor_plan: { type: 'object' } } } } } }, responses: { 200: { description: 'Updated' }, 400: { description: 'Bad code or floor_plan' }, 409: { description: 'Code already used by another room type' } } },
     },
     '/api/room-types/{id}/rates': {
       get: { tags: ['Room Types'], summary: 'List dated nightly rates for a room type (dates without a row fall back to base_rate)', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } }, { name: 'to', in: 'query', schema: { type: 'string', format: 'date' }, description: 'Exclusive' }], responses: { 200: { description: 'Array of dated rates' }, 404: { description: 'Not found' } } },

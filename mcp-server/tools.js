@@ -417,6 +417,7 @@ function createTools(apiRequest) {
     description: 'Create a room type',
     inputSchema: {
       name: z.string(),
+      code: z.string().min(1).max(3).optional().describe("Short code, e.g. 'DBL'; unique per property"),
       description: z.string().optional(),
       max_occupancy: z.number().int(),
       base_rate: z.number(),
@@ -429,6 +430,7 @@ function createTools(apiRequest) {
     inputSchema: {
       id: z.string(),
       name: z.string().optional(),
+      code: z.string().min(1).max(3).nullable().optional().describe('Max 3 chars, unique per property; null clears it'),
       description: z.string().optional(),
       max_occupancy: z.number().int().optional(),
       base_rate: z.number().optional(),

@@ -233,6 +233,7 @@ CREATE TABLE IF NOT EXISTS room_type (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id    UUID            NOT NULL REFERENCES property(id),
   name           VARCHAR(100)    NOT NULL,
+  code           VARCHAR(3),     -- optional short code, e.g. 'DBL' -- see migrate-2026-11-04-room-type-code.sql
   description    TEXT,
   max_occupancy  INT             NOT NULL,
   base_rate      NUMERIC(10,2)   NOT NULL,
@@ -241,6 +242,7 @@ CREATE TABLE IF NOT EXISTS room_type (
 );
 
 CREATE INDEX IF NOT EXISTS idx_room_type_property ON room_type(property_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_room_type_property_code ON room_type(property_id, code) WHERE code IS NOT NULL;
 
 -- Dated nightly rates per room type (rate calendar). One row per date; a
 -- missing row falls back to base_rate, and a per-room

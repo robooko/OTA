@@ -7,6 +7,18 @@ function isValidFloorPlan(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+function isValidCode(v) {
+  return typeof v === 'string' && v.length >= 1 && v.length <= 3;
+}
+
+// Unique index idx_room_type_property_code -> 409 instead of a 500.
+function codeTaken(err) {
+  if (err.code === '23505' && err.constraint === 'idx_room_type_property_code') {
+    return Object.assign(new Error('code is already used by another room type'), { status: 409 });
+  }
+  return err;
+}
+
 
 async function listRoomTypes(req, res, next) {
   try {
@@ -35,26 +47,32 @@ async function getRoomType(req, res, next) {
 
 async function createRoomType(req, res, next) {
   try {
-    const { name, description, max_occupancy, base_rate } = req.body;
+    const { name, code, description, max_occupancy, base_rate } = req.body;
     if (!name || max_occupancy == null || base_rate == null) {
       return res.status(400).json({ error: 'name, max_occupancy, and base_rate are required' });
     }
+    if (code != null && !isValidCode(code)) {
+      return res.status(400).json({ error: 'code must be a string of 1 to 3 characters' });
+    }
     const { rows } = await pool.query(
-      `INSERT INTO room_type (property_id, name, description, max_occupancy, base_rate)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [req.property_id, name, description || null, max_occupancy, base_rate]
+      `INSERT INTO room_type (property_id, name, code, description, max_occupancy, base_rate)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [req.property_id, name, code ?? null, description || null, max_occupancy, base_rate]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
-    next(err);
+    next(codeTaken(err));
   }
 }
 
 async function updateRoomType(req, res, next) {
   try {
-    const { name, description, max_occupancy, base_rate, status, floor_plan } = req.body;
+    const { name, code, description, max_occupancy, base_rate, status, floor_plan } = req.body;
     if (floor_plan !== undefined && !isValidFloorPlan(floor_plan)) {
       return res.status(400).json({ error: 'floor_plan must be a JSON object' });
+    }
+    if (code != null && !isValidCode(code)) {
+      return res.status(400).json({ error: 'code must be a string of 1 to 3 characters, or null to clear it' });
     }
     const { rows } = await pool.query(
       `UPDATE room_type SET
@@ -63,9 +81,11 @@ async function updateRoomType(req, res, next) {
          max_occupancy = COALESCE($3, max_occupancy),
          base_rate     = COALESCE($4, base_rate),
          status        = COALESCE($5, status),
-         floor_plan    = COALESCE($6::jsonb, floor_plan)
+         floor_plan    = COALESCE($6::jsonb, floor_plan),
+         code          = CASE WHEN $9 THEN $10 ELSE code END
        WHERE id = $7 AND property_id = $8 RETURNING *`,
-      [name, description, max_occupancy, base_rate, status, floor_plan ?? null, req.params.id, req.property_id]
+      [name, description, max_occupancy, base_rate, status, floor_plan ?? null, req.params.id, req.property_id,
+       code !== undefined, code ?? null]
     );
     if (!rows.length) return res.status(404).json({ error: 'Room type not found' });
 
@@ -76,7 +96,7 @@ async function updateRoomType(req, res, next) {
 
     res.json(rows[0]);
   } catch (err) {
-    next(err);
+    next(codeTaken(err));
   }
 }
 
