@@ -57,9 +57,15 @@ async function listBookings(req, res, next) {
     if (to) { params.push(to); query += ` AND b.check_out <= $${params.length}`; countQuery += ` AND b.check_out <= $${params.length}`; }
     // on: stays touching that date -- arriving, in-house or departing (the
     // room-bookings day bar). Unlike from/to, which keep stays inside a range.
+    // on_kind narrows it to that day's arrivals or departures.
     if (on) {
       if (!isValidDate(on)) return res.status(400).json({ error: 'on must be YYYY-MM-DD' });
-      params.push(on); query += ` AND b.check_in <= $${params.length} AND b.check_out >= $${params.length}`; countQuery += ` AND b.check_in <= $${params.length} AND b.check_out >= $${params.length}`;
+      const kind = req.query.on_kind;
+      if (kind && kind !== 'arrivals' && kind !== 'departures') return res.status(400).json({ error: "on_kind must be 'arrivals' or 'departures'" });
+      params.push(on);
+      const n = `$${params.length}`;
+      const cond = kind === 'arrivals' ? ` AND b.check_in = ${n}` : kind === 'departures' ? ` AND b.check_out = ${n}` : ` AND b.check_in <= ${n} AND b.check_out >= ${n}`;
+      query += cond; countQuery += cond;
     }
     // created_from/created_to are the main dashboard's Room total revenue
     // stat and Sales this week chart -- when the booking was made, not
