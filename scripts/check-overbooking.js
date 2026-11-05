@@ -59,6 +59,17 @@ async function book(P, body) {
 }
 
 const sections = {
+  async deadlock() {
+    // Postgres breaks a lock cycle by aborting one side (40P01); that caller is told to retry, not given a 500.
+    const errorHandler = require('../src/middleware/errorHandler');
+    const r = await new Promise((resolve) => {
+      const res = { statusCode: 200, status(x) { this.statusCode = x; return this; }, json(b) { resolve({ status: this.statusCode, body: b }); } };
+      const orig = console.error; console.error = () => {};
+      try { errorHandler(Object.assign(new Error('deadlock detected'), { code: '40P01' }), {}, res, () => {}); } finally { console.error = orig; }
+    });
+    assert.deepEqual(r, { status: 409, body: { error: 'Busy, please retry', details: 'deadlock detected' } }, 'deadlock -> 409 retry');
+  },
+
   async status() {
     const { updateBooking } = require('../src/controllers/bookings');
     const P = await property('OB Status', { overbooking_enabled: true, oversell_max_pct: 100 });
