@@ -341,6 +341,20 @@ CREATE TABLE IF NOT EXISTS booking (
   created_at  TIMESTAMPTZ   DEFAULT now()
 );
 
+-- Old code (still serving until the deploy) inserts bookings without a sold
+-- type: take it from the room. New code always sets it, so this is a no-op
+-- for it; kept afterwards as a harmless default.
+CREATE OR REPLACE FUNCTION booking_default_room_type() RETURNS trigger AS $
+BEGIN
+  IF NEW.room_type_id IS NULL AND NEW.room_id IS NOT NULL THEN
+    NEW.room_type_id := (SELECT room_type_id FROM room WHERE id = NEW.room_id);
+  END IF;
+  RETURN NEW;
+END $ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS booking_default_room_type ON booking;
+CREATE TRIGGER booking_default_room_type BEFORE INSERT ON booking
+  FOR EACH ROW EXECUTE FUNCTION booking_default_room_type();
+
 -- Occupancy per night (room_id null = no room yet). Rows exist only while the
 -- booking holds the night: pending_payment, confirmed, checked_in; a
 -- checked_out booking keeps its past nights. Replaced booking_no_overlap

@@ -6,6 +6,19 @@
 
 -- The room type a booking was sold as; its room(s) may differ after a move.
 ALTER TABLE booking ADD COLUMN IF NOT EXISTS room_type_id UUID REFERENCES room_type(id);
+-- Old code (still serving until the deploy) inserts bookings without a sold
+-- type: take it from the room. New code always sets it, so this is a no-op
+-- for it; kept afterwards as a harmless default.
+CREATE OR REPLACE FUNCTION booking_default_room_type() RETURNS trigger AS $
+BEGIN
+  IF NEW.room_type_id IS NULL AND NEW.room_id IS NOT NULL THEN
+    NEW.room_type_id := (SELECT room_type_id FROM room WHERE id = NEW.room_id);
+  END IF;
+  RETURN NEW;
+END $ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS booking_default_room_type ON booking;
+CREATE TRIGGER booking_default_room_type BEFORE INSERT ON booking
+  FOR EACH ROW EXECUTE FUNCTION booking_default_room_type();
 -- true = the guest/staff named the room; it can never be bumped.
 ALTER TABLE booking ADD COLUMN IF NOT EXISTS room_pick BOOLEAN NOT NULL DEFAULT false;
 -- room_id is now "current room": null while no room is held tonight / yet.

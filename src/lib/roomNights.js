@@ -243,6 +243,15 @@ async function releaseNights(client, booking, fromNight = null, { refillNow = tr
      RETURNING night::text, room_id`, [booking.id, fromNight]);
   const freed = new Map();
   for (const r of rows) if (r.room_id) (freed.get(r.room_id) ?? freed.set(r.room_id, []).get(r.room_id)).push(r.night);
+  // A booking the old code made between migration A and B has no night rows:
+  // reopen its room over the stay as the old code did (nights nobody holds).
+  if (!rows.length && fromNight === null && booking.room_id) {
+    await client.query(
+      `UPDATE room_availability ra SET is_available = true
+       WHERE ra.room_id = $1 AND ra.date >= $2 AND ra.date < $3 AND ra.block_reason IS NULL
+         AND NOT EXISTS (SELECT 1 FROM booking_night h WHERE h.room_id = ra.room_id AND h.night = ra.date)`,
+      [booking.room_id, booking.check_in, booking.check_out]);
+  }
   for (const [roomId, ns] of freed) await setFlags(client, roomId, ns, true);
   if (refillNow) await refill(client, booking.property_id, freed);
   return freed; // refillNow false: the caller re-holds first, then refill()s

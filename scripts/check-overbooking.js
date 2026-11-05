@@ -396,28 +396,50 @@ const sections = {
   async migration() {
     const P = await property('OB Migration');
     const A = await roomType(P);
-    const r1 = await room(P, A, '1');
+    const [r1, r2] = [await room(P, A, '1'), await room(P, A, '2')];
     const g = await guest(P);
-    // A booking written by the old code during the deploy window: no sold type, no nights.
-    await pool.query(`INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price)
-                      VALUES ($1, $2, $3, '2030-01-01', '2030-01-04', 300)`, [P, g, r1]).catch(async (e) => {
-      // After B the column is NOT NULL: simulate the old row by inserting with the type then nulling nights.
-      if (e.code !== '23502') throw e;
-      await pool.query(`INSERT INTO booking (property_id, guest_id, room_id, room_type_id, check_in, check_out, total_price)
-                        VALUES ($1, $2, $3, $4, '2030-01-01', '2030-01-04', 300)`, [P, g, r1, A]);
-    });
-    await pool.query(`DELETE FROM booking_night WHERE property_id = $1`, [P]);
+    const nightsOf2 = async (b) => (await pool.query(`SELECT night::text, room_id FROM booking_night WHERE booking_id = $1 ORDER BY night`, [b])).rows;
+    // Old code (between migration A and the deploy) never writes room_type_id or booking_night.
+    const oldInsert = async (roomId, cin, cout, status = 'confirmed') => (await one(
+      `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price, status)
+       VALUES ($1, $2, $3, $4, $5, 300, $6) RETURNING id, room_type_id`, [P, g, roomId, cin, cout, status]));
+    const b0 = await oldInsert(r1, '2030-01-01', '2030-01-04');
+    assert.equal(b0.room_type_id, A, 'old-code insert gets its sold type from the room');
+
+    // A backfilled booking the old code then cancels: its nights must go.
+    const bc = await oldInsert(r2, '2030-02-01', '2030-02-03');
+    await runSql('src/db/migrate-2026-11-05-overbooking-b.sql');
+    assert.equal((await nightsOf2(bc.id)).length, 2);
+    await pool.query(`UPDATE booking SET status = 'cancelled' WHERE id = $1`, [bc.id]);
+    // A backfilled booking the old code moves (channel modify): rebuilt on the new room and dates.
+    const bm = await oldInsert(r1, '2030-03-01', '2030-03-03');
+    await runSql('src/db/migrate-2026-11-05-overbooking-b.sql');
+    await pool.query(`UPDATE booking SET room_id = $2, check_in = '2030-03-02', check_out = '2030-03-04' WHERE id = $1`, [bm.id, r2]);
+    // A booking new code has placed (a logged move) is left alone.
+    const bn = await oldInsert(r1, '2030-04-01', '2030-04-02');
+    await runSql('src/db/migrate-2026-11-05-overbooking-b.sql');
+    await pool.query(`UPDATE booking_night SET room_id = $2 WHERE booking_id = $1`, [bn.id, r2]);
+    await pool.query(`INSERT INTO booking_room_move (property_id, booking_id, night_from, night_to, to_room_id, reason) VALUES ($1, $2, '2030-04-01', '2030-04-02', $3, 'move')`, [P, bn.id, r2]);
+    // A long-gone checked_out booking keeps only past nights.
+    const bo = await oldInsert(r2, addDays(TODAY, -2), addDays(TODAY, 2), 'checked_out');
+
     await runSql('src/db/migrate-2026-11-05-overbooking-b.sql');
     await runSql('src/db/migrate-2026-11-05-overbooking-b.sql'); // idempotent
-    assert.equal((await one(`SELECT room_type_id FROM booking WHERE property_id = $1`, [P])).room_type_id, A, 'sold type backfilled');
-    assert.equal((await one(`SELECT count(*)::int AS n FROM booking_night WHERE room_id = $1`, [r1])).n, 3, 'nights backfilled');
+    assert.equal((await nightsOf2(b0.id)).length, 3, 'nights backfilled');
+    assert.deepEqual(await nightsOf2(bc.id), [], 'old-code cancel: stale nights removed');
+    assert.deepEqual(await nightsOf2(bm.id), [{ night: '2030-03-02', room_id: r2 }, { night: '2030-03-03', room_id: r2 }], 'old-code modify: nights rebuilt');
+    assert.deepEqual(await nightsOf2(bn.id), [{ night: '2030-04-01', room_id: r2 }], 'new-code placement kept');
+    assert.deepEqual((await nightsOf2(bo.id)).map((n) => n.night), [addDays(TODAY, -2), addDays(TODAY, -1)], 'checked_out keeps past nights only');
+    // Deploy-to-B gap: new code cancels a booking that has no night rows yet -> the room's flags reopen.
+    const bw = await oldInsert(r1, '2030-05-01', '2030-05-03');
+    await open(P, [r1], '2030-05-01', 2);
+    await pool.query(`UPDATE room_availability SET is_available = false WHERE room_id = $1 AND date >= '2030-05-01' AND date < '2030-05-03'`, [r1]);
+    const { releaseNights } = require('../src/lib/roomNights');
+    const c = await pool.connect();
+    try { await c.query('BEGIN'); await releaseNights(c, await one('SELECT * FROM booking WHERE id = $1', [bw.id])); await c.query('COMMIT'); } finally { c.release(); }
+    assert.equal((await one(`SELECT count(*)::int AS n FROM room_availability WHERE room_id = $1 AND date >= '2030-05-01' AND date < '2030-05-03' AND is_available`, [r1])).n, 2, 'release of a booking with no night rows reopens its room');
     const p = await one('SELECT overbooking_enabled, oversell_max_pct, room_lock_days FROM property WHERE id = $1', [P]);
     assert.deepEqual({ ...p, oversell_max_pct: Number(p.oversell_max_pct) }, { overbooking_enabled: false, oversell_max_pct: 0, room_lock_days: 1 });
-    // Cancelled bookings hold no nights.
-    await pool.query(`UPDATE booking SET status = 'cancelled' WHERE property_id = $1`, [P]);
-    await pool.query(`DELETE FROM booking_night WHERE property_id = $1`, [P]);
-    await runSql('src/db/migrate-2026-11-05-overbooking-b.sql');
-    assert.equal((await one(`SELECT count(*)::int AS n FROM booking_night WHERE property_id = $1`, [P])).n, 0, 'cancelled not backfilled');
   },
 };
 
