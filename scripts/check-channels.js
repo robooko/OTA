@@ -215,12 +215,14 @@ const apiKeys = require('../src/lib/apiKeys');
       assert.deepEqual([d.failed, d.changes.length], [0, 0]);
     });
     await check('sync: concurrent syncs push once', async () => {
+      await sync._flush(); // a debounced background sync from earlier API calls would race these
       const d5 = (await one(`SELECT (CURRENT_DATE + 5)::text AS d`)).d;
       await pool.query('UPDATE room_type_rate SET rate = 150 WHERE room_type_id = $1 AND date = $2', [RT, d5]);
       const [a, b] = await Promise.all([syncChannel(ch.id), syncChannel(ch.id)]);
       assert.equal((a.pushed || 0) + (b.pushed || 0), 2); // the other run was skipped ('locked') or found nothing
     });
     await check('sync: pausing pushes close-out then becomes paused', async () => {
+      await sync._flush();
       await pool.query(`UPDATE channel SET status = 'pausing' WHERE id = $1`, [ch.id]);
       const r = await syncChannel(ch.id);
       assert.equal(r.failed, 0);
