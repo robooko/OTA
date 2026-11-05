@@ -40,7 +40,7 @@ const apiKeys = require('../src/lib/apiKeys');
       await pool.query(`INSERT INTO room_availability (property_id, room_id, date, is_available) VALUES ($1, $2, $3, true)`, [P, ROOM, d]);
     }
     const G = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'Ada', 'Guest', $2) RETURNING id`, [P, `ada-${run}@example.com`])).id;
-    const B = (await one(`INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price) VALUES ($1, $2, $3, '2031-01-01', '2031-01-03', 200) RETURNING id`, [P, G, ROOM])).id;
+    const B = (await one(`INSERT INTO booking (property_id, guest_id, room_id, room_type_id, check_in, check_out, total_price) VALUES ($1, $2, $3, (SELECT room_type_id FROM room WHERE id = $3), '2031-01-01', '2031-01-03', 200) RETURNING id`, [P, G, ROOM])).id;
 
     const hit = (k, method, url, body) => fetch(`${base}${url}`, {
       method, headers: { 'x-api-key': k, 'content-type': 'application/json' }, body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),

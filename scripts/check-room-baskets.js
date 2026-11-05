@@ -33,8 +33,8 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
     const mkBooking = (guestId, status, { website = true, ago = '2 hours' } = {}) => {
       const d = day++;
       return one(
-        `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price, status, website_checkout, created_at)
-         VALUES ($1, $2, $3, DATE '2030-01-01' + $4::int, DATE '2030-01-02' + $4::int, 300, $5, $6, now() - $7::interval) RETURNING id`,
+        `INSERT INTO booking (property_id, guest_id, room_id, room_type_id, check_in, check_out, total_price, status, website_checkout, created_at)
+         VALUES ($1, $2, $3, (SELECT room_type_id FROM room WHERE id = $3), DATE '2030-01-01' + $4::int, DATE '2030-01-02' + $4::int, 300, $5, $6, now() - $7::interval) RETURNING id`,
         [P, guestId, room, d * 2, status, website, ago]);
     };
     const openIds = async () => (await listOpenRoomBaskets(db, P, 50)).map((b) => b.id);

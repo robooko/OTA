@@ -316,7 +316,7 @@ const apiKeys = require('../src/lib/apiKeys');
         const insert = async (c, availMap) => {
           assert.equal(availMap[d0].is_available, true);
           return (await client.query(
-            `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price) VALUES ($1, $2, $3, $4, $5, 100) RETURNING *`,
+            `INSERT INTO booking (property_id, guest_id, room_id, room_type_id, check_in, check_out, total_price) VALUES ($1, $2, $3, (SELECT room_type_id FROM room WHERE id = $3), $4, $5, 100) RETURNING *`,
             [P, G, c.id, d0, d1])).rows[0];
         };
         let r = await placeBooking(client, { candidates, nights: [d0], insert });

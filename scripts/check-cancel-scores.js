@@ -25,7 +25,7 @@ const one = async (sql, p) => (await pool.query(sql, p)).rows[0];
       const rt = (await one(`INSERT INTO room_type (property_id, name, max_occupancy, base_rate) VALUES ($1, 'Std', 2, 100) RETURNING id`, [P])).id;
       const room = (await one(`INSERT INTO room (property_id, room_type_id, room_number) VALUES ($1, $2, '1') RETURNING id`, [P, rt])).id;
       const g = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'S', 'Core', $2) RETURNING id`, [P, `score-${P}@example.com`])).id;
-      return (await one(`INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price) VALUES ($1, $2, $3, '2030-01-01', '2030-01-03', 200) RETURNING id`, [P, g, room])).id;
+      return (await one(`INSERT INTO booking (property_id, guest_id, room_id, room_type_id, check_in, check_out, total_price) VALUES ($1, $2, $3, (SELECT room_type_id FROM room WHERE id = $3), '2030-01-01', '2030-01-03', 200) RETURNING id`, [P, g, room])).id;
     };
     const bA = await booking(A);
     const bB = await booking(B);

@@ -37,7 +37,7 @@ const T = (s) => new Date(s); // all fixture instants in UTC; property is Europe
 
     const guest = (email) => one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'Jo', 'Guest', $2) RETURNING id`, [P, email]);
     const stay = (guestId, cin, cout, status = 'confirmed') => one(
-      `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price, status) VALUES ($1, $2, $3, $4, $5, 300, $6) RETURNING id`,
+      `INSERT INTO booking (property_id, guest_id, room_id, room_type_id, check_in, check_out, total_price, status) VALUES ($1, $2, $3, (SELECT room_type_id FROM room WHERE id = $3), $4, $5, 300, $6) RETURNING id`,
       [P, guestId, room.id, cin, cout, status]);
     const dinner = (email, date, start, end, status = 'confirmed') => one(
       `INSERT INTO restaurant_reservation (property_id, table_id, reservation_date, start_time, end_time, contact_name, contact_email, party_size, status)

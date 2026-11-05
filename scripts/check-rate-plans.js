@@ -141,8 +141,8 @@ const {
      ON CONFLICT DO NOTHING`, [P, [R1, R2, R3, R4]]);
   const G = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'Ana', 'Guest', $2) RETURNING id`, [P, `ana-${tag}@example.test`])).id;
   const insertBooking = async ({ room: r, check_in, check_out, status }) => (await one(
-    `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price, status)
-     VALUES ($1, $2, $3, $4, $5, 100, $6) RETURNING id`, [P, G, r, check_in, check_out, status])).id;
+    `INSERT INTO booking (property_id, guest_id, room_id, room_type_id, check_in, check_out, total_price, status)
+     VALUES ($1, $2, $3, (SELECT room_type_id FROM room WHERE id = $3), $4, $5, 100, $6) RETURNING id`, [P, G, r, check_in, check_out, status])).id;
 
   try {
     // ---- Task 2: schema, expired status, room_booking_url ----
@@ -549,8 +549,8 @@ const {
     await check('a due hold is captured even behind 200 not-yet-due holds', async () => {
       // 202 confirmed holds far ahead (deadline not reached), inserted first.
       await pool.query(
-        `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, total_price, status, stripe_payment_intent_id, rate_plan_terms)
-         SELECT $1, $2, r, d::date, d::date + 1, 100, 'confirmed', 'pi_not_due',
+        `INSERT INTO booking (property_id, guest_id, room_id, room_type_id, check_in, check_out, total_price, status, stripe_payment_intent_id, rate_plan_terms)
+         SELECT $1, $2, r, (SELECT room_type_id FROM room WHERE id = r), d::date, d::date + 1, 100, 'confirmed', 'pi_not_due',
                 '{"refundable":true,"cancel_cutoff_hours":48,"payment_mode":"hold","mode_used":"hold"}'
          FROM unnest($3::uuid[]) r, generate_series('2031-01-01'::date, '2031-04-11'::date, '1 day') d`,
         [P, G, [R3, R4]]);
