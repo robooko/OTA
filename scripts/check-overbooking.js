@@ -59,6 +59,56 @@ async function book(P, body) {
 }
 
 const sections = {
+  async move() {
+    const ctrl = require('../src/controllers/bookings');
+    const P = await property('OB Move', { overbooking_enabled: true, oversell_max_pct: 100 });
+    const A = await roomType(P, 'Std', 100);
+    const D = await roomType(P, 'Deluxe', 200);
+    const [a1, a2, d1] = [await room(P, A, '1'), await room(P, A, '2'), await room(P, D, '9')];
+    await open(P, [a1, a2, d1], addDays(TODAY, -2), 30);
+    const d = addDays(TODAY, 10);
+
+    // move upgrade logs reason, keeps price and sold type, frees the old room
+    const b = await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 2) });
+    const mv = await call(ctrl.moveBooking, P, { params: { id: b.body.id }, body: { room_id: d1, from: d } });
+    assert.equal(mv.status, 200, JSON.stringify(mv.body));
+    assert.deepEqual((await nightsOf(b.body.id)).map((n) => n.room_id), [d1, d1]);
+    assert.equal((await one(`SELECT reason FROM booking_room_move WHERE booking_id = $1 ORDER BY moved_at DESC LIMIT 1`, [b.body.id])).reason, 'upgrade', 'move upgrade logs reason');
+    const after = await one('SELECT total_price, room_type_id, room_id FROM booking WHERE id = $1', [b.body.id]);
+    assert.equal(Number(after.total_price), 200, 'move keeps price'); assert.equal(after.room_type_id, A); assert.equal(after.room_id, d1);
+    assert.equal((await one(`SELECT is_available FROM room_availability WHERE room_id = $1 AND date = $2`, [a1, d])).is_available, true, 'old room reopened');
+    assert.equal((await call(ctrl.moveBooking, P, { params: { id: b.body.id }, body: { room_id: d1, reason: 'nope' } })).status, 400);
+
+    // check-in without room -> 409 room_required; with room_id places tonight only
+    const T = TODAY;
+    await pool.query(`INSERT INTO room_type_oversell (property_id, room_type_id, date, model_allowance) VALUES ($1, $2, $3, 2), ($1, $2, $4, 2)`, [P, A, T, addDays(T, 1)]);
+    const x1 = await book(P, { room_type_id: A, check_in: T, check_out: addDays(T, 2) });                 // a1
+    const x2 = await book(P, { room_type_id: A, check_in: addDays(T, 1), check_out: addDays(T, 2) });    // a2 tomorrow
+    const w = await book(P, { room_type_id: A, check_in: T, check_out: addDays(T, 2) });                  // no room both nights? a2 free tonight only
+    assert.equal(x1.body.room_id, a1); assert.equal(x2.body.room_id, a2); assert.equal(w.body.room_id, null);
+    const noRoom = await call(ctrl.updateBooking, P, { params: { id: w.body.id }, body: { status: 'checked_in' } });
+    assert.equal(noRoom.status, 409); assert.equal(noRoom.body.error, 'room_required', 'check-in without room -> 409 room_required');
+    const ci = await call(ctrl.updateBooking, P, { params: { id: w.body.id }, body: { status: 'checked_in', room_id: a2 } });
+    assert.equal(ci.status, 200, JSON.stringify(ci.body));
+    assert.deepEqual((await nightsOf(w.body.id)).map((n) => n.room_id), [a2, null], 'check-in with room_id for tonight only');
+
+    // walk frees nights and assigns waiting; walk refused on checked_in
+    const wd = addDays(TODAY, 20);
+    await pool.query(`INSERT INTO room_type_oversell (property_id, room_type_id, date, model_allowance) VALUES ($1, $2, $3, 1)`, [P, D, wd]);
+    const k1 = await book(P, { room_type_id: D, check_in: wd, check_out: addDays(wd, 1) });
+    const k2 = await book(P, { room_type_id: D, check_in: wd, check_out: addDays(wd, 1) });
+    assert.equal(k2.body.room_id, null);
+    const walked = await call(ctrl.walkBooking, P, { params: { id: k1.body.id }, body: { note: 'sent to Hotel Sol' } });
+    assert.equal(walked.status, 200, JSON.stringify(walked.body));
+    const k1row = await one('SELECT status, metadata FROM booking WHERE id = $1', [k1.body.id]);
+    assert.equal(k1row.status, 'walked'); assert.equal(k1row.metadata.walk_note, 'sent to Hotel Sol');
+    assert.deepEqual(await nightsOf(k1.body.id), []);
+    assert.deepEqual((await nightsOf(k2.body.id)).map((n) => n.room_id), [d1], 'walk frees nights and assigns waiting');
+    assert.equal((await call(ctrl.walkBooking, P, { params: { id: w.body.id }, body: {} })).status, 409, 'walk refused on checked_in');
+    assert.equal((await call(ctrl.updateBooking, P, { params: { id: k2.body.id }, body: { status: 'walked' } })).status, 400, 'walked only via /walk');
+    assert.equal((await call(ctrl.cancelBooking, P, { params: { id: k1.body.id }, extra: { auth_method: 'clerk', query: {} } })).status, 404, 'walked booking cannot be cancelled');
+  },
+
   async release() {
     const { cancelBooking, updateBooking } = require('../src/controllers/bookings');
     const P = await property('OB Release', { overbooking_enabled: true, oversell_max_pct: 100 });

@@ -14,6 +14,10 @@ router.post('/cancel-scores', staffOrFullKey, ctrl.addCancelScores);
 router.get('/:id', authenticateOrApiKey, ctrl.getBooking);
 router.post('/', authenticateOrApiKey, ctrl.createBooking);
 router.put('/:id', staffOrFullKey, ctrl.updateBooking);
+// Room moves (upgrade / downgrade / check-in placement) and walked guests --
+// see the 2026-11-05 room overbooking spec.
+router.post('/:id/move', staffOrFullKey, ctrl.moveBooking);
+router.post('/:id/walk', staffOrFullKey, ctrl.walkBooking);
 router.delete('/:id', authenticateOrApiKey, ctrl.cancelBooking);
 // Card payment for bookings on a rate plan -- see the room rate plans spec.
 router.post('/:id/payment-intent', authenticateOrApiKey, ctrl.createPaymentIntent);

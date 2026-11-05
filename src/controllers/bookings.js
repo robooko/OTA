@@ -324,8 +324,11 @@ async function updateBooking(req, res, next) {
     if (status === 'pending_payment' || status === 'expired') {
       return res.status(400).json({ error: `status ${status} is set by the system` });
     }
+    if (status === 'walked') {
+      return res.status(400).json({ error: 'Walk a guest with POST /api/bookings/{id}/walk' });
+    }
 
-    const beforeRes = await pool.query('SELECT status, room_id FROM booking WHERE id = $1 AND property_id = $2', [
+    const beforeRes = await pool.query('SELECT * FROM booking WHERE id = $1 AND property_id = $2', [
       req.params.id,
       req.property_id,
     ]);
@@ -360,9 +363,29 @@ async function updateBooking(req, res, next) {
 
     // Soft check-in gate: the room hasn't been cleaned (or passed
     // inspection) yet. Housekeeping properties only; force overrides.
+    // Checking in needs a room for tonight. An oversold guest (or one whose
+    // stay is split) gets one here: room_id places tonight only; later nights
+    // keep waiting or are moved by staff.
+    let tonightRoom = beforeRes.rows[0].room_id;
+    if (status === 'checked_in' && statusBefore !== 'checked_in') {
+      const b = beforeRes.rows[0];
+      const today = await roomNights.propertyToday(pool, req.property_id);
+      const night = b.check_in > today ? b.check_in : today;
+      const held = (await pool.query('SELECT room_id FROM booking_night WHERE booking_id = $1 AND night = $2', [b.id, night])).rows[0];
+      tonightRoom = held?.room_id ?? tonightRoom;
+      if (held && !held.room_id) {
+        if (!isValidUuid(req.body.room_id)) {
+          return res.status(409).json({ error: 'room_required', details: `No room held for ${night}; pass room_id to check in` });
+        }
+        const moved = await moveInTransaction(req, b.id, { roomId: req.body.room_id, from: night, to: roomNights.addDaysIso(night, 1) });
+        if (moved.error) return res.status(moved.status).json({ error: moved.error });
+        tonightRoom = req.body.room_id;
+      }
+    }
+
     if (status === 'checked_in' && statusBefore !== 'checked_in' && req.body.force !== true
         && await housekeeping.housekeepingEnabled(pool, req.property_id)) {
-      const room = (await pool.query('SELECT housekeeping_status FROM room WHERE id = $1', [beforeRes.rows[0].room_id])).rows[0];
+      const room = (await pool.query('SELECT housekeeping_status FROM room WHERE id = $1', [tonightRoom])).rows[0];
       if (room && room.housekeeping_status !== 'ready') {
         return res.status(409).json({ error: 'Room not ready', housekeeping_status: room.housekeeping_status });
       }
@@ -420,7 +443,7 @@ async function cancelBooking(req, res, next) {
     await client.query('BEGIN');
 
     const booking = await roomPayments.lockBooking(client, req.params.id, req.property_id);
-    if (!booking || booking.status === 'cancelled' || booking.status === 'expired') {
+    if (!booking || ['cancelled', 'expired', 'walked'].includes(booking.status)) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Booking not found or already cancelled' });
     }
@@ -536,4 +559,98 @@ async function addCancelScores(req, res, next) {
   }
 }
 
-module.exports = { addCancelScores, listRoomBaskets, listBookings, getBooking, createBooking, updateBooking, cancelBooking, createPaymentIntent, confirmPayment };
+// Locks the booking and runs roomNights.moveNights in its own transaction.
+// Returns { booking } or { status, error } (4xx from the move rules).
+async function moveInTransaction(req, bookingId, { roomId, from, to, reason = null }) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const booking = await roomPayments.lockBooking(client, bookingId, req.property_id);
+    if (!booking) { await client.query('ROLLBACK'); return { status: 404, error: 'Booking not found' }; }
+    if (!roomNights.HOLDING.includes(booking.status)) {
+      await client.query('ROLLBACK');
+      return { status: 409, error: `A ${booking.status} booking holds no rooms` };
+    }
+    const today = await roomNights.propertyToday(client, req.property_id);
+    from ??= booking.check_in > today ? booking.check_in : today;
+    to ??= booking.check_out;
+    try {
+      await roomNights.moveNights(client, booking, { roomId, from, to, reason, movedBy: req.user?.id ?? null });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (err.status && err.status < 500) return { status: err.status, error: err.message };
+      throw err;
+    }
+    await client.query('COMMIT');
+    await roomPayments.refreshAvailabilityView();
+    return { booking };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// POST /api/bookings/:id/move -- staff put a booking in any room (upgrade,
+// downgrade, mid-stay move, or a room for nights it was waiting on). The
+// price never changes; refunds are manual.
+async function moveBooking(req, res, next) {
+  try {
+    const { room_id, from, to, reason } = req.body ?? {};
+    if (!isValidUuid(room_id)) return res.status(400).json({ error: 'room_id must be a uuid' });
+    if ((from !== undefined && !isValidDate(from)) || (to !== undefined && !isValidDate(to))) {
+      return res.status(400).json({ error: 'from and to must be YYYY-MM-DD' });
+    }
+    if (reason !== undefined && !['upgrade', 'downgrade', 'move'].includes(reason)) {
+      return res.status(400).json({ error: 'reason must be upgrade, downgrade or move' });
+    }
+    const moved = await moveInTransaction(req, req.params.id, { roomId: room_id, from, to, reason });
+    if (moved.error) return res.status(moved.status).json({ error: moved.error });
+    const full = await fetchJoinedBooking(req.params.id);
+    publishBookingStatusChanged(req.property_id, full).catch((err) => console.error('Ably publish failed:', err.message));
+    res.json(full);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /api/bookings/:id/walk -- the hotel can't house the guest and sends
+// them elsewhere. Not a cancellation: no rate plan terms, no email, kept
+// apart for the overbooking backtest. Frees every night.
+async function walkBooking(req, res, next) {
+  const note = req.body?.note;
+  if (note !== undefined && (typeof note !== 'string' || note.length > 500)) {
+    return res.status(400).json({ error: 'note must be a string of at most 500 characters' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const booking = await roomPayments.lockBooking(client, req.params.id, req.property_id);
+    if (!booking) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Booking not found' }); }
+    if (!['confirmed', 'pending_payment'].includes(booking.status)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `A ${booking.status} booking can't be walked` });
+    }
+    await client.query(
+      `UPDATE booking SET status = 'walked', payment_due_at = NULL,
+              metadata = CASE WHEN $2::text IS NULL THEN metadata ELSE metadata || jsonb_build_object('walk_note', $2::text) END
+       WHERE id = $1`, [booking.id, note ?? null]);
+    await roomNights.releaseNights(client, booking);
+    await client.query('COMMIT');
+    await roomPayments.refreshAvailabilityView();
+    const full = await fetchJoinedBooking(booking.id);
+    publishBookingStatusChanged(req.property_id, full).catch((err) => console.error('Ably publish failed:', err.message));
+    res.json(full);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = {
+  addCancelScores, listRoomBaskets, listBookings, getBooking, createBooking, updateBooking, cancelBooking,
+  createPaymentIntent, confirmPayment, moveBooking, walkBooking,
+};
