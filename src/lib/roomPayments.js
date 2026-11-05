@@ -47,12 +47,10 @@ async function fetchJoinedBooking(id) {
   return rows[0];
 }
 
+// The booking stops holding its nights; freed rooms go to waiting bookings
+// (see roomNights.releaseNights).
 async function releaseAvailability(client, booking) {
-  await client.query(
-    `UPDATE room_availability SET is_available = true
-     WHERE room_id = $1 AND date >= $2 AND date < $3`,
-    [booking.room_id, booking.check_in, booking.check_out]
-  );
+  await require('./roomNights').releaseNights(client, booking);
 }
 
 // After COMMIT: older Postgres rejects CONCURRENTLY inside a transaction

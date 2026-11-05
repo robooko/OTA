@@ -59,6 +59,45 @@ async function book(P, body) {
 }
 
 const sections = {
+  async release() {
+    const { cancelBooking, updateBooking } = require('../src/controllers/bookings');
+    const P = await property('OB Release', { overbooking_enabled: true, oversell_max_pct: 100 });
+    const A = await roomType(P);
+    const r1 = await room(P, A, '1');
+    const d = addDays(TODAY, 10);
+    await open(P, [r1], addDays(TODAY, -3), 30);
+    await pool.query(`INSERT INTO room_type_oversell (property_id, room_type_id, date, model_allowance) VALUES ($1, $2, $3, 1), ($1, $2, $4, 1)`, [P, A, d, addDays(d, 1)]);
+
+    // cancel frees room and assigns waiting
+    const b1 = await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 2) });
+    const b2 = await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 2) });
+    assert.equal(b1.body.room_id, r1); assert.equal(b2.body.room_id, null);
+    assert.equal((await call(cancelBooking, P, { params: { id: b1.body.id }, extra: { auth_method: 'clerk', query: {} } })).status, 200);
+    assert.deepEqual(await nightsOf(b1.body.id), [], 'cancelled holds nothing');
+    assert.deepEqual((await nightsOf(b2.body.id)).map((n) => n.room_id), [r1, r1], 'cancel frees room and assigns waiting');
+    assert.equal((await one(`SELECT room_id FROM booking WHERE id = $1`, [b2.body.id])).room_id, r1, 'current room synced');
+    assert.equal((await one(`SELECT count(*)::int AS n FROM booking_room_move WHERE booking_id = $1 AND reason = 'assign'`, [b2.body.id])).n, 1);
+
+    // early check-out frees future nights only
+    const cin = addDays(TODAY, -1);
+    const e = await book(P, { room_type_id: A, check_in: addDays(TODAY, 20), check_out: addDays(TODAY, 21) }); // placeholder guest/booking
+    await pool.query(`DELETE FROM booking_night WHERE booking_id = $1`, [e.body.id]);
+    await pool.query(`UPDATE booking SET check_in = $2, check_out = $3, status = 'checked_in' WHERE id = $1`, [e.body.id, cin, addDays(TODAY, 2)]);
+    for (let i = 0; i < 3; i++) await hold(P, e.body.id, addDays(cin, i), r1);
+    await pool.query(`UPDATE room_availability SET is_available = false WHERE room_id = $1 AND date >= $2 AND date < $3`, [r1, cin, addDays(TODAY, 2)]);
+    const out = await call(updateBooking, P, { params: { id: e.body.id }, body: { status: 'checked_out', force: true } });
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.deepEqual((await nightsOf(e.body.id)).map((n) => n.night), [cin], 'early check-out frees future nights only');
+    assert.equal((await one(`SELECT is_available FROM room_availability WHERE room_id = $1 AND date = $2`, [r1, TODAY])).is_available, true, 'flag reopened');
+
+    // expire releases
+    const x = await book(P, { room_type_id: A, check_in: addDays(TODAY, 25), check_out: addDays(TODAY, 26) });
+    await pool.query(`UPDATE booking SET status = 'pending_payment', payment_due_at = now() - interval '1 minute' WHERE id = $1`, [x.body.id]);
+    await require('../src/lib/roomPayments').expireOnce();
+    assert.equal((await one(`SELECT status FROM booking WHERE id = $1`, [x.body.id])).status, 'expired');
+    assert.deepEqual(await nightsOf(x.body.id), [], 'expire releases');
+  },
+
   async hold() {
     const P = await property('OB Hold', { overbooking_enabled: true, oversell_max_pct: 50 });
     const A = await roomType(P);

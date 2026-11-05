@@ -378,6 +378,23 @@ async function updateBooking(req, res, next) {
     );
     if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
 
+    // Checking out frees tonight and every later night (an early departure
+    // puts those rooms back on sale / to waiting bookings).
+    if (rows[0].status === 'checked_out' && statusBefore !== 'checked_out') {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await roomNights.releaseNights(client, rows[0], await roomNights.propertyToday(client, req.property_id));
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+      await roomPayments.refreshAvailabilityView();
+    }
+
     const bookedFull = (await fetchJoinedBooking(rows[0].id)) ?? rows[0];
 
     if (rows[0].status !== statusBefore) {

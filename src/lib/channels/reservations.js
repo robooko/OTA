@@ -7,11 +7,13 @@
 //                   collect?: hotel|channel, guest: { first_name, last_name, email?, phone? } }
 const pool = require('../../db');
 const { isValidDate } = require('../../middleware/validate');
-const { placeBooking, stayNights } = require('../roomPlacement');
+const { stayNights } = require('../roomPlacement');
+const roomNights = require('../roomNights');
 const roomPayments = require('../roomPayments');
 const { publishNewBooking, publishBookingStatusChanged, publishChannelReservationRejected } = require('../ably');
 
 const IN_HOUSE = ['checked_in', 'checked_out'];
+const CLOSED = ['cancelled', 'expired', 'walked'];
 const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
 
 function invalidField(r) {
@@ -48,10 +50,7 @@ async function resolveStay(client, channel, r) {
     const { currency } = (await client.query('SELECT currency FROM property WHERE id = $1', [channel.property_id])).rows[0];
     if (String(r.currency).toUpperCase() !== String(currency).toUpperCase()) return { reason: 'currency mismatch' };
   }
-  const { rows: candidates } = await client.query(
-    `SELECT id FROM room WHERE room_type_id = $1 AND property_id = $2 AND status = 'active' ORDER BY room_number`,
-    [mapping.room_type_id, channel.property_id]);
-  return { mapping, candidates };
+  return { mapping };
 }
 
 // The channel's payment row tracks who holds the guest's money: present and
@@ -85,6 +84,20 @@ async function lockByRef(client, channel, ref) {
     'SELECT * FROM booking WHERE channel_id = $1 AND channel_ref = $2 FOR UPDATE', [channel.id, ref])).rows[0];
 }
 
+// false = the type isn't sellable on some night of the stay.
+async function holdChannelStay(client, channel, booking, stay, r) {
+  try {
+    await roomNights.holdStay(client, {
+      propertyId: channel.property_id, bookingId: booking.id, roomTypeId: stay.mapping.room_type_id,
+      nights: stayNights(r.check_in, r.check_out),
+    });
+    return true;
+  } catch (err) {
+    if (err.status === 409) return false;
+    throw err;
+  }
+}
+
 async function handleNew(client, channel, r) {
   const existing = (await client.query(
     'SELECT id FROM booking WHERE channel_id = $1 AND channel_ref = $2', [channel.id, r.channel_ref])).rows[0];
@@ -92,16 +105,14 @@ async function handleNew(client, channel, r) {
   const stay = await resolveStay(client, channel, r);
   if (stay.reason) return { outcome: 'rejected', reason: stay.reason };
   const guestId = await findGuest(client, channel, r);
-  const { booked } = await placeBooking(client, {
-    candidates: stay.candidates,
-    nights: stayNights(r.check_in, r.check_out),
-    insert: async (room) => (await client.query(
-      `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, status, rate_plan_id, channel_id, channel_ref, room_type_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'confirmed', $8, $9, $10, $11) RETURNING *`,
-      [channel.property_id, guestId, room.id, r.check_in, r.check_out, r.guests ?? 1, r.total_price.toFixed(2),
-        stay.mapping.rate_plan_id, channel.id, r.channel_ref, stay.mapping.room_type_id])).rows[0],
-  });
-  if (!booked) return { outcome: 'rejected', reason: 'no room available' };
+  const booked = (await client.query(
+    `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, status, rate_plan_id, channel_id, channel_ref, room_type_id)
+     VALUES ($1, $2, NULL, $3, $4, $5, $6, 'confirmed', $7, $8, $9, $10) RETURNING *`,
+    [channel.property_id, guestId, r.check_in, r.check_out, r.guests ?? 1, r.total_price.toFixed(2),
+      stay.mapping.rate_plan_id, channel.id, r.channel_ref, stay.mapping.room_type_id])).rows[0];
+  // Same rules as a direct type booking: a free room, else the oversell
+  // allowance, else rejected (the caller rolls the insert back).
+  if (!(await holdChannelStay(client, channel, booked, stay, r))) return { outcome: 'rejected', reason: 'no room available' };
   await syncChannelPayment(client, channel, r, booked);
   return { outcome: 'created', booking_id: booked.id };
 }
@@ -110,21 +121,19 @@ async function handleModify(client, channel, r) {
   const booking = await lockByRef(client, channel, r.channel_ref);
   if (!booking) return { outcome: 'rejected', reason: 'unknown reservation' };
   if (IN_HOUSE.includes(booking.status)) return { outcome: 'rejected', reason: 'booking already in house' };
-  if (booking.status === 'cancelled' || booking.status === 'expired') return { outcome: 'rejected', reason: 'booking cancelled' };
+  if (CLOSED.includes(booking.status)) return { outcome: 'rejected', reason: 'booking cancelled' };
   const stay = await resolveStay(client, channel, r);
   if (stay.reason) return { outcome: 'rejected', reason: stay.reason };
-  // Free the old nights, then place the new stay; the UPDATE moves this same
-  // row, so it never collides with itself. Failure rolls everything back.
-  await roomPayments.releaseAvailability(client, booking);
-  const { booked } = await placeBooking(client, {
-    candidates: stay.candidates,
-    nights: stayNights(r.check_in, r.check_out),
-    insert: async (room) => (await client.query(
-      `UPDATE booking SET room_id = $2, check_in = $3, check_out = $4, guests = $5, total_price = $6, rate_plan_id = $7
-       WHERE id = $1 RETURNING *`,
-      [booking.id, room.id, r.check_in, r.check_out, r.guests ?? booking.guests, r.total_price.toFixed(2), stay.mapping.rate_plan_id])).rows[0],
-  });
-  if (!booked) return { outcome: 'rejected', reason: 'no room available' };
+  // Free the old nights (no refill yet, so nobody waiting grabs them), hold
+  // the new stay, then hand whatever it didn't reuse to waiting bookings.
+  // Failure rolls everything back.
+  const freed = await roomNights.releaseNights(client, booking, null, { refillNow: false });
+  const booked = (await client.query(
+    `UPDATE booking SET room_id = NULL, check_in = $2, check_out = $3, guests = $4, total_price = $5, rate_plan_id = $6, room_type_id = $7
+     WHERE id = $1 RETURNING *`,
+    [booking.id, r.check_in, r.check_out, r.guests ?? booking.guests, r.total_price.toFixed(2), stay.mapping.rate_plan_id, stay.mapping.room_type_id])).rows[0];
+  if (!(await holdChannelStay(client, channel, booked, stay, r))) return { outcome: 'rejected', reason: 'no room available' };
+  await roomNights.refill(client, channel.property_id, freed);
   await syncChannelPayment(client, channel, r, booked);
   return { outcome: 'modified', booking_id: booked.id };
 }
@@ -132,7 +141,7 @@ async function handleModify(client, channel, r) {
 async function handleCancel(client, channel, r) {
   const booking = await lockByRef(client, channel, r.channel_ref);
   if (!booking) return { outcome: 'rejected', reason: 'unknown reservation' };
-  if (booking.status === 'cancelled' || booking.status === 'expired') return { outcome: 'duplicate', booking_id: booking.id };
+  if (CLOSED.includes(booking.status)) return { outcome: 'duplicate', booking_id: booking.id };
   if (IN_HOUSE.includes(booking.status)) return { outcome: 'rejected', reason: 'booking already in house' };
   await client.query(`UPDATE booking SET status = 'cancelled', payment_due_at = NULL WHERE id = $1`, [booking.id]);
   await roomPayments.releaseAvailability(client, booking);

@@ -171,6 +171,51 @@ async function holdStay(client, { propertyId, bookingId, roomTypeId, nights, pic
   return { placedNights: roomId ? nights : [], unplacedNights: roomId ? [] : nights, bumped };
 }
 
+// Give waiting bookings sold as roomTypeId (nights without a room, among
+// `nights`) a room of that type free on all their unplaced nights, oldest
+// booking first. Cross-type placement is staff-only (moveNights).
+async function assignWaiting(client, propertyId, roomTypeId, nights) {
+  await lockType(client, roomTypeId);
+  const { rows: waiting } = await client.query(
+    `SELECT b.id FROM booking b
+     WHERE b.property_id = $1 AND b.room_type_id = $2 AND b.status = ANY($4::text[])
+       AND EXISTS (SELECT 1 FROM booking_night bn WHERE bn.booking_id = b.id AND bn.room_id IS NULL AND bn.night = ANY($3::date[]))
+     ORDER BY b.created_at, b.id`, [propertyId, roomTypeId, nights, HOLDING]);
+  for (const { id } of waiting) {
+    const { rows } = await client.query(
+      `SELECT night::text FROM booking_night WHERE booking_id = $1 AND room_id IS NULL ORDER BY night`, [id]);
+    const mine = rows.map((r) => r.night);
+    const to = await freeRoom(client, propertyId, roomTypeId, mine);
+    if (!to) continue;
+    await setNights(client, id, mine, to);
+    await logMove(client, { propertyId, bookingId: id, from: mine[0], to: addDaysIso(mine.at(-1), 1), toRoomId: to, reason: 'assign' });
+    await syncCurrentRoom(client, id);
+  }
+}
+
+// A booking stops holding nights (all, or from fromNight on): cancel, expire,
+// walk, early check-out, channel cancel/modify. Freed rooms go to whoever is
+// waiting for that room's type.
+async function releaseNights(client, booking, fromNight = null, { refillNow = true } = {}) {
+  const { rows } = await client.query(
+    `DELETE FROM booking_night WHERE booking_id = $1 AND ($2::date IS NULL OR night >= $2::date)
+     RETURNING night::text, room_id`, [booking.id, fromNight]);
+  const freed = new Map();
+  for (const r of rows) if (r.room_id) (freed.get(r.room_id) ?? freed.set(r.room_id, []).get(r.room_id)).push(r.night);
+  for (const [roomId, ns] of freed) await setFlags(client, roomId, ns, true);
+  if (refillNow) await refill(client, booking.property_id, freed);
+  return freed; // refillNow false: the caller re-holds first, then refill()s
+}
+
+// assignWaiting for each freed room's type over the nights it freed.
+async function refill(client, propertyId, freed) {
+  if (!freed.size) return;
+  const { rows: types } = await client.query('SELECT id, room_type_id FROM room WHERE id = ANY($1::uuid[])', [[...freed.keys()]]);
+  const byType = new Map();
+  for (const t of types) byType.set(t.room_type_id, [...(byType.get(t.room_type_id) ?? []), ...freed.get(t.id)]);
+  for (const type of [...byType.keys()].sort()) await assignWaiting(client, propertyId, type, [...new Set(byType.get(type))]);
+}
+
 function addDaysIso(d, n) {
   const x = new Date(`${d}T00:00:00Z`);
   x.setUTCDate(x.getUTCDate() + n);
@@ -179,4 +224,5 @@ function addDaysIso(d, n) {
 
 module.exports = {
   HOLDING, typeCounts, lockType, propertyToday, logMove, freeRoom, setNights, syncCurrentRoom, holdStay, addDaysIso,
+  assignWaiting, releaseNights, refill,
 };
