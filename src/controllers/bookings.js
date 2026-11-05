@@ -8,7 +8,8 @@ const roomEmails = require('../lib/roomBookingEmails');
 const roomPayments = require('../lib/roomPayments');
 const housekeeping = require('../lib/housekeeping');
 const { fetchJoinedBooking, CANCEL_SCORE_SQL } = roomPayments;
-const { stayNights, placeBooking } = require('../lib/roomPlacement');
+const { stayNights } = require('../lib/roomPlacement');
+const roomNights = require('../lib/roomNights');
 
 function isValidMetadata(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -170,7 +171,7 @@ async function createBooking(req, res, next) {
       return res.status(404).json({ error: 'Guest not found' });
     }
 
-    let candidates;
+    let baseRate;
     let rateTypeId;
     if (room_id) {
       const roomRes = await client.query(
@@ -187,24 +188,17 @@ async function createBooking(req, res, next) {
         await client.query('ROLLBACK');
         return res.status(409).json({ error: 'Room is not active' });
       }
-      candidates = [{ id: roomRes.rows[0].id, base_rate: roomRes.rows[0].base_rate }];
+      baseRate = parseFloat(roomRes.rows[0].base_rate);
       rateTypeId = roomRes.rows[0].room_type_id;
     } else {
       const typeRes = await client.query(
-        'SELECT id FROM room_type WHERE id = $1 AND property_id = $2', [room_type_id, req.property_id]
+        'SELECT id, base_rate FROM room_type WHERE id = $1 AND property_id = $2', [room_type_id, req.property_id]
       );
       if (!typeRes.rows.length) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Room type not found' });
       }
-      const roomsRes = await client.query(
-        `SELECT r.id, rt.base_rate
-         FROM room r JOIN room_type rt ON rt.id = r.room_type_id
-         WHERE r.room_type_id = $1 AND r.property_id = $2 AND r.status = 'active'
-         ORDER BY r.room_number`,
-        [room_type_id, req.property_id]
-      );
-      candidates = roomsRes.rows;
+      baseRate = parseFloat(typeRes.rows[0].base_rate);
       rateTypeId = room_type_id;
     }
 
@@ -246,8 +240,8 @@ async function createBooking(req, res, next) {
       }
     }
 
-    // Dated type-level rates for the stay -- one fetch covers every candidate,
-    // since both branches yield rooms of a single room type.
+    // Nightly rate: a picked room's override, else the type's dated rate, else
+    // base. A type booking has no room yet, so overrides never apply to it.
     const { rows: typeRateRows } = await client.query(
       `SELECT date, rate FROM room_type_rate
        WHERE room_type_id = $1 AND date >= $2 AND date < $3`,
@@ -255,45 +249,44 @@ async function createBooking(req, res, next) {
     );
     const typeRates = {};
     for (const row of typeRateRows) typeRates[row.date] = parseFloat(row.rate);
-
-    const { booked, lastUnavailableDate } = await placeBooking(client, {
-      candidates,
-      nights,
-      insert: async (candidate, availMap) => {
-        let total = 0;
-        const baseRate = parseFloat(candidate.base_rate);
-        for (const date of nights) {
-          const entry = availMap[date];
-          let night;
-          if (entry && entry.override_rate != null) night = parseFloat(entry.override_rate);
-          else if (typeRates[date] != null) night = typeRates[date];
-          else night = baseRate;
-          total += plan ? applyAdjustment(night, plan.adjustment_pct) : night;
-        }
-        // Stripe refuses a zero charge: a free stay on a plan needs no card.
-        const card = needsCard && toCents(total) > 0;
-        const status = card ? 'pending_payment' : 'confirmed';
-        const payWindow = card ? PAY_WINDOW_MINUTES[viaApiKey ? 'api_key' : 'staff'] : null;
-        const terms = plan ? termsSnapshot(plan, { pay_at_hotel: !card }) : null;
-        const bookingRes = await client.query(
-          `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata,
-                                status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout, room_type_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                   CASE WHEN $12::int IS NULL THEN NULL ELSE now() + make_interval(mins => $12::int) END, $13, $14) RETURNING *`,
-          [req.property_id, guest_id, candidate.id, check_in, check_out, guests || 1, total.toFixed(2), metadata ?? {},
-            status, plan?.id ?? null, terms, payWindow, card && viaApiKey, rateTypeId]
-        );
-        return bookingRes.rows[0];
-      },
-    });
-
-    if (!booked) {
-      await client.query('ROLLBACK');
-      if (room_id) {
-        return res.status(409).json({ error: lastUnavailableDate ? `Room not available on ${lastUnavailableDate}` : 'Room already booked for this period' });
-      }
-      return res.status(409).json({ error: 'No rooms of this type available for the requested dates' });
+    const overrides = {};
+    if (room_id) {
+      const { rows: ov } = await client.query(
+        `SELECT date, override_rate FROM room_availability
+         WHERE room_id = $1 AND date = ANY($2::date[]) AND override_rate IS NOT NULL`, [room_id, nights]);
+      for (const row of ov) overrides[row.date] = parseFloat(row.override_rate);
     }
+    let total = 0;
+    for (const date of nights) {
+      const night = overrides[date] ?? typeRates[date] ?? baseRate;
+      total += plan ? applyAdjustment(night, plan.adjustment_pct) : night;
+    }
+    // Stripe refuses a zero charge: a free stay on a plan needs no card.
+    const card = needsCard && toCents(total) > 0;
+    const status = card ? 'pending_payment' : 'confirmed';
+    const payWindow = card ? PAY_WINDOW_MINUTES[viaApiKey ? 'api_key' : 'staff'] : null;
+    const terms = plan ? termsSnapshot(plan, { pay_at_hotel: !card }) : null;
+    const { rows: [inserted] } = await client.query(
+      `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata,
+                            status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout, room_type_id, room_pick)
+       VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10,
+               CASE WHEN $11::int IS NULL THEN NULL ELSE now() + make_interval(mins => $11::int) END, $12, $13, $14) RETURNING id`,
+      [req.property_id, guest_id, check_in, check_out, guests || 1, total.toFixed(2), metadata ?? {},
+        status, plan?.id ?? null, terms, payWindow, card && viaApiKey, rateTypeId, !!room_id]
+    );
+    // Auto-assigns a room, takes the named one (bumping an auto-assigned
+    // holder), or holds the stay with no room against the oversell allowance.
+    try {
+      await roomNights.holdStay(client, {
+        propertyId: req.property_id, bookingId: inserted.id, roomTypeId: rateTypeId, nights,
+        pickRoomId: room_id ?? null, movedBy: req.user?.id ?? null,
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (err.status === 409) return res.status(409).json({ error: err.message });
+      throw err;
+    }
+    const booked = (await client.query('SELECT * FROM booking WHERE id = $1', [inserted.id])).rows[0];
 
     await client.query('COMMIT');
 

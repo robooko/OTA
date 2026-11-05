@@ -53,4 +53,130 @@ async function typeCounts(db, propertyId, roomTypeId, nights) {
   return out;
 }
 
-module.exports = { HOLDING, typeCounts };
+const conflict = (message) => Object.assign(new Error(message), { status: 409 });
+
+// Serialises sells of one room type (inside the caller's transaction), so two
+// bookings can't both take the last sellable slot.
+async function lockType(client, roomTypeId) {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext('rt:' || $1::text))`, [roomTypeId]);
+}
+
+async function propertyToday(db, propertyId) {
+  return (await db.query(
+    `SELECT (now() AT TIME ZONE COALESCE(timezone, 'UTC'))::date::text AS today FROM property WHERE id = $1`, [propertyId])).rows[0].today;
+}
+
+async function logMove(client, m) {
+  await client.query(
+    `INSERT INTO booking_room_move (property_id, booking_id, night_from, night_to, from_room_id, to_room_id, reason, moved_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [m.propertyId, m.bookingId, m.from, m.to, m.fromRoomId ?? null, m.toRoomId ?? null, m.reason, m.movedBy ?? null]);
+}
+
+// Open room_availability flags = the room is free on those nights (holds
+// close them; a missing row = beyond the seeded horizon = not sellable).
+const setFlags = (client, roomId, nights, open) => client.query(
+  'UPDATE room_availability SET is_available = $3 WHERE room_id = $1 AND date = ANY($2::date[])', [roomId, nights, open]);
+
+// First active room of the type (by room_number) free on every night, or null.
+async function freeRoom(client, propertyId, roomTypeId, nights, exceptRoomId = null) {
+  const { rows } = await client.query(
+    `SELECT r.id FROM room r
+     WHERE r.property_id = $1 AND r.room_type_id = $2 AND r.status = 'active' AND r.id IS DISTINCT FROM $4
+       AND (SELECT count(*) FROM room_availability ra
+            WHERE ra.room_id = r.id AND ra.date = ANY($3::date[]) AND ra.is_available
+              AND NOT EXISTS (SELECT 1 FROM booking_night h WHERE h.room_id = r.id AND h.night = ra.date)) = cardinality($3::date[])
+     ORDER BY r.room_number LIMIT 1`,
+    [propertyId, roomTypeId, nights, exceptRoomId]);
+  return rows[0]?.id ?? null;
+}
+
+// Put the given nights of a booking into roomId (null = no room), closing /
+// reopening flags. Rows must already exist (holdStay inserts them).
+async function setNights(client, bookingId, nights, roomId) {
+  const { rows: before } = await client.query(
+    `SELECT night::text, room_id FROM booking_night WHERE booking_id = $1 AND night = ANY($2::date[])`, [bookingId, nights]);
+  const vacated = new Map();
+  for (const b of before) if (b.room_id && b.room_id !== roomId) (vacated.get(b.room_id) ?? vacated.set(b.room_id, []).get(b.room_id)).push(b.night);
+  await client.query(`UPDATE booking_night SET room_id = $3 WHERE booking_id = $1 AND night = ANY($2::date[])`, [bookingId, nights, roomId]);
+  for (const [room, ns] of vacated) await setFlags(client, room, ns, true);
+  if (roomId) await setFlags(client, roomId, nights, false);
+  return vacated;
+}
+
+// booking.room_id = tonight's room once the stay has started, else the first
+// night's (null when that night has no room).
+async function syncCurrentRoom(client, bookingId) {
+  await client.query(
+    `UPDATE booking b SET room_id = (
+       SELECT bn.room_id FROM booking_night bn
+       WHERE bn.booking_id = b.id
+       ORDER BY (bn.night < GREATEST(b.check_in, (now() AT TIME ZONE COALESCE(p.timezone, 'UTC'))::date)), bn.night
+       LIMIT 1)
+     FROM property p WHERE p.id = b.property_id AND b.id = $1`, [bookingId]);
+}
+
+// Hold a new (or re-dated) stay: the booking row exists with its sold type;
+// its booking_night rows don't. pickRoomId = the guest/staff named a room.
+// Throws 409 when the type isn't sellable on some night, or a pick can't be had.
+async function holdStay(client, { propertyId, bookingId, roomTypeId, nights, pickRoomId = null, movedBy = null }) {
+  await lockType(client, roomTypeId);
+  const counts = await typeCounts(client, propertyId, roomTypeId, nights);
+  for (const n of nights) {
+    if (!(counts.get(`${roomTypeId}|${n}`)?.sellable >= 1)) throw conflict('No rooms of this type available for the requested dates');
+  }
+  const bumped = [];
+  let roomId = null;
+  if (pickRoomId) {
+    const { rows: flags } = await client.query(
+      `SELECT ra.date::text AS night, ra.is_available, h.booking_id, b.room_pick, b.status, b.check_in::text, b.room_type_id
+       FROM unnest($2::date[]) n(night)
+       LEFT JOIN room_availability ra ON ra.room_id = $1 AND ra.date = n.night
+       LEFT JOIN booking_night h ON h.room_id = $1 AND h.night = n.night
+       LEFT JOIN booking b ON b.id = h.booking_id
+       ORDER BY n.night`, [pickRoomId, nights]);
+    const { rows: [p] } = await client.query('SELECT room_lock_days FROM property WHERE id = $1', [propertyId]);
+    const today = await propertyToday(client, propertyId);
+    const lockedUntil = addDaysIso(today, p.room_lock_days);
+    const holders = new Map();
+    for (const [i, f] of flags.entries()) {
+      const night = nights[i];
+      if (f.night == null || (!f.is_available && !f.booking_id)) throw conflict(`Room not available on ${night}`);
+      if (!f.booking_id) continue;
+      if (f.room_pick || f.status === 'checked_in' || f.check_in <= lockedUntil) throw conflict(`Room not available on ${night}`);
+      (holders.get(f.booking_id) ?? holders.set(f.booking_id, { type: f.room_type_id, nights: [] }).get(f.booking_id)).nights.push(night);
+    }
+    for (const type of [...new Set([...holders.values()].map((h) => h.type))].filter((t) => t !== roomTypeId).sort()) await lockType(client, type);
+    for (const [holderId, h] of holders) {
+      await setNights(client, holderId, h.nights, null);
+      const to = await freeRoom(client, propertyId, h.type, h.nights, pickRoomId);
+      if (to) await setNights(client, holderId, h.nights, to);
+      await logMove(client, { propertyId, bookingId: holderId, from: h.nights[0], to: addDaysIso(h.nights.at(-1), 1),
+        fromRoomId: pickRoomId, toRoomId: to, reason: 'bump', movedBy });
+      await syncCurrentRoom(client, holderId);
+      bumped.push(holderId);
+    }
+    roomId = pickRoomId;
+  } else {
+    roomId = await freeRoom(client, propertyId, roomTypeId, nights);
+  }
+  await client.query(
+    `INSERT INTO booking_night (booking_id, property_id, night, room_id)
+     SELECT $1, $2, n, NULL FROM unnest($3::date[]) n`, [bookingId, propertyId, nights]);
+  if (roomId) {
+    await setNights(client, bookingId, nights, roomId);
+    await logMove(client, { propertyId, bookingId, from: nights[0], to: addDaysIso(nights.at(-1), 1), toRoomId: roomId, reason: 'assign', movedBy });
+  }
+  await syncCurrentRoom(client, bookingId);
+  return { placedNights: roomId ? nights : [], unplacedNights: roomId ? [] : nights, bumped };
+}
+
+function addDaysIso(d, n) {
+  const x = new Date(`${d}T00:00:00Z`);
+  x.setUTCDate(x.getUTCDate() + n);
+  return x.toISOString().slice(0, 10);
+}
+
+module.exports = {
+  HOLDING, typeCounts, lockType, propertyToday, logMove, freeRoom, setNights, syncCurrentRoom, holdStay, addDaysIso,
+};

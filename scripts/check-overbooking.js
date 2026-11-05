@@ -43,7 +43,86 @@ function call(fn, property_id, { body = {}, params = {}, query = {}, extra = {} 
   });
 }
 
+const addDays = (d, n) => { const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+const TODAY = new Date().toISOString().slice(0, 10); // throwaway properties default to UTC
+// Seed open availability rows (the seeder's job) for rooms over [from, from + days).
+async function open(P, rooms, from, days) {
+  for (const r of rooms) for (let i = 0; i < days; i++) {
+    await pool.query(`INSERT INTO room_availability (property_id, room_id, date) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [P, r, addDays(from, i)]);
+  }
+}
+const nightsOf = async (b) => (await pool.query(
+  `SELECT night::text, room_id FROM booking_night WHERE booking_id = $1 ORDER BY night`, [b])).rows;
+async function book(P, body) {
+  const { createBooking } = require('../src/controllers/bookings');
+  return call(createBooking, P, { body: { guest_id: await guest(P), ...body }, extra: { auth_method: 'clerk' } });
+}
+
 const sections = {
+  async hold() {
+    const P = await property('OB Hold', { overbooking_enabled: true, oversell_max_pct: 50 });
+    const A = await roomType(P);
+    const [r1, r2] = [await room(P, A, '1'), await room(P, A, '2')];
+    const d = addDays(TODAY, 10);
+    await open(P, [r1, r2], TODAY, 20);
+
+    // type booking auto-assigns
+    const b1 = await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 2) });
+    assert.equal(b1.status, 201, JSON.stringify(b1.body));
+    assert.equal(b1.body.room_id, r1); assert.equal(b1.body.room_pick, false); assert.equal(b1.body.room_type_id, A);
+    assert.deepEqual((await nightsOf(b1.body.id)).map((n) => n.room_id), [r1, r1], 'type booking auto-assigns');
+    assert.equal((await one(`SELECT count(*)::int AS n FROM room_availability WHERE room_id = $1 AND NOT is_available`, [r1])).n, 2, 'flags closed');
+
+    // pick bumps auto-assigned
+    const b2 = await book(P, { room_id: r1, check_in: d, check_out: addDays(d, 2) });
+    assert.equal(b2.status, 201, JSON.stringify(b2.body));
+    assert.equal(b2.body.room_pick, true);
+    assert.deepEqual((await nightsOf(b1.body.id)).map((n) => n.room_id), [r2, r2], 'bumped holder re-placed');
+    assert.equal((await one(`SELECT reason FROM booking_room_move WHERE booking_id = $1 ORDER BY moved_at DESC, reason LIMIT 1`, [b1.body.id])).reason, 'bump');
+
+    // both rooms taken now; allowance: cap 50% of 2 = 1, model 1 => one oversold booking, then 409
+    await pool.query(`INSERT INTO room_type_oversell (property_id, room_type_id, date, model_allowance) VALUES ($1, $2, $3, 1), ($1, $2, $4, 1)`, [P, A, d, addDays(d, 1)]);
+    const b3 = await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 2) });
+    assert.equal(b3.status, 201, JSON.stringify(b3.body));
+    assert.equal(b3.body.room_id, null, 'oversold booking has no room');
+    assert.deepEqual((await nightsOf(b3.body.id)).map((n) => n.room_id), [null, null]);
+    assert.equal((await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 2) })).status, 409, 'past allowance => 409');
+
+    // pick refused over a picked booking
+    assert.equal((await book(P, { room_id: r1, check_in: d, check_out: addDays(d, 1) })).status, 409, 'pick refused over picked');
+
+    // pick refused inside cutoff (holder arrives tomorrow, lock 1 day)
+    const near = await book(P, { room_type_id: A, check_in: addDays(TODAY, 1), check_out: addDays(TODAY, 2) });
+    assert.equal(near.body.room_id, r1);
+    const refused = await book(P, { room_id: r1, check_in: addDays(TODAY, 1), check_out: addDays(TODAY, 2) });
+    assert.equal(refused.status, 409, 'pick refused inside cutoff');
+    assert.deepEqual((await nightsOf(near.body.id)).map((n) => n.room_id), [r1], 'holder unchanged');
+
+    // pick refused over checked-in
+    const inHouse = await book(P, { room_type_id: A, check_in: addDays(TODAY, 5), check_out: addDays(TODAY, 6) });
+    await pool.query(`UPDATE booking SET status = 'checked_in' WHERE id = $1`, [inHouse.body.id]);
+    assert.equal((await book(P, { room_id: inHouse.body.room_id, check_in: addDays(TODAY, 5), check_out: addDays(TODAY, 6) })).status, 409, 'pick refused over checked-in');
+
+    // type booking priced at type rate; a pick uses the room's override
+    const pd = addDays(TODAY, 15);
+    await pool.query(`UPDATE room_availability SET override_rate = 500 WHERE room_id = $1 AND date = $2`, [r1, pd]);
+    const typed = await book(P, { room_type_id: A, check_in: pd, check_out: addDays(pd, 1) });
+    assert.equal(typed.body.room_id, r1); assert.equal(Number(typed.body.total_price), 100, 'type booking priced at type rate');
+    const picked = await book(P, { room_id: r1, check_in: pd, check_out: addDays(pd, 1) });
+    assert.equal(picked.status, 201); assert.equal(Number(picked.body.total_price), 500, 'pick priced at room override');
+
+    // race: two concurrent bookings for last slot
+    const Q = await property('OB Race');
+    const QA = await roomType(Q);
+    const q1 = await room(Q, QA, '1');
+    await open(Q, [q1], TODAY, 20);
+    const [g1, g2] = [await guest(Q), await guest(Q)];
+    const { createBooking } = require('../src/controllers/bookings');
+    const race = await Promise.all([g1, g2].map((guest_id) => call(createBooking, Q,
+      { body: { guest_id, room_type_id: QA, check_in: d, check_out: addDays(d, 1) }, extra: { auth_method: 'clerk' } })));
+    assert.deepEqual(race.map((r) => r.status).sort(), [201, 409], 'race: two concurrent bookings for last slot');
+  },
+
   async counts() {
     const { typeCounts } = require('../src/lib/roomNights');
     const P = await property('OB Counts');
