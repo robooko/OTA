@@ -13,6 +13,7 @@ const path = require('path');
 if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Error('refusing to run against a remote DB');
 
 const pool = require('../src/db');
+const { holdNights } = require('./lib/fixtures');
 const hk = require('../src/lib/housekeeping');
 const { nightIndex, stayoverDue, linenDue, scoreInspection, statusAfterFinish } = hk;
 const ably = require('../src/lib/ably');
@@ -98,9 +99,9 @@ const addDays = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toI
     const room = {};
     for (const n of ['101', '102', '103', '104']) room[n] = (await one(`INSERT INTO room (property_id, room_type_id, room_number, floor) VALUES ($1, $2, $3, 1) RETURNING id`, [P, RT, n])).id;
     const G = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'Ada', 'Guest', $2) RETURNING id`, [P, `ada-${run}@example.com`])).id;
-    const book = async (roomId, inD, outD, status, extra = {}) => (await one(
+    const book = async (roomId, inD, outD, status, extra = {}) => holdNights(pool, (await one(
       `INSERT INTO booking (property_id, guest_id, room_id, room_type_id, check_in, check_out, total_price, status, metadata, rate_plan_id) VALUES ($1, $2, $3, (SELECT room_type_id FROM room WHERE id = $3), $4, $5, 300, $6, $7::jsonb, $8) RETURNING id`,
-      [extra.property ?? P, extra.guest ?? G, roomId, inD, outD, status, JSON.stringify(extra.metadata ?? {}), extra.rate_plan_id ?? null])).id;
+      [extra.property ?? P, extra.guest ?? G, roomId, inD, outD, status, JSON.stringify(extra.metadata ?? {}), extra.rate_plan_id ?? null])).id);
     const B1dep = await book(room['101'], addDays(D, -3), D, 'checked_in');
     const B1arr = await book(room['101'], D, addDays(D, 2), 'confirmed', { metadata: { arrival_time: '15:00' } });
     const B2 = await book(room['102'], addDays(D, -2), addDays(D, 2), 'checked_in');

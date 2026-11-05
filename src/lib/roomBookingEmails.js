@@ -27,8 +27,8 @@ async function loadEmailContext(bookingId) {
             p.name AS property_name, p.email_branding, p.room_booking_url, p.timezone, p.currency
      FROM booking b
      JOIN guest g     ON g.id = b.guest_id
-     JOIN room r      ON r.id = b.room_id
-     JOIN room_type rt ON rt.id = r.room_type_id
+     LEFT JOIN room r      ON r.id = b.room_id
+     JOIN room_type rt ON rt.id = b.room_type_id
      JOIN property p  ON p.id = b.property_id
      WHERE b.id = $1`,
     [bookingId]
@@ -88,4 +88,4 @@ async function sendConfirmation(bookingId) {
   }
 }
 
-module.exports = { cancelTermsLine, bookingUrl, sendPayRequest, sendConfirmation };
+module.exports = { cancelTermsLine, bookingUrl, sendPayRequest, sendConfirmation, loadEmailContext };

@@ -57,6 +57,11 @@ function statusAfterFinish(kind, inspectionRequired) {
 const ROOM_STATUSES = ['dirty', 'cleaning', 'clean', 'ready'];
 // Booking statuses that put a guest in (or through) a room.
 const LIVE = `('confirmed', 'checked_in', 'checked_out')`;
+// The live booking that arrives in room R on date D (held R on D, not on D-1).
+const arrivingInto = (room, date) => `(SELECT a.booking_id FROM booking_night a JOIN booking ab ON ab.id = a.booking_id
+  WHERE a.room_id = ${room} AND a.night = ${date} AND ab.status IN ${LIVE}
+    AND NOT EXISTS (SELECT 1 FROM booking_night p WHERE p.booking_id = a.booking_id AND p.room_id = ${room} AND p.night = ${date} - 1)
+  LIMIT 1)`;
 
 // Opt-in only: NULL enabled_modules ("everything on") does NOT switch
 // housekeeping on, or every existing property would start blocking check-ins.
@@ -135,37 +140,39 @@ async function ensureJobs(db, propertyId, date) {
        RETURNING id`,
       [propertyId, date]
     ));
+    // Rooms come from booking_night (a stay can change rooms, and an
+    // oversold night may have none yet). A booking "leaves" a room on a date
+    // when it held it the night before but not tonight -- check-out, early
+    // check-out or a move -- and "arrives" in the reverse case.
     // Departures. The arriving guest on the same room rides on the job.
     take(await client.query(
       `INSERT INTO hk_job (property_id, room_id, date, kind, booking_id, arriving_booking_id, linen_due)
-       SELECT b.property_id, b.room_id, $2::date, 'checkout', b.id,
-              (SELECT a.id FROM booking a WHERE a.room_id = b.room_id AND a.check_in = $2::date AND a.status IN ${LIVE} LIMIT 1),
-              true
-       FROM booking b
-       WHERE b.property_id = $1 AND b.check_out = $2::date AND b.status IN ${LIVE}
+       SELECT b.property_id, y.room_id, $2::date, 'checkout', b.id, ${arrivingInto('y.room_id', '$2::date')}, true
+       FROM booking_night y JOIN booking b ON b.id = y.booking_id
+       WHERE y.property_id = $1 AND y.night = $2::date - 1 AND y.room_id IS NOT NULL AND b.status IN ${LIVE}
+         AND NOT EXISTS (SELECT 1 FROM booking_night t WHERE t.booking_id = y.booking_id AND t.night = $2::date AND t.room_id = y.room_id)
        ON CONFLICT (room_id, date, kind) DO NOTHING RETURNING id`,
       [propertyId, date]
     ));
     // Arrivals booked (or cancelled) after the checkout job was made.
     await client.query(
-      `UPDATE hk_job j SET arriving_booking_id =
-         (SELECT a.id FROM booking a WHERE a.room_id = j.room_id AND a.check_in = j.date AND a.status IN ${LIVE} LIMIT 1)
+      `UPDATE hk_job j SET arriving_booking_id = ${arrivingInto('j.room_id', 'j.date')}
        WHERE j.property_id = $1 AND j.date = $2::date AND j.kind = 'checkout'
-         AND j.arriving_booking_id IS DISTINCT FROM
-             (SELECT a.id FROM booking a WHERE a.room_id = j.room_id AND a.check_in = j.date AND a.status IN ${LIVE} LIMIT 1)`,
+         AND j.arriving_booking_id IS DISTINCT FROM ${arrivingInto('j.room_id', 'j.date')}`,
       [propertyId, date]
     );
-    // Stayovers by the property's rule, unless skipped for the day.
+    // Stayovers by the property's rule (same room as last night), unless
+    // skipped for the day.
     take(await client.query(
       `INSERT INTO hk_job (property_id, room_id, date, kind, booking_id, linen_due)
-       SELECT b.property_id, b.room_id, $2::date, 'stayover', b.id,
+       SELECT b.property_id, t.room_id, $2::date, 'stayover', b.id,
               COALESCE(p.hk_linen_every_days IS NOT NULL AND ($2::date - b.check_in) % p.hk_linen_every_days = 0, false)
-       FROM booking b JOIN property p ON p.id = b.property_id
-       WHERE b.property_id = $1 AND b.status IN ('confirmed', 'checked_in')
-         AND b.check_in < $2::date AND b.check_out > $2::date
+       FROM booking_night t JOIN booking b ON b.id = t.booking_id JOIN property p ON p.id = b.property_id
+       WHERE t.property_id = $1 AND t.night = $2::date AND t.room_id IS NOT NULL AND b.status IN ('confirmed', 'checked_in')
+         AND EXISTS (SELECT 1 FROM booking_night y WHERE y.booking_id = t.booking_id AND y.night = $2::date - 1 AND y.room_id = t.room_id)
          AND p.hk_service_every_days IS NOT NULL
          AND ($2::date - b.check_in) % p.hk_service_every_days = 0
-         AND NOT EXISTS (SELECT 1 FROM hk_override o WHERE o.room_id = b.room_id AND o.date = $2::date AND o.action = 'skip')
+         AND NOT EXISTS (SELECT 1 FROM hk_override o WHERE o.room_id = t.room_id AND o.date = $2::date AND o.action = 'skip')
        ON CONFLICT (room_id, date, kind) DO NOTHING RETURNING id`,
       [propertyId, date]
     ));
@@ -173,8 +180,8 @@ async function ensureJobs(db, propertyId, date) {
     take(await client.query(
       `INSERT INTO hk_job (property_id, room_id, date, kind, booking_id)
        SELECT o.property_id, o.room_id, o.date, 'extra',
-              (SELECT b.id FROM booking b WHERE b.room_id = o.room_id AND b.check_in <= o.date AND b.check_out > o.date
-                 AND b.status IN ('confirmed', 'checked_in') LIMIT 1)
+              (SELECT bn.booking_id FROM booking_night bn JOIN booking b ON b.id = bn.booking_id
+               WHERE bn.room_id = o.room_id AND bn.night = o.date AND b.status IN ('confirmed', 'checked_in') LIMIT 1)
        FROM hk_override o
        WHERE o.property_id = $1 AND o.date = $2::date AND o.action = 'clean'
        ON CONFLICT (room_id, date, kind) DO NOTHING RETURNING id`,
@@ -183,10 +190,11 @@ async function ensureJobs(db, propertyId, date) {
     // Arrivals into a room nobody leaves, when there are extras to place.
     take(await client.query(
       `INSERT INTO hk_job (property_id, room_id, date, kind, arriving_booking_id)
-       SELECT b.property_id, b.room_id, $2::date, 'arrival', b.id
-       FROM booking b
-       WHERE b.property_id = $1 AND b.check_in = $2::date AND b.status IN ${LIVE}
-         AND NOT EXISTS (SELECT 1 FROM hk_job j WHERE j.room_id = b.room_id AND j.date = $2::date AND j.kind = 'checkout' AND j.status <> 'skipped')
+       SELECT b.property_id, t.room_id, $2::date, 'arrival', b.id
+       FROM booking_night t JOIN booking b ON b.id = t.booking_id
+       WHERE t.property_id = $1 AND t.night = $2::date AND t.room_id IS NOT NULL AND b.status IN ${LIVE}
+         AND NOT EXISTS (SELECT 1 FROM booking_night y WHERE y.booking_id = t.booking_id AND y.night = $2::date - 1 AND y.room_id = t.room_id)
+         AND NOT EXISTS (SELECT 1 FROM hk_job j WHERE j.room_id = t.room_id AND j.date = $2::date AND j.kind = 'checkout' AND j.status <> 'skipped')
          AND EXISTS (SELECT 1 FROM booking_extra be JOIN extra e ON e.id = be.extra_id
                      WHERE be.booking_id = b.id AND e.place_in_room)
        ON CONFLICT (room_id, date, kind) DO NOTHING RETURNING id`,
@@ -301,6 +309,11 @@ async function listJobs(db, propertyId, date) {
 async function onCheckedOut(propertyId, roomId, bookingId) {
   if (!(await housekeepingEnabled(pool, propertyId))) return;
   const today = await propertyToday(pool, propertyId);
+  // The room the guest slept in last night (a stay can change rooms).
+  const lastNight = (await pool.query(
+    `SELECT room_id FROM booking_night WHERE booking_id = $1 AND night = $2::date - 1 AND room_id IS NOT NULL`, [bookingId, today])).rows[0];
+  roomId = lastNight?.room_id ?? roomId;
+  if (!roomId) return;
   const { rows } = await pool.query(
     `SELECT status FROM hk_job WHERE room_id = $1 AND date = $2 AND kind = 'checkout'`, [roomId, today]
   );

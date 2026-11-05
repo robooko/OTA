@@ -59,6 +59,54 @@ async function book(P, body) {
 }
 
 const sections = {
+  async readers() {
+    const { listBookings, getBooking } = require('../src/controllers/bookings');
+    const { fetchJoinedBooking } = require('../src/lib/roomPayments');
+    const { computeFolio } = require('../src/lib/folio');
+    const P = await property('OB Readers', { overbooking_enabled: true, oversell_max_pct: 100 });
+    const A = await roomType(P);
+    const r1 = await room(P, A, '1');
+    const d = addDays(TODAY, 4);
+    await open(P, [r1], TODAY, 10);
+    await pool.query(`INSERT INTO room_type_oversell (property_id, room_type_id, date, model_allowance) VALUES ($1, $2, $3, 1)`, [P, A, d]);
+    await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 1) });
+    const o = await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 1) });
+    assert.equal(o.status, 201, JSON.stringify(o.body));
+    assert.equal(o.body.room_id, null); assert.equal(o.body.room_type_id, A, 'create response carries sold type');
+    const listed = (await call(listBookings, P)).body.data.find((b) => b.id === o.body.id);
+    assert.ok(listed, 'oversold booking visible in list');
+    assert.equal(listed.room_type_id, A); assert.equal(listed.room_number, null);
+    assert.deepEqual(listed.nights, [{ night: d, room_id: null, room_number: null }]);
+    const detail = (await call(getBooking, P, { params: { id: o.body.id } })).body;
+    assert.equal(detail.id, o.body.id, 'visible in detail'); assert.equal(detail.room_pick, false);
+    assert.equal((await fetchJoinedBooking(o.body.id)).room_type_name, 'Std', 'live payload has sold type');
+    const folio = await computeFolio(o.body.id, P);
+    assert.ok(folio, 'folio works with no room'); assert.equal(Number(folio.balance), 100);
+
+    // emails render with no room (the context loader the confirmation uses)
+    await pool.query(`UPDATE booking SET rate_plan_terms = '{"refundable":true,"cancel_cutoff_hours":48,"payment_mode":"hold","mode_used":"hold","pay_at_hotel":true}' WHERE id = $1`, [o.body.id]);
+    const ctx = await require('../src/lib/roomBookingEmails').loadEmailContext(o.body.id);
+    assert.equal(ctx?.b.room_type_name, 'Std', 'emails render with no room');
+  },
+
+  async housekeeping() {
+    const hk = require('../src/lib/housekeeping');
+    const P = await property('OB HK', { overbooking_enabled: true, oversell_max_pct: 100, enabled_modules: JSON.stringify(['housekeeping']) });
+    const A = await roomType(P);
+    const [r1, r2] = [await room(P, A, '1'), await room(P, A, '2')];
+    const D = addDays(TODAY, 2);
+    // split stay: r1 on D-1, r2 on D (moved on D), leaves D+1
+    const s = await rawBooking(P, A, r2, addDays(D, -1), addDays(D, 1));
+    await hold(P, s, addDays(D, -1), r1); await hold(P, s, D, r2);
+    // an unplaced booking on D (oversold, waiting)
+    const u = await rawBooking(P, A, null, D, addDays(D, 1));
+    await hold(P, u, D, null);
+    await hk.ensureJobs(pool, P, D); // ensureJobs survives unplaced bookings
+    const jobs = (await pool.query(`SELECT r.room_number, j.kind FROM hk_job j JOIN room r ON r.id = j.room_id WHERE j.property_id = $1 AND j.date = $2 ORDER BY 1, 2`, [P, D])).rows;
+    assert.deepEqual(jobs.map((j) => `${j.room_number}:${j.kind}`), ['1:checkout'], 'split stay makes a checkout of the old room on the move day');
+    await pool.query('DELETE FROM hk_job WHERE property_id = $1', [P]);
+  },
+
   async channels() {
     const { desiredAri } = require('../src/lib/channels/desired');
     const P = await property('OB Channels', { overbooking_enabled: true, oversell_max_pct: 100 });
@@ -316,7 +364,7 @@ const sections = {
     }
   } finally {
     if (props.length) {
-      for (const t of ['booking_room_move', 'booking_night', 'room_type_oversell', 'payment', 'booking', 'channel', 'guest', 'room_availability', 'room', 'room_type']) {
+      for (const t of ['hk_job', 'booking_room_move', 'booking_night', 'room_type_oversell', 'payment', 'booking', 'channel', 'guest', 'room_availability', 'room', 'room_type']) {
         await pool.query(`DELETE FROM ${t} WHERE property_id = ANY($1)`, [props]);
       }
       await pool.query('DELETE FROM property WHERE id = ANY($1)', [props]);

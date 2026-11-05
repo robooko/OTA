@@ -26,8 +26,8 @@ const DUE_AT = `b.created_at + make_interval(mins => greatest(p.basket_reminder_
 const FROM = `
   FROM booking b
   JOIN guest g ON g.id = b.guest_id
-  JOIN room r ON r.id = b.room_id
-  JOIN room_type rt ON rt.id = r.room_type_id
+  LEFT JOIN room r ON r.id = b.room_id
+  JOIN room_type rt ON rt.id = b.room_type_id
   JOIN property p ON p.id = b.property_id`;
 
 const FEED_SELECT = `

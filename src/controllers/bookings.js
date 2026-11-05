@@ -7,7 +7,7 @@ const { applyAdjustment, termsSnapshot, guestCancelDecision, PAY_WINDOW_MINUTES 
 const roomEmails = require('../lib/roomBookingEmails');
 const roomPayments = require('../lib/roomPayments');
 const housekeeping = require('../lib/housekeeping');
-const { fetchJoinedBooking, CANCEL_SCORE_SQL } = roomPayments;
+const { fetchJoinedBooking, CANCEL_SCORE_SQL, NIGHTS_SQL } = roomPayments;
 const { stayNights } = require('../lib/roomPlacement');
 const roomNights = require('../lib/roomNights');
 
@@ -26,7 +26,7 @@ async function listBookings(req, res, next) {
              r.room_number, r.floor,
              rt.id AS room_type_id, rt.name AS room_type_name, rt.code AS room_type_code,
              rt.description AS room_type_description, rt.max_occupancy, rt.base_rate,
-             ${CANCEL_SCORE_SQL},
+             ${CANCEL_SCORE_SQL}, ${NIGHTS_SQL},
              COALESCE(
                json_agg(
                  json_build_object(
@@ -41,8 +41,8 @@ async function listBookings(req, res, next) {
              ) AS extras
       FROM booking b
       JOIN guest g      ON g.id  = b.guest_id
-      JOIN room r       ON r.id  = b.room_id
-      JOIN room_type rt ON rt.id = r.room_type_id
+      LEFT JOIN room r       ON r.id  = b.room_id
+      JOIN room_type rt ON rt.id = b.room_type_id
       LEFT JOIN booking_extra be ON be.booking_id = b.id
       LEFT JOIN extra e          ON e.id = be.extra_id
       WHERE b.property_id = $1
@@ -102,11 +102,11 @@ async function getBooking(req, res, next) {
               g.first_name, g.last_name, g.email, g.phone,
               r.room_number, r.floor, r.status AS room_status,
               rt.id AS room_type_id, rt.name AS room_type_name, rt.code AS room_type_code, rt.base_rate,
-              ${CANCEL_SCORE_SQL}
+              ${CANCEL_SCORE_SQL}, ${NIGHTS_SQL}
        FROM booking b
        JOIN guest     g  ON g.id  = b.guest_id
-       JOIN room      r  ON r.id  = b.room_id
-       JOIN room_type rt ON rt.id = r.room_type_id
+       LEFT JOIN room      r  ON r.id  = b.room_id
+       JOIN room_type rt ON rt.id = b.room_type_id
        WHERE b.id = $1 AND b.property_id = $2`,
       [req.params.id, req.property_id]
     );

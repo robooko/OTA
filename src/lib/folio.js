@@ -18,7 +18,7 @@ async function computeFolio(bookingId, propertyId) {
     `SELECT b.id, b.total_price, r.room_number, p.currency,
             (b.check_out - b.check_in) AS nights
      FROM booking b
-     JOIN room r     ON r.id = b.room_id
+     LEFT JOIN room r     ON r.id = b.room_id
      JOIN property p ON p.id = b.property_id
      WHERE b.id = $1 AND b.property_id = $2`,
     [bookingId, propertyId]

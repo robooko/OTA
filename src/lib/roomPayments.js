@@ -25,6 +25,11 @@ const CANCEL_SCORE_SQL = `(SELECT json_build_object('score', s.score, 'model', s
      FROM booking_cancel_score s WHERE s.booking_id = b.id
      ORDER BY s.scored_at DESC LIMIT 1) AS cancel_score`;
 
+// The rooms a booking holds, night by night (room null = none yet; a split
+// stay lists each room). Empty once the booking stops holding nights.
+const NIGHTS_SQL = `COALESCE((SELECT json_agg(json_build_object('night', bn.night, 'room_id', bn.room_id, 'room_number', nr.room_number) ORDER BY bn.night)
+     FROM booking_night bn LEFT JOIN room nr ON nr.id = bn.room_id WHERE bn.booking_id = b.id), '[]') AS nights`;
+
 // Same JOINs as getBooking, minus the extras query -- used everywhere a
 // booking gets published to a live feed. Consumers (hotal-ui's
 // <live-room-bookings-feed>) upsert-by-replace on every event, so a payload
@@ -36,11 +41,11 @@ async function fetchJoinedBooking(id) {
             g.first_name, g.last_name, g.email, g.phone,
             r.room_number, r.floor, r.status AS room_status,
             rt.id AS room_type_id, rt.name AS room_type_name, rt.code AS room_type_code, rt.base_rate,
-            ${CANCEL_SCORE_SQL}
+            ${CANCEL_SCORE_SQL}, ${NIGHTS_SQL}
      FROM booking b
      JOIN guest     g  ON g.id  = b.guest_id
-     JOIN room      r  ON r.id  = b.room_id
-     JOIN room_type rt ON rt.id = r.room_type_id
+     LEFT JOIN room      r  ON r.id  = b.room_id
+     JOIN room_type rt ON rt.id = b.room_type_id
      WHERE b.id = $1`,
     [id]
   );
@@ -425,7 +430,7 @@ function startRoomPaymentJobs() {
 }
 
 module.exports = {
-  CANCEL_SCORE_SQL, fetchJoinedBooking, releaseAvailability, refreshAvailabilityView, lockBooking, deadlineOf,
+  CANCEL_SCORE_SQL, NIGHTS_SQL, fetchJoinedBooking, releaseAvailability, refreshAvailabilityView, lockBooking, deadlineOf,
   confirmPaidLocked, afterConfirmed, paymentIntentFor, confirmPaid, settleByHand, stripeForCancel,
   expireOnce, captureHoldsOnce, startRoomPaymentJobs,
 };
