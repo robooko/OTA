@@ -380,6 +380,7 @@ const sections = {
     const A = await roomType(P);
     const [r1] = [await room(P, A, '1'), await room(P, A, '2'), await room(P, A, '3', 'inactive')];
     const N = '2030-02-01';
+    await pool.query(`INSERT INTO room_availability (property_id, room_id, date) SELECT $1, id, $2 FROM room WHERE property_id = $1`, [P, N]); // seeded horizon
     const get = async () => {
       const c = (await typeCounts(pool, P, A, [N])).get(`${A}|${N}`);
       return { rooms: c.rooms, blocked: c.blocked, sold: c.sold, allowance: c.allowance, sellable: c.sellable, unplaced: c.unplaced };
@@ -399,7 +400,7 @@ const sections = {
 
     // block on booked room not double-counted; a block on a free room counts.
     const r2 = (await one(`SELECT id FROM room WHERE property_id = $1 AND room_number = '2'`, [P])).id;
-    await pool.query(`INSERT INTO room_availability (property_id, room_id, date, is_available) VALUES ($1, $2, $3, false), ($1, $4, $3, false)`, [P, r1, N, r2]);
+    await pool.query(`UPDATE room_availability SET is_available = false WHERE room_id = ANY($1) AND date = $2`, [[r1, r2], N]);
     assert.equal((await get()).blocked, 1, 'block on booked room not double-counted');
 
     // search: sellable > 0 with no free physical room still lists the type
@@ -419,6 +420,26 @@ const sections = {
     const s = await call(searchAvailability, null, { query: { check_in: N, check_out: '2030-02-02', guests: 1, property_id: P } });
     assert.equal(s.status, 200);
     assert.equal(Number(s.body.find((t) => t.room_type_id === A)?.min_available), 1, 'search lists oversellable type');
+
+    // An upgrade counts where the guest sleeps: overbooking off, an A guest moved
+    // into the only D room leaves D with nothing to sell and frees an A room.
+    const { moveBooking } = require('../src/controllers/bookings');
+    const Q = await property('OB Counts Upgrade');
+    const QA = await roomType(Q, 'Std', 100);
+    const QD = await roomType(Q, 'Deluxe', 200);
+    const [qa1, qd1] = [await room(Q, QA, '1'), await room(Q, QD, '9')];
+    const u = addDays(TODAY, 8);
+    await open(Q, [qa1, qd1], TODAY, 20);
+    const g0 = await guest(Q);
+    const ub = await call(require('../src/controllers/bookings').createBooking, Q, { body: { guest_id: g0, room_type_id: QA, check_in: u, check_out: addDays(u, 1) }, extra: { auth_method: 'clerk' } });
+    assert.equal((await call(moveBooking, Q, { params: { id: ub.body.id }, body: { room_id: qd1 } })).status, 200);
+    const qc = await typeCounts(pool, Q, null, [u]);
+    assert.equal(qc.get(`${QD}|${u}`).sellable, 0, 'upgraded-into type has nothing left to sell');
+    assert.equal(qc.get(`${QA}|${u}`).sellable, 1, 'the upgraded guest frees their sold type');
+
+    // Beyond the seeded availability horizon nothing is sellable (no oversell into the void).
+    const far = addDays(TODAY, 40);
+    assert.equal((await typeCounts(pool, Q, QA, [far])).get(`${QA}|${far}`).sellable, 0, 'nothing sellable past the horizon');
   },
 
 
@@ -487,6 +508,7 @@ const sections = {
       }
       await pool.query('DELETE FROM property WHERE id = ANY($1)', [props]);
     }
+    await require('../src/lib/channels/sync')._flush().catch(() => {}); // a debounced sync must not outlive the pool
     await pool.end();
   }
 })().catch((err) => { console.error(err); process.exitCode = 1; });

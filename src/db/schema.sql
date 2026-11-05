@@ -532,7 +532,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_booking_channel_ref ON booking (channel_id
 -- room_type_availability per type x date over ACTIVE rooms (dates come from
 -- room_availability, seeded ahead for every active room).
 --   available_rooms = rooms neither held by a booking nor staff-blocked
---   sold            = nights held by bookings sold as the type (any room or none)
+--   sold            = nights taken from the type: held in its rooms (any guest)
+--                     plus nights of bookings sold as it with no room yet
 --   sellable_rooms  = rooms - blocked - sold + oversell allowance (>= 0)
 -- A closed flag with a booking_night on it is a booking, not a block.
 CREATE MATERIALIZED VIEW IF NOT EXISTS room_type_availability AS
@@ -550,9 +551,10 @@ WITH grid AS (
   GROUP BY r.property_id, r.room_type_id, ra.date
 ),
 sold AS (
-  SELECT b.room_type_id, bn.night, COUNT(*) AS n
+  SELECT COALESCE(hr.room_type_id, b.room_type_id) AS room_type_id, bn.night, COUNT(*) AS n
   FROM booking_night bn JOIN booking b ON b.id = bn.booking_id
-  GROUP BY b.room_type_id, bn.night
+  LEFT JOIN room hr ON hr.id = bn.room_id
+  GROUP BY 1, bn.night
 ),
 alw AS (
   SELECT g.room_type_id, g.date,
