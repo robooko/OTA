@@ -83,6 +83,24 @@ const sections = {
     const o = await book(P, { room_type_id: A, check_in: addDays(TODAY, 6), check_out: addDays(TODAY, 7) });
     await pool.query(`UPDATE booking SET status = 'checked_out' WHERE id = $1`, [o.body.id]);
     assert.equal((await put(o.body.id, { status: 'checked_in' })).status, 409, 'checked_out -> checked_in refused');
+
+    // checking in to a room keeps the guest there for later waiting nights when it's free
+    const T = TODAY;
+    const Q = await property('OB Status CheckIn', { overbooking_enabled: true, oversell_max_pct: 100 });
+    const QA = await roomType(Q);
+    const q1 = await room(Q, QA, '1');
+    await open(Q, [q1], T, 5);
+    await pool.query(`INSERT INTO room_type_oversell (property_id, room_type_id, date, model_allowance) VALUES ($1, $2, $3, 1), ($1, $2, $4, 1)`, [Q, QA, T, addDays(T, 1)]);
+    const full = await call(require('../src/controllers/bookings').createBooking, Q, { body: { guest_id: await guest(Q), room_type_id: QA, check_in: T, check_out: addDays(T, 2) }, extra: { auth_method: 'clerk' } });
+    const wq = await call(require('../src/controllers/bookings').createBooking, Q, { body: { guest_id: await guest(Q), room_type_id: QA, check_in: T, check_out: addDays(T, 2) }, extra: { auth_method: 'clerk' } });
+    assert.equal(wq.body.room_id, null);
+    // the first guest leaves without the room being handed on (as if staff cleared it by hand)
+    await pool.query('DELETE FROM booking_night WHERE booking_id = $1', [full.body.id]);
+    await pool.query(`UPDATE booking SET status = 'cancelled' WHERE id = $1`, [full.body.id]);
+    await pool.query('UPDATE room_availability SET is_available = true WHERE room_id = $1', [q1]);
+    const ci = await call(updateBooking, Q, { params: { id: wq.body.id }, body: { status: 'checked_in', room_id: q1 } });
+    assert.equal(ci.status, 200, JSON.stringify(ci.body));
+    assert.deepEqual((await nightsOf(wq.body.id)).map((n) => n.room_id), [q1, q1], 'check-in keeps the room for later free nights');
   },
 
   async blocks() {

@@ -369,8 +369,8 @@ async function updateBooking(req, res, next) {
     // Soft check-in gate: the room hasn't been cleaned (or passed
     // inspection) yet. Housekeeping properties only; force overrides.
     // Checking in needs a room for tonight. An oversold guest (or one whose
-    // stay is split) gets one here: room_id places tonight only; later nights
-    // keep waiting or are moved by staff.
+    // stay is split) gets one here: room_id places tonight, and later nights
+    // still without a room follow into it where it's free.
     let tonightRoom = beforeRes.rows[0].room_id;
     if (status === 'checked_in' && statusBefore !== 'checked_in') {
       const b = beforeRes.rows[0];
@@ -382,7 +382,7 @@ async function updateBooking(req, res, next) {
         if (!isValidUuid(req.body.room_id)) {
           return res.status(409).json({ error: 'room_required', details: `No room held for ${night}; pass room_id to check in` });
         }
-        const moved = await moveInTransaction(req, b.id, { roomId: req.body.room_id, from: night, to: roomNights.addDaysIso(night, 1) });
+        const moved = await moveInTransaction(req, b.id, { roomId: req.body.room_id, from: night, to: roomNights.addDaysIso(night, 1), keepLaterNights: true });
         if (moved.error) return res.status(moved.status).json({ error: moved.error });
         tonightRoom = req.body.room_id;
       }
@@ -571,7 +571,7 @@ async function addCancelScores(req, res, next) {
 
 // Locks the booking and runs roomNights.moveNights in its own transaction.
 // Returns { booking } or { status, error } (4xx from the move rules).
-async function moveInTransaction(req, bookingId, { roomId, from, to, reason = null }) {
+async function moveInTransaction(req, bookingId, { roomId, from, to, reason = null, keepLaterNights = false }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -586,6 +586,7 @@ async function moveInTransaction(req, bookingId, { roomId, from, to, reason = nu
     to ??= booking.check_out;
     try {
       await roomNights.moveNights(client, booking, { roomId, from, to, reason, movedBy: req.user?.id ?? null });
+      if (keepLaterNights) await roomNights.fillFromRoom(client, booking, roomId, to);
     } catch (err) {
       await client.query('ROLLBACK');
       if (err.status && err.status < 500) return { status: err.status, error: err.message };

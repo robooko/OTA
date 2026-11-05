@@ -274,6 +274,23 @@ async function refill(client, propertyId, freed) {
   for (const type of [...byType.keys()].sort()) await assignWaiting(client, propertyId, type, [...new Set(byType.get(type))]);
 }
 
+// After a check-in placement: the booking's nights from fromNight on that
+// still have no room go into roomId wherever it's free (never bumps), so the
+// guest stays put rather than being moved tomorrow.
+async function fillFromRoom(client, booking, roomId, fromNight) {
+  const { rows } = await client.query(
+    `SELECT bn.night::text FROM booking_night bn
+     WHERE bn.booking_id = $1 AND bn.room_id IS NULL AND bn.night >= $3
+       AND EXISTS (SELECT 1 FROM room_availability ra WHERE ra.room_id = $2 AND ra.date = bn.night AND ra.is_available)
+       AND NOT EXISTS (SELECT 1 FROM booking_night h WHERE h.room_id = $2 AND h.night = bn.night)
+     ORDER BY bn.night`, [booking.id, roomId, fromNight]);
+  const nights = rows.map((r) => r.night);
+  if (!nights.length) return;
+  await setNights(client, booking.id, nights, roomId);
+  await logMove(client, { propertyId: booking.property_id, bookingId: booking.id, from: nights[0], to: addDaysIso(nights.at(-1), 1), toRoomId: roomId, reason: 'assign' });
+  await syncCurrentRoom(client, booking.id);
+}
+
 function addDaysIso(d, n) {
   const x = new Date(`${d}T00:00:00Z`);
   x.setUTCDate(x.getUTCDate() + n);
@@ -282,5 +299,5 @@ function addDaysIso(d, n) {
 
 module.exports = {
   HOLDING, typeCounts, lockType, propertyToday, logMove, freeRoom, setNights, syncCurrentRoom, holdStay, addDaysIso,
-  assignWaiting, releaseNights, refill, claimRoom, moveNights,
+  assignWaiting, releaseNights, refill, claimRoom, moveNights, fillFromRoom,
 };
