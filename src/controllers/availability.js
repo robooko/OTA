@@ -97,7 +97,7 @@ async function searchAvailability(req, res, next) {
          rt.name,
          rt.description,
          rt.max_occupancy,
-         MIN(rta.available_rooms) AS min_available,
+         MIN(rta.sellable_rooms)  AS min_available,
          MIN(rta.min_rate)        AS from_rate,
          ARRAY_AGG(rta.min_rate)  AS night_rates
        FROM room_type_availability rta
@@ -108,7 +108,7 @@ async function searchAvailability(req, res, next) {
          AND rt.max_occupancy >= $4
          AND rt.status = 'active'
        GROUP BY rta.room_type_id, rt.name, rt.description, rt.max_occupancy
-       HAVING MIN(rta.available_rooms) > 0
+       HAVING MIN(rta.sellable_rooms) > 0
        ORDER BY from_rate ASC`,
       [property_id, check_in, check_out, parseInt(guests, 10)]
     );
