@@ -15,7 +15,7 @@ const HOLDING = ['pending_payment', 'confirmed', 'checked_in'];
 // One row per type x night. typeId null = every type of the property.
 const COUNTS_SQL = `
   WITH n AS (SELECT DISTINCT unnest($3::date[]) AS night),
-  t AS (SELECT id FROM room_type WHERE property_id = $1 AND ($2::uuid IS NULL OR id = $2)),
+  t AS (SELECT id FROM room_type WHERE property_id = $1 AND status = 'active' AND ($2::uuid IS NULL OR id = $2)),
   p AS (SELECT overbooking_enabled, oversell_max_pct FROM property WHERE id = $1),
   rooms AS (SELECT r.room_type_id, ra.date AS night, count(*)::int AS n
             FROM room r JOIN room_availability ra ON ra.room_id = r.id

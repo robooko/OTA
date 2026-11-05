@@ -70,6 +70,20 @@ const sections = {
     assert.deepEqual(r, { status: 409, body: { error: 'Busy, please retry', details: 'deadlock detected' } }, 'deadlock -> 409 retry');
   },
 
+  async inactiveType() {
+    // A soft-deleted room type and its rooms drop out of the counts: not listed, not sellable.
+    const { typeCounts } = require('../src/lib/roomNights');
+    const P = await property('OB Inactive', { overbooking_enabled: true, oversell_max_pct: 100 });
+    const A = await roomType(P); const X = await roomType(P, 'Old');
+    const ra = await room(P, A, '1'); const rx = await room(P, X, '2');
+    const d = addDays(TODAY, 3);
+    await open(P, [ra, rx], d, 1);
+    await pool.query(`UPDATE room_type SET status = 'inactive' WHERE id = $1`, [X]);
+    const c = await typeCounts(pool, P, null, [d]);
+    assert.deepEqual([...c.keys()], [`${A}|${d}`], 'only the active type is counted');
+    assert.equal((await book(P, { room_type_id: X, check_in: d, check_out: addDays(d, 1) })).status, 409, 'inactive type not sellable');
+  },
+
   async status() {
     const { updateBooking } = require('../src/controllers/bookings');
     const P = await property('OB Status', { overbooking_enabled: true, oversell_max_pct: 100 });
