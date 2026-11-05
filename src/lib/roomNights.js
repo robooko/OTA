@@ -75,8 +75,10 @@ async function logMove(client, m) {
 
 // Open room_availability flags = the room is free on those nights (holds
 // close them; a missing row = beyond the seeded horizon = not sellable).
+// Reopening never lifts a staff block (block_reason set) that sat under a hold.
 const setFlags = (client, roomId, nights, open) => client.query(
-  'UPDATE room_availability SET is_available = $3 WHERE room_id = $1 AND date = ANY($2::date[])', [roomId, nights, open]);
+  `UPDATE room_availability SET is_available = $3
+   WHERE room_id = $1 AND date = ANY($2::date[]) AND (NOT $3 OR block_reason IS NULL)`, [roomId, nights, open]);
 
 // First active room of the type (by room_number) free on every night, or null.
 async function freeRoom(client, propertyId, roomTypeId, nights, exceptRoomId = null) {

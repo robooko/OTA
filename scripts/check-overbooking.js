@@ -59,6 +59,35 @@ async function book(P, body) {
 }
 
 const sections = {
+  async blocks() {
+    const { upsertRoomAvailability } = require('../src/controllers/availability');
+    const { cancelBooking } = require('../src/controllers/bookings');
+    const { typeCounts } = require('../src/lib/roomNights');
+    const P = await property('OB Blocks', { overbooking_enabled: true, oversell_max_pct: 100 });
+    const A = await roomType(P);
+    const r1 = await room(P, A, '1');
+    const d = addDays(TODAY, 6);
+    await open(P, [r1], TODAY, 15);
+    const setFlag = (date, is_available) => call(upsertRoomAvailability, P, { params: { room_id: r1 }, body: { dates: [{ date, is_available }] } });
+
+    // a staff block on a booked night survives the booking leaving
+    const b = await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 1) });
+    assert.equal(b.body.room_id, r1);
+    assert.equal((await setFlag(d, false)).status, 200);
+    assert.equal((await call(cancelBooking, P, { params: { id: b.body.id }, extra: { auth_method: 'clerk', query: {} } })).status, 200);
+    assert.equal((await one('SELECT is_available FROM room_availability WHERE room_id = $1 AND date = $2', [r1, d])).is_available, false, 'staff block survives the booking leaving');
+    assert.equal((await typeCounts(pool, P, A, [d])).get(`${A}|${d}`).blocked, 1);
+
+    // unblocking a room places a booking waiting for that type
+    const d2 = addDays(d, 3);
+    await setFlag(d2, false);
+    await pool.query(`INSERT INTO room_type_oversell (property_id, room_type_id, date, model_allowance) VALUES ($1, $2, $3, 1)`, [P, A, d2]);
+    const w = await book(P, { room_type_id: A, check_in: d2, check_out: addDays(d2, 1) });
+    assert.equal(w.status, 201, JSON.stringify(w.body)); assert.equal(w.body.room_id, null);
+    assert.equal((await setFlag(d2, true)).status, 200);
+    assert.deepEqual((await nightsOf(w.body.id)).map((n) => n.room_id), [r1], 'unblock places a waiting booking');
+  },
+
   async endpoints() {
     const ob = require('../src/controllers/overbooking');
     const { requirePermission } = require('../src/middleware/auth');

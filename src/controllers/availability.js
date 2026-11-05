@@ -1,3 +1,4 @@
+const roomNights = require('../lib/roomNights');
 const pool = require('../db');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { resolveSiteProperty, siteSelectors } = require('../lib/propertyResolver');
@@ -186,10 +187,16 @@ async function upsertRoomAvailability(req, res, next) {
              override_rate = EXCLUDED.override_rate,
              block_reason  = EXCLUDED.block_reason
            RETURNING *`,
-          [req.property_id, room_id, date, is_available ?? true, override_rate ?? null, block_reason ?? null]
+          // A staff block always carries a reason, so a booking leaving the
+          // room never reopens it (roomNights only reopens unreasoned flags).
+          [req.property_id, room_id, date, is_available ?? true, override_rate ?? null,
+            block_reason ?? (is_available === false ? 'blocked' : null)]
         );
         results.push(rows[0]);
       }
+      // Nights put back on sale go to bookings waiting for this room's type.
+      const reopened = results.filter((r) => r.is_available).map((r) => r.date);
+      if (reopened.length) await roomNights.refill(client, req.property_id, new Map([[room_id, reopened]]));
       await client.query('COMMIT');
       // After COMMIT (see refreshAvailabilityView); also nudges channel sync.
       await refreshAvailabilityView();
