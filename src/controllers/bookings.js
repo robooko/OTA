@@ -670,8 +670,8 @@ async function walkBooking(req, res, next) {
 // Hard-delete test bookings (seeded/demo data): the rows and their folio,
 // extras, minibar and rating rows go; housekeeping jobs, restaurant tabs and
 // channel logs keep their row with the link cleared. Freed rooms go to
-// waiting bookings. Refuses card-paid and channel bookings (real money / a
-// guest holding it elsewhere): cancel those instead.
+// waiting bookings. Refuses card-paid bookings (real money; cancel those) and
+// channel bookings unless force (e.g. imported backtest data).
 async function purgeBookings(req, res, next) {
   const ids = req.body?.booking_ids;
   if (!Array.isArray(ids) || !ids.length || ids.length > 500 || !ids.every(isValidUuid)) {
@@ -688,12 +688,12 @@ async function purgeBookings(req, res, next) {
       [req.property_id, [...new Set(ids)]]);
     const keep = found.length ? (await client.query(
       `SELECT b.id FROM booking b WHERE b.id = ANY($1::uuid[])
-         AND (b.channel_id IS NOT NULL OR b.stripe_payment_intent_id IS NOT NULL
+         AND ((b.channel_id IS NOT NULL AND NOT $2) OR b.stripe_payment_intent_id IS NOT NULL
               OR EXISTS (SELECT 1 FROM payment p WHERE p.booking_id = b.id AND p.stripe_payment_intent_id IS NOT NULL))`,
-      [found.map((b) => b.id)])).rows.map((r) => r.id) : [];
+      [found.map((b) => b.id), req.body.force === true])).rows.map((r) => r.id) : [];
     if (keep.length) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Some bookings have a card payment or came from a channel; cancel them instead', details: keep });
+      return res.status(409).json({ error: 'Some bookings have a card payment, or came from a channel (pass force: true for those); cancel card-paid ones instead', details: keep });
     }
     const freed = new Map();
     for (const b of found) {

@@ -65,10 +65,16 @@ async function setup() {
     }
     assert.equal((await one('SELECT booking_id FROM hk_job WHERE id = $1', [job])).booking_id, null, 'hk_job kept, unlinked');
     assert.equal((await one('SELECT room_id FROM booking_night WHERE booking_id = $1', [b.id])).room_id, R, 'waiting booking got the freed room');
+    // A channel booking (e.g. imported backtest data): refused without force, deleted with it.
+    const ch = (await one(`INSERT INTO channel (property_id, adapter, name) VALUES ($1, 'test', 'Test') RETURNING id`, [P])).id;
+    await pool.query(`UPDATE booking SET channel_id = $2, channel_ref = 'x1' WHERE id = $1`, [b.id, ch]);
+    assert.equal((await call(purgeBookings, P, { booking_ids: [b.id], confirm: true })).status, 409, 'channel booking needs force');
+    assert.deepEqual((await call(purgeBookings, P, { booking_ids: [b.id], confirm: true, force: true })).body, { deleted: 1, unknown: [] });
+    assert.equal((await call(purgeBookings, P, { booking_ids: [c.id], confirm: true, force: true })).status, 409, 'force never deletes card-paid');
     console.log('ok   booking purge');
   } finally {
     for (const P of props) {
-      for (const t of ['hk_job', 'folio_adjustment', 'payment', 'booking_night', 'booking', 'guest', 'room_availability', 'room_type_oversell', 'room', 'room_type']) {
+      for (const t of ['hk_job', 'folio_adjustment', 'payment', 'booking_night', 'booking', 'guest', 'channel', 'room_availability', 'room_type_oversell', 'room', 'room_type']) {
         await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]).catch((e) => console.error(t, e.message));
       }
       await pool.query('DELETE FROM property WHERE id = $1', [P]).catch((e) => console.error('property', e.message));

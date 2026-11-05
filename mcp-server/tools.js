@@ -142,12 +142,13 @@ function createTools(apiRequest) {
   },
   {
     name: 'purge_bookings',
-    description: 'PERMANENTLY delete test bookings (seeded or demo data), up to 500, with their nights, payments, folio lines and extras; their rooms are freed. Not for real guests: use cancel_booking. Refuses (deleting nothing) if any booking has a card payment or came from a channel. Ask the user before calling. Ids outside this property come back in unknown.',
+    description: 'PERMANENTLY delete test bookings (seeded or demo data), up to 500, with their nights, payments, folio lines and extras; their rooms are freed. Not for real guests: use cancel_booking. Refuses (deleting nothing) if any booking has a card payment, or came from a channel unless force: true (e.g. imported backtest data; the channel is not told). Ask the user before calling. Ids outside this property come back in unknown.',
     inputSchema: {
       booking_ids: z.array(z.string()).min(1).max(500),
       confirm: z.literal(true).describe('Must be true'),
+      force: z.boolean().optional().describe('Also delete channel bookings'),
     },
-    run: ({ booking_ids, confirm }) => apiRequest('POST', '/api/bookings/purge', { body: { booking_ids, confirm } }),
+    run: ({ booking_ids, confirm, force }) => apiRequest('POST', '/api/bookings/purge', { body: { booking_ids, confirm, force } }),
   },
   {
     name: 'list_channels',
