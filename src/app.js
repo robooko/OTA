@@ -91,6 +91,7 @@ app.use('/api/equipment', equipmentRoutes);
 app.use('/api/golf', golfRoutes);
 app.use('/api/extras', extrasRoutes);
 app.use('/api/housekeeping', housekeepingRoutes);
+app.use('/api/overbooking', require('./routes/overbooking'));
 app.use('/api/restaurant-orders', restaurantOrderRoutes);
 app.use('/api/restaurant-table-sessions', restaurantTableSessionRoutes);
 app.use('/api/proshop', proshopRoutes);

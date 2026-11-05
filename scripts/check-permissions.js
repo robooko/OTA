@@ -54,8 +54,8 @@ const mw = (fn, req) => new Promise((resolve, reject) => {
 
   try {
     // ── Vocabulary and grants ───────────────────────────────────────────────
-    await check('vocabulary lists the housekeeping names', () => {
-      assert.deepEqual(PERMISSIONS, ['housekeeping.inspect', 'housekeeping.manage']);
+    await check('vocabulary lists the housekeeping and overbooking names', () => {
+      assert.deepEqual(PERMISSIONS, ['housekeeping.inspect', 'housekeeping.manage', 'overbooking.manage']);
     });
     await check('unknownPermissions: names not in the list, or null for a non-list', () => {
       assert.deepEqual(unknownPermissions(['housekeeping.inspect']), []);

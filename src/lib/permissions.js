@@ -8,6 +8,7 @@ const pool = require('../db');
 const PERMISSIONS = [
   'housekeeping.inspect', // record an inspection (pass / fail a clean)
   'housekeeping.manage',  // checklist items, stayover rule, minibar catalogue and lists
+  'overbooking.manage',   // overbooking switch + cap, model allowances, manual overrides
 ];
 
 // null when `list` isn't an array of strings; otherwise the names not in

@@ -59,6 +59,73 @@ async function book(P, body) {
 }
 
 const sections = {
+  async endpoints() {
+    const ob = require('../src/controllers/overbooking');
+    const { requirePermission } = require('../src/middleware/auth');
+    const gate = requirePermission('overbooking.manage');
+    const mw = (fn, req) => new Promise((resolve) => {
+      const res = { statusCode: 200, status(s) { this.statusCode = s; return this; }, json(b) { resolve({ status: this.statusCode, body: b }); } };
+      fn(req, res, () => resolve({ next: true }));
+    });
+    const P = await property('OB Endpoints');
+    const key = (permissions) => ({ auth_method: 'api_key', property_id: P, api_key: { id: 'k', permissions } });
+    assert.equal((await mw(gate, key(['housekeeping.manage']))).status, 403, 'scoped key without permission -> 403');
+    assert.deepEqual(await mw(gate, key(['overbooking.manage'])), { next: true }, 'scoped key with overbooking.manage passes');
+    assert.deepEqual(await mw(gate, key(null)), { next: true }, 'full key passes');
+
+    // settings
+    assert.equal((await call(ob.putSettings, P, { body: { max_pct: 120 } })).status, 400);
+    assert.equal((await call(ob.putSettings, P, { body: { room_lock_days: -1 } })).status, 400);
+    const st = await call(ob.putSettings, P, { body: { enabled: true, max_pct: 50, room_lock_days: 2 } });
+    assert.deepEqual(st.body, { enabled: true, max_pct: 50, room_lock_days: 2 });
+
+    const A = await roomType(P);
+    const [r1, r2] = [await room(P, A, '1'), await room(P, A, '2')];
+    const d = addDays(TODAY, 5);
+    await open(P, [r1, r2], TODAY, 10);
+
+    // model post replaces range
+    const post = (allowances) => call(ob.postAllowances, P, { body: { model: 'safe-95', from: d, to: addDays(d, 2), allowances } });
+    assert.equal((await post([{ room_type_id: A, date: d, allowance: 2 }, { room_type_id: A, date: addDays(d, 1), allowance: 1 }])).body.saved, 2);
+    assert.equal((await call(ob.putManual, P, { params: { room_type_id: A, date: addDays(d, 1) }, body: { manual_allowance: 3 } })).status, 200);
+    await post([{ room_type_id: A, date: d, allowance: 1 }]);
+    const rows = async () => (await pool.query(`SELECT date::text, model_allowance, manual_allowance, model FROM room_type_oversell WHERE room_type_id = $1 ORDER BY date`, [A])).rows;
+    assert.deepEqual(await rows(), [
+      { date: d, model_allowance: 1, manual_allowance: null, model: 'safe-95' },
+      { date: addDays(d, 1), model_allowance: 0, manual_allowance: 3, model: 'safe-95' },
+    ], 'model post replaces range, keeps manual');
+    // manual null hands back to model
+    await call(ob.putManual, P, { params: { room_type_id: A, date: addDays(d, 1) }, body: { manual_allowance: null } });
+    assert.equal((await rows())[1].manual_allowance, null, 'manual null hands back to model');
+    assert.equal((await call(ob.putManual, P, { params: { room_type_id: A, date: d }, body: { manual_allowance: -1 } })).status, 400);
+    assert.equal((await post([{ room_type_id: A, date: addDays(d, 5), allowance: 1 }])).status, 400, 'date outside range -> 400');
+    assert.equal((await post([{ room_type_id: A, date: d, allowance: 1.5 }])).status, 400, 'non-integer -> 400');
+
+    // other property's room type -> 400
+    const Q = await property('OB Endpoints Other');
+    const QA = await roomType(Q);
+    const bad = await post([{ room_type_id: QA, date: d, allowance: 1 }]);
+    assert.equal(bad.status, 400); assert.deepEqual(bad.body.details, [QA], "other property's room type -> 400");
+
+    // overview: cap 50% of 2 = 1, model 1 on d
+    const ov = await call(ob.getOverview, P, { query: { from: d, to: addDays(d, 1) } });
+    assert.equal(ov.status, 200, JSON.stringify(ov.body));
+    assert.deepEqual(ov.body, [{ room_type_id: A, date: d, rooms: 2, sold: 0, model_allowance: 1, manual_allowance: null, cap: 1, effective_allowance: 1, sellable: 3, unplaced: 0 }]);
+    assert.equal((await call(ob.getOverview, P, { query: { from: d, to: addDays(d, 500) } })).status, 400, 'range capped');
+
+    // arrivals lists unplaced guest and free rooms
+    await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 1) });
+    await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 1) });
+    const u = await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 1) });
+    assert.equal(u.body.room_id, null);
+    const arr = (await call(ob.getArrivals, P, { query: { date: d } })).body;
+    assert.deepEqual(arr.unplaced_arrivals.map((b) => b.id), [u.body.id], 'arrivals lists unplaced guest');
+    assert.deepEqual(arr.unplaced_in_house, []);
+    assert.deepEqual(arr.free_rooms, [], 'no free rooms that night');
+    const arr2 = (await call(ob.getArrivals, P, { query: { date: addDays(d, 1) } })).body;
+    assert.deepEqual(arr2.free_rooms, [{ room_type_id: A, rooms: [{ id: r1, room_number: '1' }, { id: r2, room_number: '2' }] }], 'free rooms by type');
+  },
+
   async readers() {
     const { listBookings, getBooking } = require('../src/controllers/bookings');
     const { fetchJoinedBooking } = require('../src/lib/roomPayments');
