@@ -10,6 +10,7 @@ const staffOrFullKey = [authenticateOrApiKey, requireRoleOrApiKey('admin', 'staf
 
 router.get('/', staffOrFullKey, ctrl.getOverview);
 router.get('/arrivals', staffOrFullKey, ctrl.getArrivals);
+router.get('/pace', staffOrFullKey, ctrl.getPace);
 router.get('/settings', staffOrFullKey, ctrl.getSettings);
 router.put('/settings', manage, ctrl.putSettings);
 router.post('/allowances', manage, ctrl.postAllowances);

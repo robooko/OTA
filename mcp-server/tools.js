@@ -411,6 +411,12 @@ function createTools(apiRequest) {
     run: (query) => apiRequest('GET', '/api/overbooking/arrivals', { query }),
   },
   {
+    name: 'get_booking_pace',
+    description: "Booking pace for the coming nights: rooms on the books today vs. what the same weekday usually had that many days out. Use it to spot nights (e.g. a weekend) behind pace that need a discount or promotion.",
+    inputSchema: { days: z.number().int().min(1).max(180).describe('Nights ahead, default 90').optional() },
+    run: (query) => apiRequest('GET', '/api/overbooking/pace', { query }),
+  },
+  {
     name: 'get_booking_folio',
     description: "A booking's folio: room, extras, room service and adjustment lines, payments, and balance",
     inputSchema: { id: z.string().describe('Booking id') },

@@ -582,6 +582,25 @@ const sections = {
     const p = await one('SELECT overbooking_enabled, oversell_max_pct, room_lock_days FROM property WHERE id = $1', [P]);
     assert.deepEqual({ ...p, oversell_max_pct: Number(p.oversell_max_pct) }, { overbooking_enabled: false, oversell_max_pct: 0, room_lock_days: 1 });
   },
+  async pace() {
+    const ob = require('../src/controllers/overbooking');
+    const P = await property('OB Pace');
+    const A = await roomType(P);
+    const r = await room(P, A, 'P1');
+    const past = addDays(TODAY, -7);
+    const future = addDays(TODAY, 7); // same weekday as past, 7 nights out
+    const lead = async (b, n) => pool.query(`UPDATE booking SET metadata = jsonb_build_object('lead_time', $2::text) WHERE id = $1`, [b, n]);
+    await lead(await rawBooking(P, A, r, past, addDays(past, 1)), 10); // on the books 7 out
+    await lead(await rawBooking(P, A, r, past, addDays(past, 1)), 3); // booked later than 7 out
+    await rawBooking(P, A, r, past, addDays(past, 1), 'cancelled'); // never counts
+    await rawBooking(P, A, r, future, addDays(future, 1)); // booked today
+    const { status, body } = await call(ob.getPace, P, { query: { days: '8' } });
+    assert.equal(status, 200);
+    assert.equal(body.rooms, 1);
+    assert.equal(body.nights.length, 8);
+    assert.deepEqual(body.nights[7], { date: future, lead: 7, on_books: 1, samples: 1, expected: 1 }, 'pace: lead-time history by weekday');
+    assert.equal((await call(ob.getPace, P, { query: { days: '0' } })).status, 400);
+  },
 };
 
 (async () => {

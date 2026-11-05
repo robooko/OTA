@@ -154,4 +154,53 @@ async function getArrivals(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { getSettings, putSettings, postAllowances, putManual, getOverview, getArrivals };
+// GET /api/overbooking/pace?days=90 -- booking pace per coming night: rooms
+// on the books today vs. what the same weekday usually had at that lead time
+// (mean over the past year's nights, since this property's first stay).
+// Net of cancellations both sides: bookings carry no cancelled date, so a
+// cancelled one never counted. Imported bookings carry their real lead time
+// in metadata.lead_time (created_at is the import date).
+// ponytail: correlated subqueries, O(nights x past nights x bookings) -- a
+// pickup snapshot table if a property outgrows a year of a few thousand stays.
+const PACE_SQL = `
+WITH h AS (
+  SELECT check_in, check_out,
+         CASE WHEN metadata->>'lead_time' ~ '^[0-9]+$' THEN check_in - (metadata->>'lead_time')::int
+              ELSE created_at::date END AS booked_on
+    FROM booking
+   WHERE property_id = $1 AND status IN ('pending_payment', 'confirmed', 'checked_in', 'checked_out')
+     AND check_out > current_date - 365
+),
+past AS (
+  SELECT d::date AS night
+    FROM generate_series(GREATEST(current_date - 364, (SELECT min(check_in) FROM h)), current_date - 1, interval '1 day') d
+),
+f AS (SELECT d::date AS night FROM generate_series(current_date, current_date + $2::int - 1, interval '1 day') d)
+SELECT f.night::text AS date, f.night - current_date AS lead,
+       (SELECT count(*) FROM h WHERE f.night >= h.check_in AND f.night < h.check_out AND h.booked_on <= current_date)::int AS on_books,
+       (SELECT count(*) FROM past p WHERE extract(dow FROM p.night) = extract(dow FROM f.night))::int AS samples,
+       (SELECT count(*) FROM past p JOIN h ON p.night >= h.check_in AND p.night < h.check_out
+                                      AND h.booked_on <= p.night - (f.night - current_date)
+         WHERE extract(dow FROM p.night) = extract(dow FROM f.night))::int AS past_total
+  FROM f ORDER BY f.night`;
+
+async function getPace(req, res, next) {
+  try {
+    const days = req.query.days === undefined ? 90 : Number(req.query.days);
+    if (!Number.isInteger(days) || days < 1 || days > 180) return bad(res, 'days must be a whole number from 1 to 180');
+    const [{ rows }, { rows: [{ rooms }] }] = await Promise.all([
+      pool.query(PACE_SQL, [req.property_id, days]),
+      pool.query(`SELECT count(*)::int AS rooms FROM room r JOIN room_type rt ON rt.id = r.room_type_id
+                   WHERE r.property_id = $1 AND r.status = 'active' AND rt.status = 'active'`, [req.property_id]),
+    ]);
+    res.json({
+      rooms,
+      nights: rows.map((r) => ({
+        date: r.date, lead: r.lead, on_books: r.on_books, samples: r.samples,
+        expected: r.samples ? Math.round((r.past_total / r.samples) * 10) / 10 : null,
+      })),
+    });
+  } catch (err) { next(err); }
+}
+
+module.exports = { getSettings, putSettings, postAllowances, putManual, getOverview, getArrivals, getPace };
