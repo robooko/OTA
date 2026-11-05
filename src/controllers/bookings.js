@@ -639,7 +639,13 @@ async function walkBooking(req, res, next) {
     await client.query('BEGIN');
     const booking = await roomPayments.lockBooking(client, req.params.id, req.property_id);
     if (!booking) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Booking not found' }); }
-    if (!['confirmed', 'pending_payment'].includes(booking.status)) {
+    // An unpaid booking's card form is still live: cancel it (DELETE), which
+    // releases the payment, rather than walk a guest who could still pay.
+    if (booking.status === 'pending_payment') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'This booking is awaiting card payment; cancel it (DELETE) to release the payment' });
+    }
+    if (booking.status !== 'confirmed') {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: `A ${booking.status} booking can't be walked` });
     }

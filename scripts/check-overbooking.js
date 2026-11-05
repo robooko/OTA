@@ -322,6 +322,10 @@ const sections = {
     assert.deepEqual(await nightsOf(k1.body.id), []);
     assert.deepEqual((await nightsOf(k2.body.id)).map((n) => n.room_id), [d1], 'walk frees nights and assigns waiting');
     assert.equal((await call(ctrl.walkBooking, P, { params: { id: w.body.id }, body: {} })).status, 409, 'walk refused on checked_in');
+    await pool.query(`UPDATE booking SET status = 'pending_payment', payment_due_at = now() + interval '1 hour' WHERE id = $1`, [k2.body.id]);
+    const unpaid = await call(ctrl.walkBooking, P, { params: { id: k2.body.id }, body: {} });
+    assert.equal(unpaid.status, 409, 'walk refused while a card payment is open');
+    await pool.query(`UPDATE booking SET status = 'confirmed', payment_due_at = NULL WHERE id = $1`, [k2.body.id]);
     assert.equal((await call(ctrl.updateBooking, P, { params: { id: k2.body.id }, body: { status: 'walked' } })).status, 400, 'walked only via /walk');
     assert.equal((await call(ctrl.cancelBooking, P, { params: { id: k1.body.id }, extra: { auth_method: 'clerk', query: {} } })).status, 404, 'walked booking cannot be cancelled');
   },

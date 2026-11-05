@@ -361,7 +361,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'walk_booking',
-    description: 'Walk a guest the hotel cannot house (sent to another hotel): status walked, every night freed. Not a cancellation -- no rate plan terms, no email. Only confirmed or unpaid bookings.',
+    description: 'Walk a guest the hotel cannot house (sent to another hotel): status walked, every night freed. Not a cancellation -- no rate plan terms, no email. Only confirmed bookings (cancel an unpaid one instead).',
     inputSchema: { id: z.string().describe('Booking id'), note: z.string().max(500).describe('e.g. where they were sent').optional() },
     run: ({ id, ...body }) => apiRequest('POST', `/api/bookings/${id}/walk`, { body }),
   },
