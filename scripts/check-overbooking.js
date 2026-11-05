@@ -59,6 +59,24 @@ async function book(P, body) {
 }
 
 const sections = {
+  async channels() {
+    const { desiredAri } = require('../src/lib/channels/desired');
+    const P = await property('OB Channels', { overbooking_enabled: true, oversell_max_pct: 100 });
+    const A = await roomType(P);
+    const r1 = await room(P, A, '1');
+    const d = addDays(TODAY, 3);
+    await open(P, [r1], TODAY, 10);
+    const ch = await one(`INSERT INTO channel (property_id, adapter, name, horizon_days) VALUES ($1, 'test', 'OB', 10) RETURNING *`, [P]);
+    await pool.query(`INSERT INTO channel_mapping (property_id, channel_id, room_type_id, room_code, rate_code) VALUES ($1, $2, $3, 'STD', 'BAR')`, [P, ch.id, A]);
+    const avail = async () => (await desiredAri(pool, ch, TODAY)).find((x) => x.date === d).available;
+    assert.equal(await avail(), 1, 'one free room');
+    assert.equal((await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 1) })).body.room_id, r1);
+    assert.equal(await avail(), 0, 'sold out, no allowance');
+    await pool.query(`INSERT INTO room_type_oversell (property_id, room_type_id, date, model_allowance) VALUES ($1, $2, $3, 1)`, [P, A, d]);
+    assert.equal(await avail(), 1, 'channel push includes allowance');
+    await pool.query('DELETE FROM channel WHERE property_id = $1', [P]);
+  },
+
   async move() {
     const ctrl = require('../src/controllers/bookings');
     const P = await property('OB Move', { overbooking_enabled: true, oversell_max_pct: 100 });
@@ -298,7 +316,7 @@ const sections = {
     }
   } finally {
     if (props.length) {
-      for (const t of ['booking_room_move', 'booking_night', 'room_type_oversell', 'payment', 'booking', 'guest', 'room_availability', 'room', 'room_type']) {
+      for (const t of ['booking_room_move', 'booking_night', 'room_type_oversell', 'payment', 'booking', 'channel', 'guest', 'room_availability', 'room', 'room_type']) {
         await pool.query(`DELETE FROM ${t} WHERE property_id = ANY($1)`, [props]);
       }
       await pool.query('DELETE FROM property WHERE id = ANY($1)', [props]);
