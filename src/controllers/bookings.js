@@ -334,6 +334,11 @@ async function updateBooking(req, res, next) {
     ]);
     if (!beforeRes.rows.length) return res.status(404).json({ error: 'Booking not found' });
     let statusBefore = beforeRes.rows[0].status;
+    // A booking that has let its rooms go can't simply take them back -- they
+    // may be resold. Book again instead.
+    if (['confirmed', 'checked_in'].includes(status) && ['cancelled', 'expired', 'walked', 'checked_out'].includes(statusBefore)) {
+      return res.status(409).json({ error: `A ${statusBefore} booking no longer holds rooms; make a new booking` });
+    }
 
     // An unpaid plan booking: staff confirming it settles the open card
     // payment (rate plans spec §7); other status moves would leave the
@@ -391,32 +396,37 @@ async function updateBooking(req, res, next) {
       }
     }
 
-    const { rows } = await pool.query(
-      `UPDATE booking SET
-         status   = COALESCE($1, status),
-         guests   = COALESCE($2, guests),
-         metadata = COALESCE($3::jsonb, metadata)
-       WHERE id = $4 AND property_id = $5 RETURNING *`,
-      [nextStatus, guests, metadata ?? null, req.params.id, req.property_id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
-
-    // Checking out frees tonight and every later night (an early departure
-    // puts those rooms back on sale / to waiting bookings).
-    if (rows[0].status === 'checked_out' && statusBefore !== 'checked_out') {
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        await roomNights.releaseNights(client, rows[0], await roomNights.propertyToday(client, req.property_id));
-        await client.query('COMMIT');
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => {});
-        throw err;
-      } finally {
-        client.release();
+    // Status and nights change together. Leaving the holding statuses frees
+    // the nights: checking out frees tonight on (an early departure puts those
+    // rooms back on sale / to waiting bookings), cancelling frees them all.
+    let rows;
+    let released = false;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      ({ rows } = await client.query(
+        `UPDATE booking SET
+           status   = COALESCE($1, status),
+           guests   = COALESCE($2, guests),
+           metadata = COALESCE($3::jsonb, metadata)
+         WHERE id = $4 AND property_id = $5 RETURNING *`,
+        [nextStatus, guests, metadata ?? null, req.params.id, req.property_id]
+      ));
+      if (rows.length && rows[0].status !== statusBefore
+          && roomNights.HOLDING.includes(statusBefore) && !roomNights.HOLDING.includes(rows[0].status)) {
+        const from = rows[0].status === 'checked_out' ? await roomNights.propertyToday(client, req.property_id) : null;
+        await roomNights.releaseNights(client, rows[0], from);
+        released = true;
       }
-      await roomPayments.refreshAvailabilityView();
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
     }
+    if (!rows.length) return res.status(404).json({ error: 'Booking not found' });
+    if (released) await roomPayments.refreshAvailabilityView();
 
     const bookedFull = (await fetchJoinedBooking(rows[0].id)) ?? rows[0];
 

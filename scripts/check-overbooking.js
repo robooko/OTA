@@ -59,6 +59,32 @@ async function book(P, body) {
 }
 
 const sections = {
+  async status() {
+    const { updateBooking } = require('../src/controllers/bookings');
+    const P = await property('OB Status', { overbooking_enabled: true, oversell_max_pct: 100 });
+    const A = await roomType(P);
+    const r1 = await room(P, A, '1');
+    const d = addDays(TODAY, 3);
+    await open(P, [r1], addDays(TODAY, -2), 15);
+    const put = (id, body) => call(updateBooking, P, { params: { id }, body });
+
+    // cancelling through PUT releases the nights (and hands the room on)
+    await pool.query(`INSERT INTO room_type_oversell (property_id, room_type_id, date, model_allowance) VALUES ($1, $2, $3, 1)`, [P, A, d]);
+    const b = await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 1) });
+    const w = await book(P, { room_type_id: A, check_in: d, check_out: addDays(d, 1) });
+    assert.equal(w.body.room_id, null);
+    assert.equal((await put(b.body.id, { status: 'cancelled' })).status, 200);
+    assert.deepEqual(await nightsOf(b.body.id), [], 'PUT cancelled releases nights');
+    assert.deepEqual((await nightsOf(w.body.id)).map((n) => n.room_id), [r1], 'and the room goes to the waiting booking');
+
+    // a booking that no longer holds rooms can't be put back into a holding status
+    const back = await put(b.body.id, { status: 'confirmed' });
+    assert.equal(back.status, 409, 'cancelled -> confirmed refused');
+    const o = await book(P, { room_type_id: A, check_in: addDays(TODAY, 6), check_out: addDays(TODAY, 7) });
+    await pool.query(`UPDATE booking SET status = 'checked_out' WHERE id = $1`, [o.body.id]);
+    assert.equal((await put(o.body.id, { status: 'checked_in' })).status, 409, 'checked_out -> checked_in refused');
+  },
+
   async blocks() {
     const { upsertRoomAvailability } = require('../src/controllers/availability');
     const { cancelBooking } = require('../src/controllers/bookings');
