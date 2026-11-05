@@ -4,6 +4,7 @@
 const pool = require('../db');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const roomNights = require('../lib/roomNights');
+const { upgradeScore } = require('../lib/upgradeScore');
 const { refreshAvailabilityView, NIGHTS_SQL } = require('../lib/roomPayments');
 
 const MAX_ROWS = 5000;
@@ -128,18 +129,34 @@ async function getOverview(req, res, next) {
 }
 
 // GET /api/overbooking/arrivals?date -- the front desk's warning: guests
-// arriving (or in house) with no room that night, and the rooms still free.
+// arriving (or in house) with no room that night, best upgrade candidate
+// first (upgrade_score + upgrade_reasons), and the rooms still free.
 async function getArrivals(req, res, next) {
   try {
     const { date } = req.query;
     if (!isValidDate(date)) return bad(res, 'date must be YYYY-MM-DD');
     const { rows: waiting } = await pool.query(
       `SELECT b.id, b.status, b.check_in::text, b.check_out::text, b.room_type_id, rt.name AS room_type_name, rt.code AS room_type_code,
-              g.first_name, g.last_name, ${NIGHTS_SQL}
+              g.first_name, g.last_name, ${NIGHTS_SQL},
+              hist.*, b.channel_id IS NULL AS direct,
+              (b.rate_plan_terms->>'refundable')::boolean AS refundable, b.rate_plan_terms->>'adjustment_pct' AS adjustment_pct
        FROM booking_night bn JOIN booking b ON b.id = bn.booking_id
        JOIN guest g ON g.id = b.guest_id JOIN room_type rt ON rt.id = b.room_type_id
+       -- The guest's history before this stay, for upgradeScore.
+       CROSS JOIN LATERAL (
+         SELECT count(*) FILTER (WHERE p.status = 'checked_out')::int AS past_stays,
+                COALESCE(sum(p.total_price) FILTER (WHERE p.status = 'checked_out'), 0) AS past_spend,
+                COALESCE((SELECT sum(be.quantity * be.unit_price) FROM booking_extra be JOIN booking pb ON pb.id = be.booking_id
+                           WHERE pb.guest_id = b.guest_id AND pb.status = 'checked_out' AND pb.id <> b.id), 0) AS past_extras,
+                (max(p.check_out) FILTER (WHERE p.status = 'checked_out'))::text AS last_stay,
+                count(*) FILTER (WHERE p.status = 'cancelled')::int AS cancellations
+           FROM booking p WHERE p.guest_id = b.guest_id AND p.id <> b.id AND p.check_in < b.check_in) hist
        WHERE bn.property_id = $1 AND bn.night = $2 AND bn.room_id IS NULL AND b.status = ANY($3::text[])
        ORDER BY b.created_at`, [req.property_id, date, roomNights.HOLDING]);
+    // Best upgrade candidate first; ties keep booking order.
+    const scored = waiting.map(({ past_stays, past_spend, past_extras, last_stay, cancellations, direct, refundable, adjustment_pct, ...b }) => ({
+      ...b, ...upgradeScore({ past_stays, past_spend, past_extras, last_stay, cancellations, direct, refundable, adjustment_pct, check_in: b.check_in }),
+    })).sort((x, y) => y.upgrade_score - x.upgrade_score);
     const { rows: free } = await pool.query(
       `SELECT r.room_type_id, json_agg(json_build_object('id', r.id, 'room_number', r.room_number) ORDER BY r.room_number) AS rooms
        FROM room r JOIN room_availability ra ON ra.room_id = r.id AND ra.date = $2
@@ -147,8 +164,8 @@ async function getArrivals(req, res, next) {
          AND NOT EXISTS (SELECT 1 FROM booking_night h WHERE h.room_id = r.id AND h.night = $2)
        GROUP BY r.room_type_id ORDER BY r.room_type_id`, [req.property_id, date]);
     res.json({
-      unplaced_arrivals: waiting.filter((b) => b.check_in === date),
-      unplaced_in_house: waiting.filter((b) => b.check_in !== date),
+      unplaced_arrivals: scored.filter((b) => b.check_in === date),
+      unplaced_in_house: scored.filter((b) => b.check_in !== date),
       free_rooms: free,
     });
   } catch (err) { next(err); }
