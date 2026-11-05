@@ -416,6 +416,19 @@ const sections = {
     const race = await Promise.all([g1, g2].map((guest_id) => call(createBooking, Q,
       { body: { guest_id, room_type_id: QA, check_in: d, check_out: addDays(d, 1) }, extra: { auth_method: 'clerk' } })));
     assert.deepEqual(race.map((r) => r.status).sort(), [201, 409], 'race: two concurrent bookings for last slot');
+
+    // a bumped guest moves whole-stay when a room is free for all their nights
+    const S = await property('OB Bump Whole');
+    const SA = await roomType(S);
+    const [s1, s2] = [await room(S, SA, '1'), await room(S, SA, '2')];
+    await open(S, [s1, s2], TODAY, 20);
+    const sd = addDays(TODAY, 10);
+    const sb = (body) => call(createBooking, S, { body: { guest_id: null, ...body }, extra: { auth_method: 'clerk' } });
+    const h = await sb({ guest_id: await guest(S), room_type_id: SA, check_in: sd, check_out: addDays(sd, 3) });
+    assert.equal(h.body.room_id, s1);
+    assert.equal((await sb({ guest_id: await guest(S), room_id: s1, check_in: addDays(sd, 1), check_out: addDays(sd, 2) })).status, 201);
+    assert.deepEqual((await nightsOf(h.body.id)).map((n) => n.room_id), [s2, s2, s2], 'bump moves the holder whole-stay, not split');
+    assert.equal((await one('SELECT is_available FROM room_availability WHERE room_id = $1 AND date = $2', [s1, sd])).is_available, true, 'nights the holder left in the picked room reopen');
   },
 
   async counts() {

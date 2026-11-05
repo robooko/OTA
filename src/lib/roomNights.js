@@ -180,10 +180,16 @@ async function claimRoom(client, { propertyId, roomId, nights, selfId, lockedTyp
   }
   const bumped = [];
   for (const [holderId, h] of holders) {
+    // Not arrived yet, so keep them in one room: a room free for the whole
+    // stay first, else another room for just the bumped nights, else none.
+    const { rows: all } = await client.query('SELECT night::text FROM booking_night WHERE booking_id = $1 ORDER BY night', [holderId]);
+    const stay = all.map((r) => r.night);
+    const whole = await freeRoom(client, propertyId, h.type, stay, roomId);
+    const nights = whole ? stay : h.nights;
     await setNights(client, holderId, h.nights, null);
-    const to = await freeRoom(client, propertyId, h.type, h.nights, roomId);
-    if (to) await setNights(client, holderId, h.nights, to);
-    await logMove(client, { propertyId, bookingId: holderId, from: h.nights[0], to: addDaysIso(h.nights.at(-1), 1),
+    const to = whole ?? await freeRoom(client, propertyId, h.type, h.nights, roomId);
+    if (to) await setNights(client, holderId, nights, to);
+    await logMove(client, { propertyId, bookingId: holderId, from: nights[0], to: addDaysIso(nights.at(-1), 1),
       fromRoomId: roomId, toRoomId: to, reason: 'bump', movedBy });
     await syncCurrentRoom(client, holderId);
     bumped.push(holderId);
