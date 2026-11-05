@@ -238,6 +238,11 @@ const sections = {
     await pool.query(`UPDATE booking SET rate_plan_terms = '{"refundable":true,"cancel_cutoff_hours":48,"payment_mode":"hold","mode_used":"hold","pay_at_hotel":true}' WHERE id = $1`, [o.body.id]);
     const ctx = await require('../src/lib/roomBookingEmails').loadEmailContext(o.body.id);
     assert.equal(ctx?.b.room_type_name, 'Std', 'emails render with no room');
+
+    // minibar recording for a booking with no room uses its sold type (no crash)
+    const { recordUsage } = require('../src/lib/minibar');
+    const mb = await recordUsage(pool, { propertyId: P, job: { id: '00000000-0000-0000-0000-000000000000', booking_id: o.body.id }, items: [], userId: null });
+    assert.ok(!mb?.error, 'minibar works with no room');
   },
 
   async housekeeping() {

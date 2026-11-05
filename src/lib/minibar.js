@@ -25,7 +25,9 @@ async function recordUsage(db, { propertyId, job, items, userId }) {
     if (!Number.isInteger(i?.quantity) || i.quantity < 0 || i.quantity > 99) return { error: 'quantity must be a whole number 0 to 99' };
   }
   const booking = (await db.query(
-    `SELECT b.id, b.rate_plan_id, r.room_type_id FROM booking b JOIN room r ON r.id = b.room_id WHERE b.id = $1`, [job.booking_id]
+    // The sold type's list (an upgraded guest keeps what they booked; a
+    // booking may have no room tonight).
+    `SELECT b.id, b.rate_plan_id, b.room_type_id FROM booking b WHERE b.id = $1`, [job.booking_id]
   )).rows[0];
   const ids = items.map((i) => i.minibar_item_id);
   const catalogue = new Map((await db.query(
