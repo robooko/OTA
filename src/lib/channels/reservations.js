@@ -96,10 +96,10 @@ async function handleNew(client, channel, r) {
     candidates: stay.candidates,
     nights: stayNights(r.check_in, r.check_out),
     insert: async (room) => (await client.query(
-      `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, status, rate_plan_id, channel_id, channel_ref)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'confirmed', $8, $9, $10) RETURNING *`,
+      `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, status, rate_plan_id, channel_id, channel_ref, room_type_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'confirmed', $8, $9, $10, $11) RETURNING *`,
       [channel.property_id, guestId, room.id, r.check_in, r.check_out, r.guests ?? 1, r.total_price.toFixed(2),
-        stay.mapping.rate_plan_id, channel.id, r.channel_ref])).rows[0],
+        stay.mapping.rate_plan_id, channel.id, r.channel_ref, stay.mapping.room_type_id])).rows[0],
   });
   if (!booked) return { outcome: 'rejected', reason: 'no room available' };
   await syncChannelPayment(client, channel, r, booked);

@@ -277,11 +277,11 @@ async function createBooking(req, res, next) {
         const terms = plan ? termsSnapshot(plan, { pay_at_hotel: !card }) : null;
         const bookingRes = await client.query(
           `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata,
-                                status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout)
+                                status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout, room_type_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                   CASE WHEN $12::int IS NULL THEN NULL ELSE now() + make_interval(mins => $12::int) END, $13) RETURNING *`,
+                   CASE WHEN $12::int IS NULL THEN NULL ELSE now() + make_interval(mins => $12::int) END, $13, $14) RETURNING *`,
           [req.property_id, guest_id, candidate.id, check_in, check_out, guests || 1, total.toFixed(2), metadata ?? {},
-            status, plan?.id ?? null, terms, payWindow, card && viaApiKey]
+            status, plan?.id ?? null, terms, payWindow, card && viaApiKey, rateTypeId]
         );
         return bookingRes.rows[0];
       },
