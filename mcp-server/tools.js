@@ -321,7 +321,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'create_booking',
-    description: 'Book a room for a guest. Give exactly one of room_id or room_type_id (any free active room of that type). On a rate plan the booking starts pending_payment until the guest pays by card.',
+    description: 'Book a room for a guest. Give exactly one of room_id (that room, kept for the guest; it may move an auto-assigned booking to another room of its type) or room_type_id (a free room of the type is auto-assigned; when the type is full but the property oversells, the booking waits without a room). On a rate plan the booking starts pending_payment until the guest pays by card.',
     inputSchema: {
       guest_id: z.string(),
       room_id: z.string().optional(),
@@ -336,15 +336,79 @@ function createTools(apiRequest) {
   },
   {
     name: 'update_booking',
-    description: 'Change a booking status, party size or metadata. checked_out is refused while the folio has a balance and checked_in while the room is not ready (409); force overrides both. Use cancel_booking to cancel.',
+    description: 'Change a booking status, party size or metadata. checked_out is refused while the folio has a balance and checked_in while the room is not ready (409); force overrides both. checked_in needs a room for tonight: an oversold booking without one gets 409 room_required -- pass room_id to place it. Use cancel_booking to cancel, walk_booking to walk.',
     inputSchema: {
       id: z.string(),
       status: z.enum(['confirmed', 'checked_in', 'checked_out']).optional(),
       guests: z.number().int().min(1).optional(),
       metadata: z.record(z.any()).optional(),
       force: z.boolean().optional(),
+      room_id: z.string().describe('checked_in only: room for tonight when the booking has none').optional(),
     },
     run: ({ id, ...body }) => apiRequest('PUT', `/api/bookings/${id}`, { body }),
+  },
+  {
+    name: 'move_booking_room',
+    description: 'Put a booking in another room for some or all of its nights: an upgrade, a downgrade, a mid-stay move, or a room for nights an oversold booking was waiting on. Any active room of any type; the price never changes (refunds are manual). Defaults: from = tonight (or arrival), to = check-out; reason by base rate vs the sold type.',
+    inputSchema: {
+      id: z.string().describe('Booking id'),
+      room_id: z.string(),
+      from: z.string().describe('YYYY-MM-DD, first night to move').optional(),
+      to: z.string().describe('YYYY-MM-DD, exclusive').optional(),
+      reason: z.enum(['upgrade', 'downgrade', 'move']).optional(),
+    },
+    run: ({ id, ...body }) => apiRequest('POST', `/api/bookings/${id}/move`, { body }),
+  },
+  {
+    name: 'walk_booking',
+    description: 'Walk a guest the hotel cannot house (sent to another hotel): status walked, every night freed. Not a cancellation -- no rate plan terms, no email. Only confirmed or unpaid bookings.',
+    inputSchema: { id: z.string().describe('Booking id'), note: z.string().max(500).describe('e.g. where they were sent').optional() },
+    run: ({ id, ...body }) => apiRequest('POST', `/api/bookings/${id}/walk`, { body }),
+  },
+  {
+    name: 'get_overbooking_settings',
+    description: "The property's room overbooking switch, cap (max % of a type's active rooms oversold per night) and room_lock_days (how long before arrival an auto-assigned room stops being bumpable by a picked room)",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/overbooking/settings'),
+  },
+  {
+    name: 'set_overbooking_settings',
+    description: 'Turn room overbooking on/off and set its cap and room lock days. Needs the overbooking.manage permission.',
+    inputSchema: {
+      enabled: z.boolean().optional(),
+      max_pct: z.number().min(0).max(100).optional(),
+      room_lock_days: z.number().int().min(0).max(30).optional(),
+    },
+    run: (body) => apiRequest('PUT', '/api/overbooking/settings', { body }),
+  },
+  {
+    name: 'set_oversell_allowances',
+    description: "Post the model's oversell allowances (extra rooms that may be sold per room type and night). Replaces the model's values for [from, to): nights left out go to 0. Manual overrides are kept. Needs overbooking.manage.",
+    inputSchema: {
+      model: z.string().max(100),
+      from: z.string().describe('YYYY-MM-DD'),
+      to: z.string().describe('YYYY-MM-DD, exclusive'),
+      allowances: z.array(z.object({ room_type_id: z.string(), date: z.string(), allowance: z.number().int().min(0) })).max(5000),
+    },
+    run: (body) => apiRequest('POST', '/api/overbooking/allowances', { body }),
+  },
+  {
+    name: 'set_oversell_override',
+    description: "A manager's oversell allowance for one room type and night, overriding the model; null hands it back to the model. Needs overbooking.manage.",
+    inputSchema: { room_type_id: z.string(), date: z.string().describe('YYYY-MM-DD'), manual_allowance: z.number().int().min(0).nullable() },
+    run: ({ room_type_id, date, manual_allowance }) => apiRequest('PUT', `/api/overbooking/allowances/${room_type_id}/${date}`, { body: { manual_allowance } }),
+  },
+  {
+    name: 'get_overbooking',
+    description: 'Per night and room type: rooms, nights sold, model / manual / effective oversell allowance, cap, sellable rooms and nights still without a room. Up to 400 days.',
+    inputSchema: { from: z.string().describe('YYYY-MM-DD'), to: z.string().describe('YYYY-MM-DD, exclusive'), room_type_id: z.string().optional() },
+    run: (query) => apiRequest('GET', '/api/overbooking', { query }),
+  },
+  {
+    name: 'get_oversold_arrivals',
+    description: "The front desk's oversold warning for a date: arrivals with no room yet, in-house guests with no room that night, and the rooms still free by type",
+    inputSchema: { date: z.string().describe('YYYY-MM-DD') },
+    run: (query) => apiRequest('GET', '/api/overbooking/arrivals', { query }),
   },
   {
     name: 'get_booking_folio',
