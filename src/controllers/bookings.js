@@ -667,7 +667,64 @@ async function walkBooking(req, res, next) {
   }
 }
 
+// Hard-delete test bookings (seeded/demo data): the rows and their folio,
+// extras, minibar and rating rows go; housekeeping jobs, restaurant tabs and
+// channel logs keep their row with the link cleared. Freed rooms go to
+// waiting bookings. Refuses card-paid and channel bookings (real money / a
+// guest holding it elsewhere): cancel those instead.
+async function purgeBookings(req, res, next) {
+  const ids = req.body?.booking_ids;
+  if (!Array.isArray(ids) || !ids.length || ids.length > 500 || !ids.every(isValidUuid)) {
+    return res.status(400).json({ error: 'booking_ids must be an array of 1-500 uuids' });
+  }
+  if (req.body.confirm !== true) {
+    return res.status(400).json({ error: 'confirm must be true: this permanently deletes the bookings' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: found } = await client.query(
+      `SELECT * FROM booking WHERE property_id = $1 AND id = ANY($2::uuid[]) ORDER BY id FOR UPDATE`,
+      [req.property_id, [...new Set(ids)]]);
+    const keep = found.length ? (await client.query(
+      `SELECT b.id FROM booking b WHERE b.id = ANY($1::uuid[])
+         AND (b.channel_id IS NOT NULL OR b.stripe_payment_intent_id IS NOT NULL
+              OR EXISTS (SELECT 1 FROM payment p WHERE p.booking_id = b.id AND p.stripe_payment_intent_id IS NOT NULL))`,
+      [found.map((b) => b.id)])).rows.map((r) => r.id) : [];
+    if (keep.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Some bookings have a card payment or came from a channel; cancel them instead', details: keep });
+    }
+    const freed = new Map();
+    for (const b of found) {
+      for (const [roomId, ns] of await roomNights.releaseNights(client, b, null, { refillNow: false })) {
+        freed.set(roomId, [...(freed.get(roomId) ?? []), ...ns]);
+      }
+    }
+    const del = found.map((b) => b.id);
+    for (const t of ['payment', 'folio_adjustment', 'booking_extra', 'minibar_usage', 'cleanliness_rating']) {
+      await client.query(`DELETE FROM ${t} WHERE booking_id = ANY($1::uuid[])`, [del]);
+    }
+    await client.query('UPDATE hk_job SET booking_id = NULL WHERE booking_id = ANY($1::uuid[])', [del]);
+    await client.query('UPDATE hk_job SET arriving_booking_id = NULL WHERE arriving_booking_id = ANY($1::uuid[])', [del]);
+    await client.query('UPDATE restaurant_order SET booking_id = NULL WHERE booking_id = ANY($1::uuid[])', [del]);
+    await client.query('UPDATE channel_reservation_log SET booking_id = NULL WHERE booking_id = ANY($1::uuid[])', [del]);
+    await client.query('DELETE FROM booking WHERE id = ANY($1::uuid[])', [del]);
+    await roomNights.refill(client, req.property_id, freed);
+    await client.query('COMMIT');
+    await roomPayments.refreshAvailabilityView();
+    const gone = new Set(del);
+    res.json({ deleted: del.length, unknown: [...new Set(ids)].filter((id) => !gone.has(id)) });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
+  purgeBookings,
   addCancelScores, listRoomBaskets, listBookings, getBooking, createBooking, updateBooking, cancelBooking,
   createPaymentIntent, confirmPayment, moveBooking, walkBooking,
 };

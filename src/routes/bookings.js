@@ -11,6 +11,8 @@ router.get('/', authenticateOrApiKey, ctrl.listBookings);
 router.get('/baskets', authenticateOrApiKey, ctrl.listRoomBaskets);
 // ML cancellation-risk scores from an external job.
 router.post('/cancel-scores', staffOrFullKey, ctrl.addCancelScores);
+// Hard-delete test bookings: admins or a FULL api key.
+router.post('/purge', authenticateOrApiKey, requireRoleOrApiKey('admin'), ctrl.purgeBookings);
 router.get('/:id', authenticateOrApiKey, ctrl.getBooking);
 router.post('/', authenticateOrApiKey, ctrl.createBooking);
 router.put('/:id', staffOrFullKey, ctrl.updateBooking);
