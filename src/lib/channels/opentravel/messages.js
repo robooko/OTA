@@ -4,7 +4,7 @@ const { NS, esc, envelope, parse, bodyOf, arr, attr, text } = require('./xml');
 
 const token = (t) => t || crypto.randomUUID();
 const head = (name, echoToken) =>
-  `<${name} xmlns="${NS}" EchoToken="${esc(token(echoToken))}" TimeStamp="${new Date().toISOString()}" Version="1.0"`;
+  `<${name} xmlns="${NS}" EchoToken="${esc(token(echoToken))}" TimeStamp="${esc(new Date().toISOString())}" Version="1.0"`;
 const money = (n) => Number(n).toFixed(2);
 const nextDay = (d) => new Date(Date.parse(d + 'T00:00:00Z') + 864e5).toISOString().slice(0, 10);
 
@@ -27,10 +27,10 @@ function groupRuns(changes) {
 }
 
 const control = (r) =>
-  `<StatusApplicationControl Start="${r.start}" End="${r.end}" InvTypeCode="${esc(r.room_code)}" RatePlanCode="${esc(r.rate_code)}"/>`;
+  `<StatusApplicationControl Start="${esc(r.start)}" End="${esc(r.end)}" InvTypeCode="${esc(r.room_code)}" RatePlanCode="${esc(r.rate_code)}"/>`;
 
 function availNotifRQ({ hotelCode, runs, username, password, echoToken }) {
-  const msgs = runs.map((r) => `<AvailStatusMessage BookingLimit="${Number(r.available)}">${control(r)}` +
+  const msgs = runs.map((r) => `<AvailStatusMessage BookingLimit="${esc(Number(r.available))}">${control(r)}` +
     `<RestrictionStatus Restriction="Master" Status="${r.stop_sell ? 'Close' : 'Open'}"/></AvailStatusMessage>`).join('');
   return envelope({ username, password, body:
     `${head('OTA_HotelAvailNotifRQ', echoToken)}><AvailStatusMessages HotelCode="${esc(hotelCode)}">${msgs}</AvailStatusMessages></OTA_HotelAvailNotifRQ>` });
@@ -38,7 +38,7 @@ function availNotifRQ({ hotelCode, runs, username, password, echoToken }) {
 
 function rateNotifRQ({ hotelCode, currency, runs, username, password, echoToken }) {
   const msgs = runs.filter((r) => r.rate !== null && r.rate !== undefined).map((r) =>
-    `<RateAmountMessage>${control(r)}<Rates><Rate><BaseByGuestAmts><BaseByGuestAmt AmountAfterTax="${money(r.rate)}" CurrencyCode="${esc(currency)}"/>` +
+    `<RateAmountMessage>${control(r)}<Rates><Rate><BaseByGuestAmts><BaseByGuestAmt AmountAfterTax="${esc(money(r.rate))}" CurrencyCode="${esc(currency)}"/>` +
     '</BaseByGuestAmts></Rate></Rates></RateAmountMessage>').join('');
   return envelope({ username, password, body:
     `${head('OTA_HotelRateAmountNotifRQ', echoToken)}><RateAmountMessages HotelCode="${esc(hotelCode)}">${msgs}</RateAmountMessages></OTA_HotelRateAmountNotifRQ>` });
@@ -64,7 +64,7 @@ function parseNotifRS(xml) {
 const ACTION = { Commit: 'new', Book: 'new', Modify: 'modify', Cancel: 'cancel' };
 const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 
-function reservation(hr) {
+function reservation(hr, rootStatus) {
   const stay = arr(hr.RoomStays && hr.RoomStays.RoomStay)[0] || {};
   const counts = arr(stay.GuestCounts && stay.GuestCounts.GuestCount).map((g) => Number(attr(g, 'Count')));
   const cust = (arr(hr.ResGuests && hr.ResGuests.ResGuest)[0] || {}).Profiles?.ProfileInfo?.Profile?.Customer || {};
@@ -72,13 +72,13 @@ function reservation(hr) {
   const total = attr(stay.Total, 'AmountAfterTax');
   const r = clean({
     channel_ref: ref,
-    action: ACTION[attr(hr, 'ResStatus')],
+    action: ACTION[attr(hr, 'ResStatus') ?? rootStatus],
     room_code: attr(arr(stay.RoomTypes && stay.RoomTypes.RoomType)[0], 'RoomTypeCode'),
     rate_code: attr(arr(stay.RatePlans && stay.RatePlans.RatePlan)[0], 'RatePlanCode'),
-    check_in: attr(stay.TimeSpan, 'Start'),
-    check_out: attr(stay.TimeSpan, 'End'),
+    check_in: attr(stay.TimeSpan, 'Start')?.slice(0, 10),
+    check_out: attr(stay.TimeSpan, 'End')?.slice(0, 10),
     guests: counts.length ? counts.reduce((a, b) => a + b, 0) : undefined,
-    total_price: total === undefined ? undefined : Number(total),
+    total_price: total === undefined || total.trim() === '' ? undefined : Number(total),
     currency: attr(stay.Total, 'CurrencyCode'),
     guest: clean({
       first_name: text(cust.PersonName?.GivenName) ?? '',
@@ -98,7 +98,7 @@ function parseResNotifRQ(xml) {
     const tok = env.Header?.Security?.UsernameToken || {};
     return {
       username: text(tok.Username), password: text(tok.Password), echoToken: attr(rq, 'EchoToken'),
-      reservations: arr(rq.HotelReservations && rq.HotelReservations.HotelReservation).map(reservation),
+      reservations: arr(rq.HotelReservations && rq.HotelReservations.HotelReservation).map((hr) => reservation(hr, attr(rq, 'ResStatus'))),
     };
   } catch (err) {
     return { error: err.message };

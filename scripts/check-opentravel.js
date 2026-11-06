@@ -45,7 +45,7 @@ check('parseNotifRS', () => {
   assert.deepEqual(m.parseNotifRS(fx('avail-rs-success.xml')), { ok: true });
   const bad = m.parseNotifRS(fx('rate-rs-errors.xml'));
   assert.equal(bad.ok, false);
-  assert.match(bad.error, /Unknown rate plan code &quot;XYZ&quot;|Unknown rate plan code "XYZ"/);
+  assert.match(bad.error, /Unknown rate plan code "XYZ"/);
   assert.equal(m.parseNotifRS(fx('not-xml.html')).ok, false);
   assert.deepEqual(m.parseNotifRS(m.availNotifRS({})), { ok: true });
   assert.equal(m.parseNotifRS(m.rateNotifRS({ error: 'nope' })).error, 'nope');
@@ -67,6 +67,16 @@ check('parseResNotifRQ new/modify/cancel/no-email', () => {
   const ne = m.parseResNotifRQ(fx('res-notif-no-email.xml')).reservations[0];
   assert.equal(ne.guest.email, undefined);
   assert.ok(!('email' in ne.guest));
+});
+check('reservation edge cases', () => {
+  const base = fx('res-notif-new.xml');
+  const root = base.replace(/(<HotelReservation [^>]*?) ResStatus="Commit"/, '$1');
+  assert.ok(!/<HotelReservation [^>]*ResStatus/.test(root) && /<OTA_HotelResNotifRQ[^>]*ResStatus="Commit"/.test(root));
+  assert.equal(m.parseResNotifRQ(root).reservations[0].action, 'new');
+  const noAmt = m.parseResNotifRQ(base.replace('AmountAfterTax="360.00"', 'AmountAfterTax=""')).reservations[0];
+  assert.ok(!('total_price' in noAmt));
+  const dt = m.parseResNotifRQ(base.replace('Start="2026-12-01" End="2026-12-04"', 'Start="2026-12-01T14:00:00" End="2026-12-04T10:00:00"')).reservations[0];
+  assert.deepEqual([dt.check_in, dt.check_out], ['2026-12-01', '2026-12-04']);
 });
 check('DOCTYPE/entities never expand', () => {
   const evil = fx('res-notif-new.xml')
