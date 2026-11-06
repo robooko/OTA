@@ -125,7 +125,26 @@ const { importOrders } = require('../src/controllers/restaurantOrders');
       assert.equal(o2.status, 'cancelled'); assert.equal(o2.payment_status, 'unpaid'); assert.equal(o2.paid_at, null); assert.equal(o2.contact_name, 'Walk-in');
       const again = await call(importOrders, { orders: [{ external_ref: 'TX1', restaurant_id: R, ordered_at: '2026-10-01T08:15:00Z', items: [{ item_name: 'X', unit_price: 1 }] }] });
       assert.equal(again.body.results[0].outcome, 'duplicate');
+      assert.equal(again.body.results[0].order_id, o1.id);
       assert.equal((await call(importOrders, { orders: [] })).status, 400);
+
+      // Full batch in one go; in-batch repeat ref; foreign/unknown menu item id.
+      const big = Array.from({ length: 497 }, (_, i) => ({ external_ref: `B${i}`, restaurant_id: R, ordered_at: '2026-10-02T12:00:00Z',
+        items: [{ item_name: 'Nasi Goreng Nirwana', unit_price: 95000 }, { item_name: 'Es Teh', quantity: 3, unit_price: 15000 }] }));
+      big.push({ ...big[0] });
+      big.push({ external_ref: 'BX', restaurant_id: R, ordered_at: '2026-10-02T12:00:00Z', items: [{ item_name: 'X', menu_item_id: T, unit_price: 1 }] });
+      big.push({ external_ref: 'BY', restaurant_id: R, ordered_at: '2026-10-02T12:00:00Z', items: [{ item_name: 'Nasi', menu_item_id: M, unit_price: 1 }] });
+      const t0 = Date.now();
+      const b = await call(importOrders, { orders: big });
+      const ms = Date.now() - t0;
+      assert.deepEqual(b.body.counts, { created: 498, duplicate: 1, rejected: 1 }, JSON.stringify(b.body.counts));
+      assert.equal(b.body.results[497].order_id, b.body.results[0].order_id);
+      assert.equal(b.body.results[498].reason, 'menu item not found');
+      assert.equal((await one(`SELECT count(*)::int AS n FROM restaurant_order_item i JOIN restaurant_order o ON o.id = i.order_id
+        WHERE o.property_id = $1 AND o.external_ref LIKE 'B%'`, [P])).n, 497 * 2 + 1);
+      assert.equal((await one(`SELECT total_price FROM restaurant_order WHERE id = $1`, [b.body.results[5].order_id])).total_price, '140000.00');
+      assert.ok(ms < 3000, `500 orders took ${ms}ms`);
+      console.log(`     500-order import: ${ms}ms`);
     });
   } finally {
     await pool.query('DELETE FROM restaurant_order_item WHERE order_id IN (SELECT id FROM restaurant_order WHERE property_id = $1)', [P]);

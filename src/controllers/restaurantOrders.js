@@ -837,7 +837,7 @@ async function getOrderAblyToken(req, res, next) {
 // Bulk import of past orders/receipts from another system (POS, a dataset):
 // delivered (or cancelled) and paid at ordered_at, items at their own
 // prices, each linked to the restaurant's menu item of that name when there
-// is one. One transaction per order, idempotent on (property, external_ref).
+// is one. Idempotent on (property, external_ref).
 // No contact_email is stored, so nothing (not even a review request) is
 // ever emailed for an imported order. guest_email links an existing guest.
 const ORDER_IMPORT_MAX = 500;
@@ -863,67 +863,104 @@ function invalidOrderField(o) {
   return null;
 }
 
-async function importOneOrder(propertyId, o) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const existing = (await client.query(
-      'SELECT id FROM restaurant_order WHERE property_id = $1 AND external_ref = $2', [propertyId, o.external_ref])).rows[0];
-    if (existing) { await client.query('ROLLBACK'); return { outcome: 'duplicate', order_id: existing.id }; }
-    const restaurant = (await client.query('SELECT id FROM restaurant WHERE id = $1 AND property_id = $2', [o.restaurant_id, propertyId])).rows[0];
-    if (!restaurant) { await client.query('ROLLBACK'); return { outcome: 'rejected', reason: 'restaurant not found' }; }
-    let guest = null;
-    if (o.guest_email) {
-      guest = (await client.query(
-        'SELECT id, first_name, last_name FROM guest WHERE property_id = $1 AND email = lower(trim($2))', [propertyId, o.guest_email])).rows[0] ?? null;
-    }
-    // Menu item by id (must be this restaurant's) or else by name.
-    const lines = [];
-    for (const it of o.items) {
-      const menu = (await client.query(
-        `SELECT id FROM restaurant_menu_item WHERE property_id = $1 AND restaurant_id = $2
-           AND ($3::uuid IS NOT NULL AND id = $3 OR $3::uuid IS NULL AND lower(name) = lower($4)) LIMIT 1`,
-        [propertyId, o.restaurant_id, it.menu_item_id ?? null, it.item_name.trim()])).rows[0];
-      if (it.menu_item_id && !menu) { await client.query('ROLLBACK'); return { outcome: 'rejected', reason: 'menu item not found' }; }
-      lines.push({ item_id: menu?.id ?? null, item_name: it.item_name.trim(), quantity: it.quantity ?? 1, unit_price: it.unit_price });
-    }
-    const total = lines.reduce((sum, l) => sum + l.quantity * l.unit_price, 0);
-    const paid = o.paid ?? true;
-    const contactName = o.contact_name ?? (guest ? `${guest.first_name} ${guest.last_name}` : 'Walk-in');
-    const { rows: [order] } = await client.query(
-      `INSERT INTO restaurant_order (property_id, restaurant_id, guest_id, status, notes, total_price, items_subtotal,
-                                     contact_name, payment_status, paid_at, created_at, external_ref)
-       VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8::varchar, CASE WHEN $8::varchar = 'paid' THEN $9::timestamptz END, $9::timestamptz, $10) RETURNING id`,
-      [propertyId, o.restaurant_id, guest?.id ?? null, o.status ?? 'delivered', o.notes ?? null, total.toFixed(2),
-        contactName, paid ? 'paid' : 'unpaid', o.ordered_at, o.external_ref]);
-    for (const l of lines) {
-      await client.query(
-        'INSERT INTO restaurant_order_item (order_id, item_id, item_name, quantity, unit_price) VALUES ($1, $2, $3, $4, $5)',
-        [order.id, l.item_id, l.item_name, l.quantity, l.unit_price.toFixed(2)]);
-    }
-    await client.query('COMMIT');
-    return { outcome: 'created', order_id: order.id };
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
+// Set-based: a handful of lookups for the whole batch, then every new order
+// and its items in one INSERT statement (atomic), so 500 orders cost ~6 round
+// trips instead of a transaction and ~10 queries each.
 async function importOrders(req, res, next) {
   try {
     const list = req.body?.orders;
     if (!Array.isArray(list) || !list.length || list.length > ORDER_IMPORT_MAX) {
       return res.status(400).json({ error: `orders must be an array of 1-${ORDER_IMPORT_MAX} orders` });
     }
-    const results = [];
-    for (const [index, raw] of list.entries()) {
+    const propertyId = req.property_id;
+    const entries = list.map((raw, index) => {
       const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
       const bad = invalidOrderField(o);
-      const out = bad ? { outcome: 'rejected', reason: `invalid order: ${bad}` } : await importOneOrder(req.property_id, o);
-      results.push({ index, external_ref: o.external_ref ?? null, ...out });
+      return { index, o, out: bad ? { outcome: 'rejected', reason: `invalid order: ${bad}` } : null };
+    });
+    const valid = entries.filter((e) => !e.out);
+    const uniq = (xs) => [...new Set(xs)];
+    const q = async (sql, params) => (await pool.query(sql, params)).rows;
+
+    const [existing, restaurants, guests] = await Promise.all([
+      q('SELECT id, external_ref FROM restaurant_order WHERE property_id = $1 AND external_ref = ANY($2::varchar[])',
+        [propertyId, uniq(valid.map((e) => e.o.external_ref))]),
+      q('SELECT id FROM restaurant WHERE property_id = $1 AND id = ANY($2::uuid[])',
+        [propertyId, uniq(valid.map((e) => e.o.restaurant_id))]),
+      q('SELECT id, first_name, last_name, email FROM guest WHERE property_id = $1 AND email = ANY($2::varchar[])',
+        [propertyId, uniq(valid.filter((e) => e.o.guest_email).map((e) => e.o.guest_email.trim().toLowerCase()))]),
+    ]);
+    const restaurantIds = new Set(restaurants.map((r) => r.id));
+    const menu = await q('SELECT id, restaurant_id, lower(name) AS lname FROM restaurant_menu_item WHERE property_id = $1 AND restaurant_id = ANY($2::uuid[])',
+      [propertyId, [...restaurantIds]]);
+    const refIds = new Map(existing.map((r) => [r.external_ref, r.id]));
+    const guestByEmail = new Map(guests.map((g) => [g.email, g]));
+    const menuById = new Map(menu.map((m) => [m.id, m]));
+    const menuByName = new Map();
+    for (const m of menu) { const k = `${m.restaurant_id}|${m.lname}`; if (!menuByName.has(k)) menuByName.set(k, m.id); }
+
+    const orderRows = [];
+    const itemRows = [];
+    const seen = new Set();
+    for (const e of valid) {
+      const { o } = e;
+      if (refIds.has(o.external_ref) || seen.has(o.external_ref)) { e.out = { outcome: 'duplicate' }; continue; }
+      if (!restaurantIds.has(o.restaurant_id)) { e.out = { outcome: 'rejected', reason: 'restaurant not found' }; continue; }
+      const lines = o.items.map((it) => {
+        const name = it.item_name.trim();
+        const itemId = it.menu_item_id
+          ? (menuById.get(it.menu_item_id)?.restaurant_id === o.restaurant_id ? it.menu_item_id : undefined)
+          : menuByName.get(`${o.restaurant_id}|${name.toLowerCase()}`) ?? null;
+        return { external_ref: o.external_ref, item_id: itemId, item_name: name, quantity: it.quantity ?? 1, unit_price: it.unit_price.toFixed(2) };
+      });
+      if (lines.some((l) => l.item_id === undefined)) { e.out = { outcome: 'rejected', reason: 'menu item not found' }; continue; }
+      const guest = o.guest_email ? guestByEmail.get(o.guest_email.trim().toLowerCase()) : undefined;
+      const total = o.items.reduce((sum, it) => sum + (it.quantity ?? 1) * it.unit_price, 0).toFixed(2);
+      seen.add(o.external_ref);
+      orderRows.push({
+        external_ref: o.external_ref, restaurant_id: o.restaurant_id, guest_id: guest?.id ?? null,
+        status: o.status ?? 'delivered', notes: o.notes ?? null, total,
+        contact_name: o.contact_name ?? (guest ? `${guest.first_name} ${guest.last_name}` : 'Walk-in'),
+        payment_status: (o.paid ?? true) ? 'paid' : 'unpaid', ordered_at: o.ordered_at,
+      });
+      itemRows.push(...lines);
     }
+
+    if (orderRows.length) {
+      const inserted = await q(
+        `WITH o AS (
+           INSERT INTO restaurant_order (property_id, restaurant_id, guest_id, status, notes, total_price, items_subtotal,
+                                         contact_name, payment_status, paid_at, created_at, external_ref)
+           SELECT $1, r.restaurant_id, r.guest_id, r.status, r.notes, r.total, r.total, r.contact_name, r.payment_status,
+                  CASE WHEN r.payment_status = 'paid' THEN r.ordered_at END, r.ordered_at, r.external_ref
+             FROM jsonb_to_recordset($2::jsonb) AS r(external_ref varchar, restaurant_id uuid, guest_id uuid, status varchar,
+                  notes text, total numeric, contact_name varchar, payment_status varchar, ordered_at timestamptz)
+           ON CONFLICT (property_id, external_ref) WHERE external_ref IS NOT NULL DO NOTHING
+           RETURNING id, external_ref
+         ), i AS (
+           INSERT INTO restaurant_order_item (order_id, item_id, item_name, quantity, unit_price)
+           SELECT o.id, l.item_id, l.item_name, l.quantity, l.unit_price
+             FROM jsonb_to_recordset($3::jsonb) AS l(external_ref varchar, item_id uuid, item_name varchar, quantity int, unit_price numeric)
+             JOIN o ON o.external_ref = l.external_ref
+         )
+         SELECT id, external_ref FROM o`,
+        [propertyId, JSON.stringify(orderRows), JSON.stringify(itemRows)]);
+      const created = new Set(inserted.map((r) => r.external_ref));
+      for (const r of inserted) refIds.set(r.external_ref, r.id);
+      // Lost a race with a concurrent import of the same ref: fetch its id.
+      const raced = orderRows.filter((r) => !created.has(r.external_ref)).map((r) => r.external_ref);
+      if (raced.length) {
+        for (const r of await q('SELECT id, external_ref FROM restaurant_order WHERE property_id = $1 AND external_ref = ANY($2::varchar[])', [propertyId, raced])) {
+          refIds.set(r.external_ref, r.id);
+        }
+      }
+      for (const e of valid) {
+        if (!e.out) e.out = created.has(e.o.external_ref) ? { outcome: 'created' } : { outcome: 'duplicate' };
+      }
+    }
+    for (const e of valid) if (e.out.outcome !== 'rejected') e.out.order_id = refIds.get(e.o.external_ref) ?? null;
+
+    const results = entries.map((e) => ({ index: e.index, external_ref: e.o.external_ref ?? null, ...e.out }));
     const counts = {};
     for (const r of results) counts[r.outcome] = (counts[r.outcome] || 0) + 1;
     res.json({ counts, results });
