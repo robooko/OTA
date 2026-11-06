@@ -464,7 +464,7 @@ const swaggerSpec = {
       delete: { tags: ['Guests'], summary: 'Delete guest', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Deleted' } } },
     },
     '/api/guests/{id}/summary': {
-      get: { tags: ['Guests'], summary: "Guest lifetime stats", description: 'Aggregates across all of the guest\'s room bookings: total_stays, total_spent, avg_nights, total_nights, last_stay, confirmed/cancelled/expired counts (expired = never paid), and total_extras_spent.', security: STAFF_OR_FULL_KEY, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Summary stats object' }, 404: { description: 'Guest not found' } } },
+      get: { tags: ['Guests'], summary: "Guest lifetime stats", description: 'Aggregates across all of the guest\'s room bookings: total_stays, total_spent, avg_nights, total_nights, last_stay, confirmed/cancelled/expired counts (expired = never paid), total_extras_spent, plus score + score_reasons (history signals from the upgrade score: completed stays, spend, extras, lapsed regular, minus cancellations).', security: STAFF_OR_FULL_KEY, parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { 200: { description: 'Summary stats object' }, 404: { description: 'Guest not found' } } },
     },
 
     // ── Room Types ───────────────────────────────────────────────────────────

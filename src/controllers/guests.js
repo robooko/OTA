@@ -1,6 +1,7 @@
 const pool = require('../db');
 const { publishBookingStatusChanged } = require('../lib/ably');
 const { fetchJoinedBooking } = require('../lib/roomPayments');
+const { upgradeScore } = require('../lib/upgradeScore');
 
 async function listGuests(req, res, next) {
   try {
@@ -155,12 +156,27 @@ async function getGuestSummary(req, res, next) {
            SELECT COUNT(*)
            FROM booking_extra be
            WHERE be.booking_id IN (SELECT id FROM booking WHERE guest_id = $1 AND property_id = $2)
-         ), 0)                                              AS total_extras
+         ), 0)                                              AS total_extras,
+         -- Completed stays only, for the guest score (same rules as upgradeScore).
+         COUNT(*) FILTER (WHERE b.status = 'checked_out')::int AS past_stays,
+         COALESCE(SUM(b.total_price) FILTER (WHERE b.status = 'checked_out'), 0) AS past_spend,
+         COALESCE((
+           SELECT SUM(be.quantity * be.unit_price)
+           FROM booking_extra be JOIN booking pb ON pb.id = be.booking_id
+           WHERE pb.guest_id = $1 AND pb.property_id = $2 AND pb.status = 'checked_out'
+         ), 0)                                              AS past_extras,
+         (MAX(b.check_out) FILTER (WHERE b.status = 'checked_out'))::text AS last_checkout
        FROM booking b
        WHERE b.guest_id = $1 AND b.property_id = $2`,
       [req.params.id, req.property_id]
     );
-    res.json(rows[0]);
+    // Guest score: upgradeScore's history signals only (direct/rate belong to a booking).
+    const { past_stays, past_spend, past_extras, last_checkout, ...summary } = rows[0];
+    const { upgrade_score, upgrade_reasons } = upgradeScore({
+      past_stays, past_spend, past_extras, last_stay: last_checkout,
+      cancellations: summary.cancelled, check_in: new Date().toISOString().slice(0, 10),
+    });
+    res.json({ ...summary, score: upgrade_score, score_reasons: upgrade_reasons });
   } catch (err) {
     next(err);
   }

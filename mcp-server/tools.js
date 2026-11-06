@@ -304,7 +304,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'get_guest_summary',
-    description: "A guest's lifetime room stats: stays, nights, spend, last stay, cancellations",
+    description: "A guest's lifetime room stats: stays, nights, spend, last stay, cancellations, plus a guest score with its reasons",
     inputSchema: { id: z.string() },
     run: ({ id }) => apiRequest('GET', `/api/guests/${id}/summary`),
   },
