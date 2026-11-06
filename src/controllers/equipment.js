@@ -19,7 +19,7 @@ async function listEquipment(req, res, next) {
 }
 
 const MAX_INT = 2147483647;
-const MAX_MONEY = 99999999.99;
+const MAX_MONEY = 999999999999.99; // NUMERIC(14,2)
 const isPrice = (v) => v == null || (typeof v === 'number' && v >= 0 && v <= MAX_MONEY);
 // HH:MM, or HH:MM:SS as pg returns TIME.
 const isHour = (v) => typeof v === 'string' && /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(v);

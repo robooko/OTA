@@ -3,7 +3,7 @@ const { isValidDate, isValidTime, isValidUuid } = require('../middleware/validat
 const { sessionDates, ageOn } = require('../lib/courseSessions');
 
 // NUMERIC(10,2) and INT ceilings, so oversize values are a 400, not a Postgres 500.
-const MAX_MONEY = 99999999.99;
+const MAX_MONEY = 999999999999.99; // NUMERIC(14,2)
 const MAX_INT = 2147483647;
 const isMoney = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= MAX_MONEY;
 const isAgeBound = (v) => v === null || (Number.isInteger(v) && v >= 0 && v <= 120);

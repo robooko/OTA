@@ -77,7 +77,7 @@ function validatePlan(p) {
   if (p.payment_mode === 'deposit') {
     if (!['percent', 'fixed'].includes(p.deposit_kind)) return 'deposit_kind must be percent or fixed for a deposit plan';
     const v = Number(p.deposit_value);
-    if (p.deposit_value == null || !Number.isFinite(v) || v <= 0 || (p.deposit_kind === 'percent' ? v > 100 : v > 99999999.99)) {
+    if (p.deposit_value == null || !Number.isFinite(v) || v <= 0 || (p.deposit_kind === 'percent' ? v > 100 : v > 999999999999.99)) {
       return p.deposit_kind === 'percent' ? 'deposit_value must be a percentage above 0 and at most 100' : 'deposit_value must be an amount above 0';
     }
   } else if (p.deposit_kind != null || p.deposit_value != null) {

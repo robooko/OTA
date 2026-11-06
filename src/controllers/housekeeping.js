@@ -294,7 +294,7 @@ async function placeExtra(req, res, next) {
 
 // ── Minibar ─────────────────────────────────────────────────────────────────
 
-const isPrice = (v) => v !== null && v !== '' && Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) < 1e8;
+const isPrice = (v) => v !== null && v !== '' && Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) < 1e12;
 
 function minibarItemError({ name, price, description, image_url, status }, partial) {
   if (!(partial && name === undefined) && (typeof name !== 'string' || !name.trim() || name.length > 100)) return 'name is required (up to 100 characters)';

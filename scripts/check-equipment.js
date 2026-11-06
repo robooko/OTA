@@ -74,7 +74,7 @@ const app = require('../src/app');
     let kayak;
     await check('create equipment: validation', async () => {
       const base = { name: 'Kayak', type: 'kayak', quantity: 1, price_per_hour: 15 };
-      for (const bad of [{ quantity: 0 }, { quantity: 3e9 }, { price_per_day: -1 }, { price_per_day: 1e9 },
+      for (const bad of [{ quantity: 0 }, { quantity: 3e9 }, { price_per_day: -1 }, { price_per_day: 1e13 },
                          { open_time: '09:00' }, { open_time: '19:00', close_time: '09:00' },
                          { open_time: '25:00', close_time: '26:00' }, { slot_interval_minutes: 2 }]) {
         assert.equal((await api('POST', '/api/equipment', { ...base, ...bad })).status, 400, JSON.stringify(bad));

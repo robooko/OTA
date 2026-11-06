@@ -242,7 +242,7 @@ CREATE TABLE IF NOT EXISTS room_type (
   code           VARCHAR(3),     -- optional short code, e.g. 'DBL' -- see migrate-2026-11-04-room-type-code.sql
   description    TEXT,
   max_occupancy  INT             NOT NULL,
-  base_rate      NUMERIC(10,2)   NOT NULL,
+  base_rate      NUMERIC(14,2)   NOT NULL,
   floor_plan     JSONB           NOT NULL DEFAULT '{}',
   status         VARCHAR(20)     DEFAULT 'active'
 );
@@ -258,7 +258,7 @@ CREATE TABLE IF NOT EXISTS room_type_rate (
   property_id   UUID          NOT NULL REFERENCES property(id),
   room_type_id  UUID          NOT NULL REFERENCES room_type(id),
   date          DATE          NOT NULL,
-  rate          NUMERIC(10,2) NOT NULL,
+  rate          NUMERIC(14,2) NOT NULL,
   UNIQUE (room_type_id, date)
 );
 
@@ -276,7 +276,7 @@ CREATE TABLE IF NOT EXISTS rate_plan (
   cancel_cutoff_hours INT,                              -- hours before check-in day's local midnight
   payment_mode        VARCHAR(10)   NOT NULL,           -- 'full' | 'deposit' | 'hold'
   deposit_kind        VARCHAR(10),                      -- 'percent' | 'fixed'
-  deposit_value       NUMERIC(10,2),
+  deposit_value       NUMERIC(14,2),
   sort_order          INT           NOT NULL DEFAULT 0,
   status              VARCHAR(20)   NOT NULL DEFAULT 'active', -- 'active' | 'archived'
   CONSTRAINT rate_plan_payment_mode_check CHECK (payment_mode IN ('full', 'deposit', 'hold')),
@@ -312,7 +312,7 @@ CREATE TABLE IF NOT EXISTS room_availability (
   room_id       UUID          NOT NULL REFERENCES room(id),
   date          DATE          NOT NULL,
   is_available  BOOLEAN       DEFAULT true,
-  override_rate NUMERIC(10,2),
+  override_rate NUMERIC(14,2),
   block_reason  VARCHAR(100),
   UNIQUE (room_id, date)
 );
@@ -328,7 +328,7 @@ CREATE TABLE IF NOT EXISTS booking (
   check_in    DATE          NOT NULL,
   check_out   DATE          NOT NULL,
   guests      INT           NOT NULL DEFAULT 1,
-  total_price NUMERIC(10,2) NOT NULL,
+  total_price NUMERIC(14,2) NOT NULL,
   status      VARCHAR(20)   DEFAULT 'confirmed',
   metadata    JSONB         NOT NULL DEFAULT '{}',
   rate_plan_id             UUID REFERENCES rate_plan(id),
@@ -418,7 +418,7 @@ CREATE TABLE IF NOT EXISTS payment (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id UUID          NOT NULL REFERENCES property(id),
   booking_id  UUID          NOT NULL REFERENCES booking(id),
-  amount      NUMERIC(10,2) NOT NULL,
+  amount      NUMERIC(14,2) NOT NULL,
   method      VARCHAR(30),
   status      VARCHAR(20)   DEFAULT 'pending',
   stripe_payment_intent_id VARCHAR(255),
@@ -438,7 +438,7 @@ CREATE TABLE IF NOT EXISTS folio_adjustment (
   property_id UUID          NOT NULL REFERENCES property(id),
   booking_id  UUID          NOT NULL REFERENCES booking(id),
   description VARCHAR(200)  NOT NULL,
-  amount      NUMERIC(10,2) NOT NULL,
+  amount      NUMERIC(14,2) NOT NULL,
   created_at  TIMESTAMPTZ   DEFAULT now()
 );
 
@@ -498,7 +498,7 @@ CREATE TABLE IF NOT EXISTS channel_ari (
   mapping_id UUID          NOT NULL REFERENCES channel_mapping(id) ON DELETE CASCADE,
   date       DATE          NOT NULL,
   available  INT           NOT NULL,
-  rate       NUMERIC(10,2) NOT NULL,
+  rate       NUMERIC(14,2) NOT NULL,
   stop_sell  BOOLEAN       NOT NULL,
   status     VARCHAR(10)   NOT NULL,
   error      TEXT,
@@ -596,7 +596,7 @@ CREATE TABLE IF NOT EXISTS extra (
   property_id UUID          NOT NULL REFERENCES property(id),
   name        VARCHAR(100)  NOT NULL,
   description TEXT,
-  price       NUMERIC(10,2) NOT NULL,
+  price       NUMERIC(14,2) NOT NULL,
   status      VARCHAR(20)   DEFAULT 'active',
   place_in_room BOOLEAN NOT NULL DEFAULT false -- housekeeping puts it in the room on arrival
 );
@@ -608,7 +608,7 @@ CREATE TABLE IF NOT EXISTS booking_extra (
   booking_id UUID          NOT NULL REFERENCES booking(id),
   extra_id   UUID          NOT NULL REFERENCES extra(id),
   quantity   INT           NOT NULL DEFAULT 1,
-  unit_price NUMERIC(10,2) NOT NULL,
+  unit_price NUMERIC(14,2) NOT NULL,
   created_at TIMESTAMPTZ   DEFAULT now(),
   placed_at  TIMESTAMPTZ,  -- housekeeping ticked it as placed in the room
   placed_by  VARCHAR(100)
@@ -701,7 +701,7 @@ CREATE TABLE IF NOT EXISTS minibar_item (
   name        VARCHAR(100) NOT NULL,
   description TEXT,
   image_url   TEXT,
-  price       NUMERIC(10,2) NOT NULL CHECK (price >= 0),
+  price       NUMERIC(14,2) NOT NULL CHECK (price >= 0),
   status      VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived'))
 );
 CREATE INDEX IF NOT EXISTS idx_minibar_item_property ON minibar_item(property_id);
@@ -727,7 +727,7 @@ CREATE TABLE IF NOT EXISTS minibar_usage (
   minibar_item_id UUID NOT NULL REFERENCES minibar_item(id),
   item_name       VARCHAR(100) NOT NULL,
   quantity        INT NOT NULL CHECK (quantity > 0),
-  unit_price      NUMERIC(10,2) NOT NULL,
+  unit_price      NUMERIC(14,2) NOT NULL,
   recorded_by     VARCHAR(100),
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -778,7 +778,7 @@ CREATE TABLE IF NOT EXISTS restaurant (
   currency                  VARCHAR(3),  -- NULL = inherit property.currency
   timezone                  VARCHAR(50), -- NULL = inherit property.timezone
   payment_protection        VARCHAR(20)  NOT NULL DEFAULT 'none', -- 'none' | 'hold' | 'deposit'
-  payment_protection_amount NUMERIC(10,2),
+  payment_protection_amount NUMERIC(14,2),
   website_id                UUID REFERENCES property_website(id), -- NULL = no guest website; table QR codes then carry only the table id
   require_join_code         BOOLEAN      NOT NULL DEFAULT false, -- opt-in: newly opened table sessions get a 4-digit join code that api-key (guest-rail) callers must present
   menu_category_order       TEXT[]       NOT NULL DEFAULT '{}', -- menu category names in display order; unlisted ones follow, by name
@@ -931,8 +931,8 @@ CREATE TABLE IF NOT EXISTS spa_treatment (
   duration_mins INT           NOT NULL,
   -- NULL price + a member_price = regulars-only. See
   -- migrate-2026-09-21-spa-member-pricing.sql.
-  price         NUMERIC(10,2),
-  member_price  NUMERIC(10,2),
+  price         NUMERIC(14,2),
+  member_price  NUMERIC(14,2),
   member_duration_mins INT,
   -- Days this treatment is offered, ISO day-of-week (1 = Mon .. 7 = Sun).
   -- NULL = every day. See migrate-2026-09-22-spa-treatment-days.sql.
@@ -1037,7 +1037,7 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
   reminder_sms_sid         TEXT,
   reminder_attempts        SMALLINT NOT NULL DEFAULT 0,
   -- Frozen at booking time -- see migrate-2026-09-21-spa-member-pricing.sql.
-  price                    NUMERIC(10,2),
+  price                    NUMERIC(14,2),
   member_rate              BOOLEAN NOT NULL DEFAULT false,
   -- Guest-rail per-email cap + email-confirmation hold ('pending' status)
   -- -- see migrate-2026-09-23-spa-booking-guards.sql.
@@ -1211,8 +1211,8 @@ CREATE TABLE IF NOT EXISTS tour (
   description    TEXT,
   duration_mins  INT           NOT NULL,
   max_group_size INT           NOT NULL,
-  price          NUMERIC(10,2) NOT NULL,
-  child_price    NUMERIC(10,2),  -- NULL = children pay the adult price
+  price          NUMERIC(14,2) NOT NULL,
+  child_price    NUMERIC(14,2),  -- NULL = children pay the adult price
   status         VARCHAR(20)   DEFAULT 'active',
   -- Optional fixed timetable (e.g. a ferry): when departure_times is
   -- non-empty, the boot/daily seeder (src/lib/tourSlotSeeder.js) creates
@@ -1245,7 +1245,7 @@ CREATE TABLE IF NOT EXISTS tour_booking (
   contact_phone VARCHAR(30),
   group_size    INT           NOT NULL,  -- total headcount, children included
   children      INT           NOT NULL DEFAULT 0,
-  total_price   NUMERIC(10,2) NOT NULL,
+  total_price   NUMERIC(14,2) NOT NULL,
   status        VARCHAR(20)   DEFAULT 'confirmed',
   notes         TEXT,
   created_at    TIMESTAMPTZ   DEFAULT now()
@@ -1264,7 +1264,7 @@ CREATE TABLE IF NOT EXISTS course (
   property_id UUID          NOT NULL REFERENCES property(id),
   name        VARCHAR(100)  NOT NULL,
   description TEXT,
-  price       NUMERIC(10,2) NOT NULL,       -- per participant, whole course
+  price       NUMERIC(14,2) NOT NULL,       -- per participant, whole course
   min_age     SMALLINT,                     -- NULL = no lower bound
   max_age     SMALLINT,                     -- NULL = no upper bound
   status      VARCHAR(20)   DEFAULT 'active'
@@ -1285,7 +1285,7 @@ CREATE TABLE IF NOT EXISTS course_run (
   start_time  TIME          NOT NULL,
   end_time    TIME          NOT NULL,
   capacity    INT           NOT NULL,
-  price       NUMERIC(10,2),                -- NULL = course.price
+  price       NUMERIC(14,2),                -- NULL = course.price
   status      VARCHAR(20)   DEFAULT 'active',
   CHECK (end_date >= start_date),
   CHECK (end_time > start_time)
@@ -1299,7 +1299,7 @@ CREATE TABLE IF NOT EXISTS course_enrolment (
   contact_name  VARCHAR(100)  NOT NULL,
   contact_email VARCHAR(255),
   contact_phone VARCHAR(30),
-  total_price   NUMERIC(10,2) NOT NULL,
+  total_price   NUMERIC(14,2) NOT NULL,
   status        VARCHAR(20)   DEFAULT 'confirmed',   -- confirmed / cancelled
   notes         TEXT,
   created_at    TIMESTAMPTZ   DEFAULT now()
@@ -1329,7 +1329,7 @@ CREATE TABLE IF NOT EXISTS golf_course (
   name             VARCHAR(100)  NOT NULL,
   description      TEXT,
   holes            INT           NOT NULL,
-  price_per_player NUMERIC(10,2) NOT NULL,
+  price_per_player NUMERIC(14,2) NOT NULL,
   status           VARCHAR(20)   DEFAULT 'active',
   -- Tee-sheet schedule: when first_tee, last_tee, and tee_interval_minutes
   -- are all set, the boot/daily seeder (src/lib/teeTimeSeeder.js)
@@ -1363,7 +1363,7 @@ CREATE TABLE IF NOT EXISTS golf_booking (
   contact_email VARCHAR(255),
   contact_phone VARCHAR(30),
   players       INT           NOT NULL,
-  total_price   NUMERIC(10,2) NOT NULL,
+  total_price   NUMERIC(14,2) NOT NULL,
   status        VARCHAR(20)   DEFAULT 'confirmed',
   notes         TEXT,
   created_at    TIMESTAMPTZ   DEFAULT now()
@@ -1384,8 +1384,8 @@ CREATE TABLE IF NOT EXISTS equipment (
   type           VARCHAR(50)   NOT NULL,
   description    TEXT,
   quantity       INT           NOT NULL,
-  price_per_day  NUMERIC(10,2),
-  price_per_hour NUMERIC(10,2),
+  price_per_day  NUMERIC(14,2),
+  price_per_hour NUMERIC(14,2),
   status         VARCHAR(20)   DEFAULT 'active',
   open_time      TIME,
   close_time     TIME,
@@ -1408,7 +1408,7 @@ CREATE TABLE IF NOT EXISTS equipment_hire (
   rate_type        VARCHAR(10)   DEFAULT 'per_day',
   duration         NUMERIC(5,2)  DEFAULT 1,
   golf_booking_id  UUID          REFERENCES golf_booking(id),
-  total_price      NUMERIC(10,2),
+  total_price      NUMERIC(14,2),
   created_at       TIMESTAMPTZ   DEFAULT now()
 );
 
@@ -1426,7 +1426,7 @@ CREATE TABLE IF NOT EXISTS restaurant_menu_item (
   name          VARCHAR(100)  NOT NULL,
   description   TEXT,
   category      VARCHAR(50),
-  price         NUMERIC(10,2) NOT NULL,
+  price         NUMERIC(14,2) NOT NULL,
   allergens     TEXT[]        NOT NULL DEFAULT '{}',
   variants      TEXT[]        NOT NULL DEFAULT '{}',
   status        VARCHAR(20)   DEFAULT 'active',
@@ -1460,7 +1460,7 @@ CREATE TABLE IF NOT EXISTS restaurant_order (
   status         VARCHAR(20)  DEFAULT 'pending',
   notes          TEXT,
   scheduled_for  TIMESTAMPTZ,
-  total_price    NUMERIC(10,2) NOT NULL DEFAULT 0,
+  total_price    NUMERIC(14,2) NOT NULL DEFAULT 0,
   created_at     TIMESTAMPTZ  DEFAULT now(),
   -- Paid-upfront pickup order fields (no booking_id/table_id to bill
   -- through) -- see migrate-2026-09-07-merge-restaurant-web-order.sql.
@@ -1470,8 +1470,8 @@ CREATE TABLE IF NOT EXISTS restaurant_order (
   contact_name              VARCHAR(100),
   contact_email             VARCHAR(255),
   contact_phone             VARCHAR(30),
-  items_subtotal            NUMERIC(10,2),
-  tax_amount                NUMERIC(10,2) NOT NULL DEFAULT 0,
+  items_subtotal            NUMERIC(14,2),
+  tax_amount                NUMERIC(14,2) NOT NULL DEFAULT 0,
   payment_status            VARCHAR(20)   NOT NULL DEFAULT 'unpaid',
   paid_at                   TIMESTAMPTZ,
   stripe_payment_intent_id  VARCHAR(255),
@@ -1486,7 +1486,7 @@ CREATE TABLE IF NOT EXISTS restaurant_order_item (
   item_id     UUID          REFERENCES restaurant_menu_item(id),
   item_name   VARCHAR(100)  NOT NULL,
   quantity    INT           NOT NULL DEFAULT 1,
-  unit_price  NUMERIC(10,2) NOT NULL,
+  unit_price  NUMERIC(14,2) NOT NULL,
   variant     VARCHAR(100)
 );
 
@@ -1515,7 +1515,7 @@ CREATE TABLE IF NOT EXISTS proshop_item (
   shop_id        UUID          REFERENCES shop(id),
   name           VARCHAR(100)  NOT NULL,
   category       VARCHAR(50),
-  price          NUMERIC(10,2) NOT NULL,
+  price          NUMERIC(14,2) NOT NULL,
   status         VARCHAR(20)   DEFAULT 'active',
   -- Optional stock count -- see migrate-2026-09-06-proshop-stock.sql. NULL
   -- (the default) means untracked/unlimited. Decremented when an order pays
@@ -1530,7 +1530,7 @@ CREATE TABLE IF NOT EXISTS proshop_item (
   variant_label  VARCHAR(50),
   -- Optional sale price -- see migrate-2026-10-14-proshop-sale-price.sql.
   -- NULL = not on sale. Set, it's what gets charged; price stays the "was".
-  sale_price     NUMERIC(10,2),
+  sale_price     NUMERIC(14,2),
   CONSTRAINT proshop_item_stock_quantity_check CHECK (stock_quantity IS NULL OR stock_quantity >= 0),
   CONSTRAINT proshop_item_sale_price_check CHECK (sale_price IS NULL OR (sale_price >= 0 AND sale_price < price))
 );
@@ -1560,12 +1560,12 @@ CREATE TABLE IF NOT EXISTS proshop_order (
   contact_email            VARCHAR(255),
   contact_phone            VARCHAR(30),
   shipping_address         TEXT,
-  shipping_cost            NUMERIC(10,2) NOT NULL DEFAULT 0,
-  items_subtotal           NUMERIC(10,2) NOT NULL,
+  shipping_cost            NUMERIC(14,2) NOT NULL DEFAULT 0,
+  items_subtotal           NUMERIC(14,2) NOT NULL,
   -- Snapshotted from property.tax_rate at order time -- see
   -- migrate-2026-09-06-order-tax.sql. Zero unless tax_enabled was on.
-  tax_amount               NUMERIC(10,2) NOT NULL DEFAULT 0,
-  total_price              NUMERIC(10,2) NOT NULL,
+  tax_amount               NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_price              NUMERIC(14,2) NOT NULL,
   status                   VARCHAR(20)   NOT NULL DEFAULT 'pending',
   payment_status           VARCHAR(20)   NOT NULL DEFAULT 'unpaid',
   stripe_payment_intent_id VARCHAR(255),
@@ -1584,9 +1584,9 @@ CREATE TABLE IF NOT EXISTS proshop_order_item (
   order_id   UUID          NOT NULL REFERENCES proshop_order(id) ON DELETE CASCADE,
   item_id    UUID          REFERENCES proshop_item(id),
   item_name  VARCHAR(100)  NOT NULL,
-  unit_price NUMERIC(10,2) NOT NULL,
+  unit_price NUMERIC(14,2) NOT NULL,
   quantity   INT           NOT NULL CHECK (quantity > 0),
-  subtotal   NUMERIC(10,2) NOT NULL
+  subtotal   NUMERIC(14,2) NOT NULL
 );
 
 -- Abandoned shop baskets -- see migrate-2026-10-28-shop-baskets.sql.
@@ -1599,7 +1599,7 @@ CREATE TABLE IF NOT EXISTS shop_basket (
   contact_name            VARCHAR(100),
   -- [{item_id, item_name, unit_price, quantity}]
   items                   JSONB         NOT NULL DEFAULT '[]',
-  items_subtotal          NUMERIC(10,2) NOT NULL DEFAULT 0,
+  items_subtotal          NUMERIC(14,2) NOT NULL DEFAULT 0,
   return_url              TEXT,
   status                  VARCHAR(20)   NOT NULL DEFAULT 'open',
   order_id                UUID          REFERENCES proshop_order(id),
@@ -1627,7 +1627,7 @@ CREATE TABLE IF NOT EXISTS golf_booking_item (
   item_id     UUID          REFERENCES proshop_item(id),
   item_name   VARCHAR(100)  NOT NULL,
   quantity    INT           NOT NULL DEFAULT 1,
-  unit_price  NUMERIC(10,2) NOT NULL
+  unit_price  NUMERIC(14,2) NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_golf_booking_item          ON golf_booking_item(booking_id);
@@ -1849,7 +1849,7 @@ CREATE TABLE IF NOT EXISTS marina_berth (
   min_length_m    NUMERIC(6,2),
   beam_m          NUMERIC(6,2),
   depth_m         NUMERIC(6,2),
-  price_per_night NUMERIC(10,2),
+  price_per_night NUMERIC(14,2),
   price_mode      VARCHAR(10) NOT NULL DEFAULT 'per_metre' CHECK (price_mode IN ('per_metre', 'fixed')),
   notes           TEXT,
   status          VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'maintenance', 'inactive')),
@@ -1886,9 +1886,9 @@ CREATE TABLE IF NOT EXISTS marina_price_tier (
   valid_to        DATE,
   max_length_m    NUMERIC(6,2) NOT NULL,
   max_beam_m      NUMERIC(6,2),
-  price_per_night NUMERIC(10,2) NOT NULL,
-  price_per_month NUMERIC(10,2),
-  price_per_year  NUMERIC(10,2),
+  price_per_night NUMERIC(14,2) NOT NULL,
+  price_per_month NUMERIC(14,2),
+  price_per_year  NUMERIC(14,2),
   status          VARCHAR(20) DEFAULT 'active',
   created_at      TIMESTAMPTZ DEFAULT now(),
   CHECK (valid_to >= valid_from),
@@ -1914,7 +1914,7 @@ CREATE TABLE IF NOT EXISTS marina_booking (
   status                   VARCHAR(20) NOT NULL CHECK (status IN ('hold', 'pending', 'confirmed', 'declined', 'cancelled')),
   source                   VARCHAR(10) NOT NULL CHECK (source IN ('guest', 'staff', 'import')),
   locale                   VARCHAR(5) NOT NULL DEFAULT 'en' CHECK (locale IN ('en', 'it', 'fr', 'es')),
-  total_price              NUMERIC(10,2),
+  total_price              NUMERIC(14,2),
   currency                 CHAR(3),
   stripe_payment_intent_id VARCHAR(255),
   payment_status           VARCHAR(20) NOT NULL DEFAULT 'none' CHECK (payment_status IN ('none', 'held', 'captured', 'released', 'refunded')),
