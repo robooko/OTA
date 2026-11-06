@@ -1,7 +1,7 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/spa');
 const payments = require('../controllers/spaPayments');
-const { authenticateOrApiKey } = require('../middleware/auth');
+const { authenticateOrApiKey, requireRoleOrApiKey } = require('../middleware/auth');
 
 // Unauthenticated: a link in the review-request email itself, not a
 // dashboard action -- the appointment id is the capability. Must not sit
@@ -56,6 +56,7 @@ router.get('/:spa_id/appointments', authenticateOrApiKey, ctrl.listAppointments)
 router.get('/:spa_id/appointments/:id', authenticateOrApiKey, ctrl.getAppointment);
 router.post('/:spa_id/appointments', authenticateOrApiKey, ctrl.createAppointment);
 router.post('/:spa_id/appointments/bulk', authenticateOrApiKey, ctrl.bulkCreateAppointments);
+router.post('/:spa_id/appointments/import', authenticateOrApiKey, requireRoleOrApiKey('admin', 'staff'), ctrl.importAppointments);
 router.put('/:spa_id/appointments/:id', authenticateOrApiKey, ctrl.updateAppointment);
 
 // Tap to Pay (see 2026-08-30-spa-tap-to-pay-backend-requirements.md)

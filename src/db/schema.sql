@@ -1169,6 +1169,10 @@ CREATE INDEX IF NOT EXISTS idx_spa_treatment_property    ON spa_treatment(proper
 CREATE INDEX IF NOT EXISTS idx_spa_therapist_property    ON spa_therapist(property_id);
 CREATE INDEX IF NOT EXISTS idx_spa_slot_property         ON spa_slot(property_id);
 CREATE INDEX IF NOT EXISTS idx_spa_appointment_property  ON spa_appointment(property_id);
+-- Id in the system an appointment was imported from (POST /api/spa/:spa_id/appointments/import,
+-- migrate-2026-11-06-spa-appointment-import.sql); re-imports skip it.
+ALTER TABLE spa_appointment ADD COLUMN IF NOT EXISTS external_ref VARCHAR(100);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_spa_appointment_external_ref ON spa_appointment (property_id, external_ref) WHERE external_ref IS NOT NULL;
 
 -- ── Beach Club ────────────────────────────────────────────────────────────────
 

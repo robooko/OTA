@@ -1028,7 +1028,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'import_restaurant_orders',
-    description: "Import up to 500 past restaurant/bar orders (POS receipts, a dataset), each in its own transaction, in order: status delivered (or cancelled), paid at ordered_at unless paid: false, items at their own prices (each linked to this restaurant's menu item of that name when one exists; total = sum of items). guest_email links an existing guest. No contact email is stored, so nothing is ever emailed for an imported order. Re-importing an external_ref returns duplicate. Returns counts and a per-order outcome (created | duplicate | rejected with reason).",
+    description: "Import up to 500 past restaurant/bar orders (POS receipts, a dataset), all in one statement: status delivered (or cancelled), paid at ordered_at unless paid: false, items at their own prices (each linked to this restaurant's menu item of that name when one exists; total = sum of items). guest_email links an existing guest. No contact email is stored, so nothing is ever emailed for an imported order. Re-importing an external_ref returns duplicate. Returns counts and a per-order outcome (created | duplicate | rejected with reason).",
     inputSchema: {
       orders: z.array(z.object({
         external_ref: z.string().max(100).describe('Id in the source system; unique per property'),
@@ -2077,6 +2077,31 @@ function createTools(apiRequest) {
       send_emails: z.boolean().optional().describe("Default for every appointment; an appointment's own send_emails wins"),
     },
     run: ({ spa_id, ...body }) => apiRequest('POST', `/api/spa/${spa_id}/appointments/bulk`, { body }),
+  },
+  {
+    name: 'import_spa_appointments',
+    description: "Import up to 500 past spa appointments at one spa (history from another system). No availability, working-hours or past-time checks. Status completed (or cancelled), paid at the start time unless paid: false. Treatment and therapist by id or by name (case-insensitive); end_time defaults to start + the treatment's duration, price to the treatment's price. guest_email links an existing guest. No contact email is stored and guest emails are off, so nothing is ever emailed or texted. Re-importing an external_ref returns duplicate. Returns counts and a per-appointment outcome (created | duplicate | rejected with reason).",
+    inputSchema: {
+      spa_id: z.string(),
+      appointments: z.array(z.object({
+        external_ref: z.string().max(100).describe('Id in the source system; unique per property'),
+        treatment_id: z.string().optional(),
+        treatment_name: z.string().optional().describe('Used when treatment_id is absent'),
+        therapist_id: z.string().optional(),
+        therapist_name: z.string().optional().describe('Used when therapist_id is absent'),
+        date: z.string().describe('YYYY-MM-DD'),
+        start_time: z.string().describe('HH:MM'),
+        end_time: z.string().optional().describe("HH:MM; default start + the treatment's duration"),
+        status: z.enum(['completed', 'cancelled']).optional().describe('Default completed'),
+        paid: z.boolean().optional().describe('Default true'),
+        payment_method: z.enum(['card', 'cash']).optional(),
+        price: z.number().nonnegative().optional().describe("Default the treatment's price"),
+        contact_name: z.string().max(100).optional().describe('Default the guest name, else Walk-in'),
+        guest_email: z.string().optional().describe('Links an existing guest of this property'),
+        notes: z.string().optional(),
+      })).min(1).max(500),
+    },
+    run: ({ spa_id, ...body }) => apiRequest('POST', `/api/spa/${spa_id}/appointments/import`, { body }),
   },
   {
     name: 'update_spa_appointment',

@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { isValidDate, isValidTime, validateBranding, validateCancelUrl } = require('../middleware/validate');
+const { isValidDate, isValidTime, isValidUuid, validateBranding, validateCancelUrl } = require('../middleware/validate');
 const {
   publishNewAppointment,
   publishAppointmentStatusChanged,
@@ -1644,6 +1644,132 @@ async function reminderOptOut(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// Bulk import of past appointments from another system: completed (or
+// cancelled), paid at the appointment's start unless paid is false. No
+// availability, lead-time or past-time checks, no slot. No contact_email is
+// stored and send_emails is false, so nothing is ever emailed or texted.
+// paid_at is the start time in the property's timezone.
+// guest_email links an existing guest. Treatment and therapist by id or by
+// name (case-insensitive) within this spa. Idempotent on (property,
+// external_ref). Set-based: a few lookups, then one INSERT for the batch.
+const APPOINTMENT_IMPORT_MAX = 500;
+const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
+
+function invalidImportField(a) {
+  if (!nonEmpty(a.external_ref) || a.external_ref.length > 100) return 'external_ref';
+  if (a.treatment_id !== undefined ? !isValidUuid(a.treatment_id) : !nonEmpty(a.treatment_name)) return 'treatment_id or treatment_name';
+  if (a.therapist_id !== undefined ? !isValidUuid(a.therapist_id) : !nonEmpty(a.therapist_name)) return 'therapist_id or therapist_name';
+  if (!isValidDate(a.date)) return 'date';
+  if (!isValidTime(a.start_time)) return 'start_time';
+  if (a.end_time !== undefined && !(isValidTime(a.end_time) && a.end_time > a.start_time)) return 'end_time';
+  if (a.status !== undefined && !['completed', 'cancelled'].includes(a.status)) return 'status';
+  if (a.paid !== undefined && typeof a.paid !== 'boolean') return 'paid';
+  if (a.payment_method !== undefined && !['card', 'cash'].includes(a.payment_method)) return 'payment_method';
+  if (a.price !== undefined && !(typeof a.price === 'number' && Number.isFinite(a.price) && a.price >= 0 && a.price <= 999999999999.99)) return 'price';
+  if (a.contact_name !== undefined && (!nonEmpty(a.contact_name) || a.contact_name.length > 100)) return 'contact_name';
+  if (a.guest_email !== undefined && !nonEmpty(a.guest_email)) return 'guest_email';
+  if (a.notes !== undefined && typeof a.notes !== 'string') return 'notes';
+  return null;
+}
+
+async function importAppointments(req, res, next) {
+  try {
+    const list = req.body?.appointments;
+    if (!Array.isArray(list) || !list.length || list.length > APPOINTMENT_IMPORT_MAX) {
+      return res.status(400).json({ error: `appointments must be an array of 1-${APPOINTMENT_IMPORT_MAX} appointments` });
+    }
+    const propertyId = req.property_id;
+    const spaId = req.params.spa_id;
+    const q = async (sql, params) => (await pool.query(sql, params)).rows;
+    if (!isValidUuid(spaId) || !(await q('SELECT 1 FROM spa WHERE id = $1 AND property_id = $2', [spaId, propertyId])).length) {
+      return res.status(404).json({ error: 'Spa not found' });
+    }
+
+    const entries = list.map((raw, index) => {
+      const a = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+      const bad = invalidImportField(a);
+      return { index, a, out: bad ? { outcome: 'rejected', reason: `invalid appointment: ${bad}` } : null };
+    });
+    const valid = entries.filter((e) => !e.out);
+    const uniq = (xs) => [...new Set(xs)];
+    const [existing, treatments, therapists, guests] = await Promise.all([
+      q('SELECT id, external_ref FROM spa_appointment WHERE property_id = $1 AND external_ref = ANY($2::varchar[])',
+        [propertyId, uniq(valid.map((e) => e.a.external_ref))]),
+      q('SELECT id, lower(name) AS lname, duration_mins, COALESCE(price, member_price) AS price FROM spa_treatment WHERE property_id = $1 AND spa_id = $2', [propertyId, spaId]),
+      q('SELECT id, lower(name) AS lname FROM spa_therapist WHERE property_id = $1 AND spa_id = $2', [propertyId, spaId]),
+      q('SELECT id, first_name, last_name, email FROM guest WHERE property_id = $1 AND email = ANY($2::varchar[])',
+        [propertyId, uniq(valid.filter((e) => e.a.guest_email).map((e) => e.a.guest_email.trim().toLowerCase()))]),
+    ]);
+    const finder = (rows) => {
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      const byName = new Map();
+      for (const r of rows) if (!byName.has(r.lname)) byName.set(r.lname, r);
+      return (id, name) => (id !== undefined ? byId.get(id) : byName.get(name.trim().toLowerCase()));
+    };
+    const findTreatment = finder(treatments);
+    const findTherapist = finder(therapists);
+    const refIds = new Map(existing.map((r) => [r.external_ref, r.id]));
+    const guestByEmail = new Map(guests.map((g) => [g.email, g]));
+
+    const rows = [];
+    const seen = new Set();
+    for (const e of valid) {
+      const { a } = e;
+      if (refIds.has(a.external_ref) || seen.has(a.external_ref)) { e.out = { outcome: 'duplicate' }; continue; }
+      const treatment = findTreatment(a.treatment_id, a.treatment_name);
+      if (!treatment) { e.out = { outcome: 'rejected', reason: 'treatment not found' }; continue; }
+      const therapist = findTherapist(a.therapist_id, a.therapist_name);
+      if (!therapist) { e.out = { outcome: 'rejected', reason: 'therapist not found' }; continue; }
+      const price = a.price ?? (treatment.price == null ? null : Number(treatment.price));
+      if (price == null) { e.out = { outcome: 'rejected', reason: 'price required: the treatment has no price' }; continue; }
+      const guest = a.guest_email ? guestByEmail.get(a.guest_email.trim().toLowerCase()) : undefined;
+      seen.add(a.external_ref);
+      rows.push({
+        external_ref: a.external_ref, treatment_id: treatment.id, therapist_id: therapist.id,
+        date: a.date, start_time: a.start_time, end_time: a.end_time ?? null, duration_mins: treatment.duration_mins,
+        guest_id: guest?.id ?? null, contact_name: a.contact_name ?? (guest ? `${guest.first_name} ${guest.last_name}` : 'Walk-in'),
+        status: a.status ?? 'completed', notes: a.notes ?? null, price: price.toFixed(2),
+        paid: a.paid ?? true, payment_method: a.payment_method ?? null,
+      });
+    }
+
+    if (rows.length) {
+      const inserted = await q(
+        `INSERT INTO spa_appointment (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time, guest_id,
+                                      contact_name, status, notes, price, payment_status, paid_at, payment_method, send_emails, external_ref)
+         SELECT $1, r.treatment_id, r.therapist_id, r.date, r.start_time,
+                COALESCE(r.end_time, r.start_time + make_interval(mins => r.duration_mins)), r.guest_id,
+                r.contact_name, r.status, r.notes, r.price,
+                CASE WHEN r.paid THEN 'paid' ELSE 'unpaid' END,
+                CASE WHEN r.paid THEN (r.date + r.start_time) AT TIME ZONE p.timezone END,
+                CASE WHEN r.paid THEN r.payment_method END, false, r.external_ref
+           FROM jsonb_to_recordset($2::jsonb) AS r(external_ref varchar, treatment_id uuid, therapist_id uuid, date date,
+                start_time time, end_time time, duration_mins int, guest_id uuid, contact_name varchar, status varchar,
+                notes text, price numeric, paid boolean, payment_method varchar)
+           JOIN property p ON p.id = $1
+         ON CONFLICT (property_id, external_ref) WHERE external_ref IS NOT NULL DO NOTHING
+         RETURNING id, external_ref`,
+        [propertyId, JSON.stringify(rows)]);
+      const created = new Set(inserted.map((r) => r.external_ref));
+      for (const r of inserted) refIds.set(r.external_ref, r.id);
+      // Lost a race with a concurrent import of the same ref: fetch its id.
+      const raced = rows.filter((r) => !created.has(r.external_ref)).map((r) => r.external_ref);
+      if (raced.length) {
+        for (const r of await q('SELECT id, external_ref FROM spa_appointment WHERE property_id = $1 AND external_ref = ANY($2::varchar[])', [propertyId, raced])) {
+          refIds.set(r.external_ref, r.id);
+        }
+      }
+      for (const e of valid) if (!e.out) e.out = { outcome: created.has(e.a.external_ref) ? 'created' : 'duplicate' };
+    }
+    for (const e of valid) if (e.out.outcome !== 'rejected') e.out.appointment_id = refIds.get(e.a.external_ref) ?? null;
+
+    const results = entries.map((e) => ({ index: e.index, external_ref: e.a.external_ref ?? null, ...e.out }));
+    const counts = {};
+    for (const r of results) counts[r.outcome] = (counts[r.outcome] || 0) + 1;
+    res.json({ counts, results });
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   listSpas, getSpa, createSpa, updateSpa,
   listTreatments, createTreatment, updateTreatment,
@@ -1655,7 +1781,7 @@ module.exports = {
   findSpaAvailability,
   bookFromAvailability,
   listSlots, bulkCreateSlots, searchSlots, updateSlot,
-  listAppointments, getAppointment, createAppointment, bulkCreateAppointments, updateAppointment,
+  listAppointments, getAppointment, createAppointment, bulkCreateAppointments, importAppointments, updateAppointment,
   getSpaAblyToken,
   listAppointmentsForProperty,
   getFullAppointmentForEmail,

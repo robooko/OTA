@@ -1,8 +1,8 @@
 // POST /api/bookings/import, /api/event-inquiries/bulk and
-// /api/restaurant-orders/import, driving the
+// /api/restaurant-orders/import and /api/spa/:spa_id/appointments/import, driving the
 // controllers directly. Fixtures live under a throwaway property and are
 // deleted at the end. Local DB only, with migrate-2026-11-06-bulk-imports.sql and
-// migrate-2026-11-06-restaurant-order-import.sql.
+// migrate-2026-11-06-restaurant-order-import.sql and migrate-2026-11-06-spa-appointment-import.sql.
 //   node -r dotenv/config scripts/check-bulk-imports.js
 delete process.env.ABLY_API_KEY;
 delete process.env.RESEND_API_KEY;
@@ -19,14 +19,15 @@ tokens.getBalance = async () => 0;
 const { importBookings } = require('../src/controllers/bookings');
 const { bulkCreateInquiries } = require('../src/controllers/eventInquiries');
 const { importOrders } = require('../src/controllers/restaurantOrders');
+const { importAppointments } = require('../src/controllers/spa');
 
 (async () => {
   const one = async (sql, params) => (await pool.query(sql, params)).rows[0];
   const P = (await one(`INSERT INTO property (name, currency) VALUES ('Import Check', 'IDR') RETURNING id`)).id;
-  const call = async (fn, body) => {
+  const call = async (fn, body, params = {}) => {
     const res = { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
     let error;
-    await fn({ property_id: P, params: {}, query: {}, body, headers: {}, get: () => undefined, auth_method: 'api_key', api_key: { permissions: null } }, res, (e) => { error = e; });
+    await fn({ property_id: P, params, query: {}, body, headers: {}, get: () => undefined, auth_method: 'api_key', api_key: { permissions: null } }, res, (e) => { error = e; });
     if (error) throw error;
     return { status: res.statusCode, body: res.body };
   };
@@ -146,7 +147,45 @@ const { importOrders } = require('../src/controllers/restaurantOrders');
       assert.ok(ms < 3000, `500 orders took ${ms}ms`);
       console.log(`     500-order import: ${ms}ms`);
     });
+    await check('spa appointments: completed + paid at local start, by name, no emails; skips availability; re-run is duplicate', async () => {
+      await pool.query(`UPDATE property SET timezone = 'Asia/Makassar' WHERE id = $1`, [P]);
+      const S = (await one(`INSERT INTO spa (property_id, name) VALUES ($1, 'Spa') RETURNING id`, [P])).id;
+      const TR = (await one(`INSERT INTO spa_treatment (property_id, spa_id, name, duration_mins, price) VALUES ($1, $2, 'Balinese Massage', 90, 450000) RETURNING id`, [P, S])).id;
+      const TH = (await one(`INSERT INTO spa_therapist (property_id, spa_id, name) VALUES ($1, $2, 'Wayan') RETURNING id`, [P, S])).id;
+      const imp = (appointments) => call(importAppointments, { appointments }, { spa_id: S });
+      // No therapist hours at all, dates in the past: availability is not checked.
+      const r = await imp([
+        { external_ref: 'SP1', treatment_name: 'balinese massage', therapist_name: 'WAYAN', date: '2026-09-01', start_time: '10:00', guest_email: 'ayu@example.com', payment_method: 'cash' },
+        { external_ref: 'SP2', treatment_id: TR, therapist_id: TH, date: '2026-09-01', start_time: '10:00', end_time: '11:00', status: 'cancelled', paid: false, price: 300000 },
+        { external_ref: 'SP3', treatment_name: 'Facial', therapist_id: TH, date: '2026-09-01', start_time: '10:00' },
+        { external_ref: 'SP4', treatment_id: TR, therapist_name: 'Nobody', date: '2026-09-01', start_time: '10:00' },
+        { external_ref: 'SP5', treatment_id: TR, therapist_id: TH, date: '2026-09-01', start_time: '10:00', status: 'confirmed' },
+        { external_ref: 'SP1', treatment_id: TR, therapist_id: TH, date: '2026-09-02', start_time: '10:00' },
+      ]);
+      assert.deepEqual(r.body.results.map((x) => x.outcome), ['created', 'created', 'rejected', 'rejected', 'rejected', 'duplicate'], JSON.stringify(r.body));
+      assert.deepEqual(r.body.results.slice(2, 5).map((x) => x.reason), ['treatment not found', 'therapist not found', 'invalid appointment: status']);
+      assert.equal(r.body.results[5].appointment_id, r.body.results[0].appointment_id);
+      const a1 = await one('SELECT * FROM spa_appointment WHERE id = $1', [r.body.results[0].appointment_id]);
+      assert.equal(a1.status, 'completed'); assert.equal(a1.payment_status, 'paid'); assert.equal(a1.payment_method, 'cash');
+      assert.equal(a1.paid_at.toISOString(), '2026-09-01T02:00:00.000Z'); // 10:00 WITA
+      assert.equal(a1.end_time, '11:30:00'); assert.equal(a1.price, '450000.00');
+      assert.equal(a1.contact_name, 'Ayu Lestari'); assert.ok(a1.guest_id); assert.equal(a1.contact_email, null);
+      assert.equal(a1.send_emails, false); assert.equal(a1.slot_id, null);
+      const a2 = await one('SELECT * FROM spa_appointment WHERE id = $1', [r.body.results[1].appointment_id]);
+      assert.equal(a2.status, 'cancelled'); assert.equal(a2.payment_status, 'unpaid'); assert.equal(a2.paid_at, null);
+      assert.equal(a2.end_time, '11:00:00'); assert.equal(a2.price, '300000.00'); assert.equal(a2.contact_name, 'Walk-in');
+      const again = await imp([{ external_ref: 'SP2', treatment_id: TR, therapist_id: TH, date: '2026-09-03', start_time: '09:00' }]);
+      assert.equal(again.body.results[0].outcome, 'duplicate'); assert.equal(again.body.results[0].appointment_id, a2.id);
+      assert.equal((await imp([])).status, 400);
+      assert.equal((await call(importAppointments, { appointments: [{}] }, { spa_id: TR })).status, 404);
+      const big = Array.from({ length: 500 }, (_, i) => ({ external_ref: `SB${i}`, treatment_id: TR, therapist_id: TH, date: '2026-08-01', start_time: '09:00' }));
+      const t0 = Date.now();
+      assert.deepEqual((await imp(big)).body.counts, { created: 500 });
+      assert.ok(Date.now() - t0 < 3000, `500 appointments took ${Date.now() - t0}ms`);
+    });
   } finally {
+    await pool.query('DELETE FROM spa_appointment WHERE property_id = $1', [P]);
+    for (const t of ['spa_treatment', 'spa_therapist', 'spa']) await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
     await pool.query('DELETE FROM restaurant_order_item WHERE order_id IN (SELECT id FROM restaurant_order WHERE property_id = $1)', [P]);
     for (const t of ['restaurant_order', 'restaurant_menu_item', 'restaurant']) await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
     await pool.query('DELETE FROM event_inquiry WHERE property_id = $1', [P]);
