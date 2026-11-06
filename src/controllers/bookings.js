@@ -11,13 +11,18 @@ const { fetchJoinedBooking, CANCEL_SCORE_SQL, NIGHTS_SQL } = roomPayments;
 const { stayNights } = require('../lib/roomPlacement');
 const roomNights = require('../lib/roomNights');
 
+// How a direct booking came in. Channel bookings leave it null (channel_id).
+const SOURCES = ['web', 'phone', 'email', 'walk_in', 'agent'];
+const SOURCE_ERROR = `source must be one of ${SOURCES.join(', ')}`;
+
 function isValidMetadata(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 async function listBookings(req, res, next) {
   try {
-    const { status, guest_id, from, to, on, created_from, created_to, skip, take, channel_id } = req.query;
+    const { status, guest_id, from, to, on, created_from, created_to, skip, take, channel_id, source } = req.query;
+    if (source && !SOURCES.includes(source)) return res.status(400).json({ error: SOURCE_ERROR });
     if (channel_id && channel_id !== 'direct' && !isValidUuid(channel_id)) {
       return res.status(400).json({ error: "channel_id must be a channel id or 'direct'" });
     }
@@ -54,6 +59,7 @@ async function listBookings(req, res, next) {
     // channel_id: one channel's bookings, or 'direct' for bookings made in OTA.
     if (channel_id === 'direct') { query += ' AND b.channel_id IS NULL'; countQuery += ' AND b.channel_id IS NULL'; }
     else if (channel_id) { params.push(channel_id); query += ` AND b.channel_id = $${params.length}`; countQuery += ` AND b.channel_id = $${params.length}`; }
+    if (source) { params.push(source); query += ` AND b.source = $${params.length}`; countQuery += ` AND b.source = $${params.length}`; }
     if (guest_id) { params.push(guest_id); query += ` AND b.guest_id = $${params.length}`; countQuery += ` AND b.guest_id = $${params.length}`; }
     if (from) { params.push(from); query += ` AND b.check_in >= $${params.length}`; countQuery += ` AND b.check_in >= $${params.length}`; }
     if (to) { params.push(to); query += ` AND b.check_out <= $${params.length}`; countQuery += ` AND b.check_out <= $${params.length}`; }
@@ -130,7 +136,7 @@ async function getBooking(req, res, next) {
 }
 
 async function createBooking(req, res, next) {
-  const { guest_id, room_id, room_type_id, check_in, check_out, guests, metadata, rate_plan_id, pay_at_hotel } = req.body;
+  const { guest_id, room_id, room_type_id, check_in, check_out, guests, metadata, rate_plan_id, pay_at_hotel, source } = req.body;
   // The API-key rail is a website acting for a guest; anything else here is
   // signed-in staff (rate plans spec §4).
   const viaApiKey = req.auth_method === 'api_key';
@@ -146,6 +152,9 @@ async function createBooking(req, res, next) {
   }
   if (metadata !== undefined && !isValidMetadata(metadata)) {
     return res.status(400).json({ error: 'metadata must be a JSON object' });
+  }
+  if (source !== undefined && !SOURCES.includes(source)) {
+    return res.status(400).json({ error: SOURCE_ERROR });
   }
   if (pay_at_hotel !== undefined && typeof pay_at_hotel !== 'boolean') {
     return res.status(400).json({ error: 'pay_at_hotel must be true or false' });
@@ -268,11 +277,12 @@ async function createBooking(req, res, next) {
     const terms = plan ? termsSnapshot(plan, { pay_at_hotel: !card }) : null;
     const { rows: [inserted] } = await client.query(
       `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata,
-                            status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout, room_type_id, room_pick)
+                            status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout, room_type_id, room_pick, source)
        VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10,
-               CASE WHEN $11::int IS NULL THEN NULL ELSE now() + make_interval(mins => $11::int) END, $12, $13, $14) RETURNING id`,
+               CASE WHEN $11::int IS NULL THEN NULL ELSE now() + make_interval(mins => $11::int) END, $12, $13, $14, $15) RETURNING id`,
       [req.property_id, guest_id, check_in, check_out, guests || 1, total.toFixed(2), metadata ?? {},
-        status, plan?.id ?? null, terms, payWindow, card && viaApiKey, rateTypeId, !!room_id]
+        status, plan?.id ?? null, terms, payWindow, card && viaApiKey, rateTypeId, !!room_id,
+        source ?? (viaApiKey ? 'web' : null)]
     );
     // Auto-assigns a room, takes the named one (bumping an auto-assigned
     // holder), or holds the stay with no room against the oversell allowance.
@@ -317,7 +327,10 @@ async function createBooking(req, res, next) {
 
 async function updateBooking(req, res, next) {
   try {
-    const { status, guests, metadata } = req.body;
+    const { status, guests, metadata, source } = req.body;
+    if (source !== undefined && source !== null && !SOURCES.includes(source)) {
+      return res.status(400).json({ error: SOURCE_ERROR });
+    }
     if (metadata !== undefined && !isValidMetadata(metadata)) {
       return res.status(400).json({ error: 'metadata must be a JSON object' });
     }
@@ -349,7 +362,7 @@ async function updateBooking(req, res, next) {
         return res.status(409).json({ error: 'Confirm this unpaid booking first, or cancel it (DELETE) to release the card payment' });
       }
       const settled = await roomPayments.settleByHand(req.params.id, req.property_id);
-      if (settled.status !== 200 || (guests === undefined && metadata === undefined)) {
+      if (settled.status !== 200 || (guests === undefined && metadata === undefined && source === undefined)) {
         return res.status(settled.status).json(settled.body);
       }
       statusBefore = 'confirmed';
@@ -408,9 +421,10 @@ async function updateBooking(req, res, next) {
         `UPDATE booking SET
            status   = COALESCE($1, status),
            guests   = COALESCE($2, guests),
-           metadata = COALESCE($3::jsonb, metadata)
+           metadata = COALESCE($3::jsonb, metadata),
+           source   = CASE WHEN $6 THEN $7 ELSE source END
          WHERE id = $4 AND property_id = $5 RETURNING *`,
-        [nextStatus, guests, metadata ?? null, req.params.id, req.property_id]
+        [nextStatus, guests, metadata ?? null, req.params.id, req.property_id, source !== undefined, source ?? null]
       ));
       if (rows.length && rows[0].status !== statusBefore
           && roomNights.HOLDING.includes(statusBefore) && !roomNights.HOLDING.includes(rows[0].status)) {

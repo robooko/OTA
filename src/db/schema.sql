@@ -528,6 +528,11 @@ ALTER TABLE booking ADD COLUMN IF NOT EXISTS channel_id  UUID REFERENCES channel
 ALTER TABLE booking ADD COLUMN IF NOT EXISTS channel_ref VARCHAR(100);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_booking_channel_ref ON booking (channel_id, channel_ref) WHERE channel_id IS NOT NULL;
 
+-- How a direct booking came in (migrate-2026-11-06-booking-source.sql).
+-- Null = not recorded; channel bookings use channel_id.
+ALTER TABLE booking ADD COLUMN IF NOT EXISTS source VARCHAR(10)
+  CHECK (source IN ('web', 'phone', 'email', 'walk_in', 'agent'));
+
 -- Materialised view (see migrate-2026-11-05-overbooking-a.sql)
 -- room_type_availability per type x date over ACTIVE rooms (dates come from
 -- room_availability, seeded ahead for every active room).
