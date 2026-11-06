@@ -1,6 +1,8 @@
-// POST /api/bookings/import and POST /api/event-inquiries/bulk, driving the
+// POST /api/bookings/import, /api/event-inquiries/bulk and
+// /api/restaurant-orders/import, driving the
 // controllers directly. Fixtures live under a throwaway property and are
-// deleted at the end. Local DB only, with migrate-2026-11-06-bulk-imports.sql.
+// deleted at the end. Local DB only, with migrate-2026-11-06-bulk-imports.sql and
+// migrate-2026-11-06-restaurant-order-import.sql.
 //   node -r dotenv/config scripts/check-bulk-imports.js
 delete process.env.ABLY_API_KEY;
 delete process.env.RESEND_API_KEY;
@@ -16,6 +18,7 @@ const tokens = require('../src/lib/tokens');
 tokens.getBalance = async () => 0;
 const { importBookings } = require('../src/controllers/bookings');
 const { bulkCreateInquiries } = require('../src/controllers/eventInquiries');
+const { importOrders } = require('../src/controllers/restaurantOrders');
 
 (async () => {
   const one = async (sql, params) => (await pool.query(sql, params)).rows[0];
@@ -98,7 +101,35 @@ const { bulkCreateInquiries } = require('../src/controllers/eventInquiries');
       assert.equal(on.status, 200); assert.equal(on.body.results[0].status, 402, 'no tokens = refused, as for the website');
       assert.equal((await call(bulkCreateInquiries, { inquiries: [] })).status, 400);
     });
+
+    await check('orders: paid at ordered_at, menu item matched by name, guest linked; re-run is duplicate', async () => {
+      const R = (await one(`INSERT INTO restaurant (property_id, name, default_duration_minutes) VALUES ($1, 'Sunset Restaurant', 90) RETURNING id`, [P])).id;
+      const M = (await one(`INSERT INTO restaurant_menu_item (property_id, restaurant_id, name, price) VALUES ($1, $2, 'Nasi Goreng Nirwana', 95000) RETURNING id`, [P, R])).id;
+      const r = await call(importOrders, { orders: [
+        { external_ref: 'TX1', restaurant_id: R, ordered_at: '2026-10-01T08:15:00+08:00', guest_email: 'ayu@example.com',
+          items: [{ item_name: 'nasi goreng nirwana', quantity: 2, unit_price: 95000 }, { item_name: 'Es Teh', unit_price: 15000 }] },
+        { external_ref: 'TX2', restaurant_id: R, ordered_at: '2026-10-01T19:00:00+08:00', status: 'cancelled', paid: false, items: [{ item_name: 'Bintang', unit_price: 45000 }] },
+        { external_ref: 'TX3', restaurant_id: R, ordered_at: 'nope', items: [{ item_name: 'X', unit_price: 1 }] },
+        { external_ref: 'TX4', restaurant_id: T, ordered_at: '2026-10-01T19:00:00Z', items: [{ item_name: 'X', unit_price: 1 }] },
+      ] });
+      assert.deepEqual(r.body.results.map((x) => x.outcome), ['created', 'created', 'rejected', 'rejected'], JSON.stringify(r.body));
+      assert.equal(r.body.results[2].reason, 'invalid order: ordered_at');
+      assert.equal(r.body.results[3].reason, 'restaurant not found');
+      const o1 = await one('SELECT * FROM restaurant_order WHERE id = $1', [r.body.results[0].order_id]);
+      assert.equal(o1.total_price, '205000.00'); assert.equal(o1.status, 'delivered'); assert.equal(o1.payment_status, 'paid');
+      assert.equal(o1.paid_at.toISOString(), '2026-10-01T00:15:00.000Z'); assert.equal(o1.created_at.toISOString(), '2026-10-01T00:15:00.000Z');
+      assert.equal(o1.contact_name, 'Ayu Lestari'); assert.ok(o1.guest_id); assert.equal(o1.contact_email, null);
+      const items = (await pool.query('SELECT item_id, quantity FROM restaurant_order_item WHERE order_id = $1 ORDER BY unit_price DESC', [o1.id])).rows;
+      assert.equal(items[0].item_id, M); assert.equal(items[0].quantity, 2); assert.equal(items[1].item_id, null);
+      const o2 = await one('SELECT status, payment_status, paid_at, contact_name FROM restaurant_order WHERE id = $1', [r.body.results[1].order_id]);
+      assert.equal(o2.status, 'cancelled'); assert.equal(o2.payment_status, 'unpaid'); assert.equal(o2.paid_at, null); assert.equal(o2.contact_name, 'Walk-in');
+      const again = await call(importOrders, { orders: [{ external_ref: 'TX1', restaurant_id: R, ordered_at: '2026-10-01T08:15:00Z', items: [{ item_name: 'X', unit_price: 1 }] }] });
+      assert.equal(again.body.results[0].outcome, 'duplicate');
+      assert.equal((await call(importOrders, { orders: [] })).status, 400);
+    });
   } finally {
+    await pool.query('DELETE FROM restaurant_order_item WHERE order_id IN (SELECT id FROM restaurant_order WHERE property_id = $1)', [P]);
+    for (const t of ['restaurant_order', 'restaurant_menu_item', 'restaurant']) await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
     await pool.query('DELETE FROM event_inquiry WHERE property_id = $1', [P]);
     for (const t of ['booking_night', 'booking', 'guest', 'room_availability', 'room', 'room_type']) {
       await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);

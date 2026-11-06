@@ -1494,6 +1494,10 @@ CREATE INDEX IF NOT EXISTS idx_restaurant_order_booking       ON restaurant_orde
 CREATE INDEX IF NOT EXISTS idx_restaurant_order_guest         ON restaurant_order(guest_id);
 CREATE INDEX IF NOT EXISTS idx_restaurant_order_restaurant    ON restaurant_order(restaurant_id);
 CREATE INDEX IF NOT EXISTS idx_restaurant_order_table_session ON restaurant_order(table_session_id);
+-- Id in the system an order was imported from (POST /api/restaurant-orders/import,
+-- migrate-2026-11-06-restaurant-order-import.sql); re-imports skip it.
+ALTER TABLE restaurant_order ADD COLUMN IF NOT EXISTS external_ref VARCHAR(100);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_restaurant_order_external_ref ON restaurant_order (property_id, external_ref) WHERE external_ref IS NOT NULL;
 
 -- ── Pro Shop ──────────────────────────────────────────────────────────────────
 

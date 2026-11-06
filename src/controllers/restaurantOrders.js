@@ -834,4 +834,100 @@ async function getOrderAblyToken(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, reorderMenuItems, reorderMenuCategories, renameMenuCategory, listBoardItems, createBoardItem, updateBoardItem, getBoardAblyToken, listOrders, getOrder, createOrder, updateOrder, updateOrderStatus, createOrderPaymentIntent, confirmOrderPayment, getAblyToken, getOrderAblyToken };
+// Bulk import of past orders/receipts from another system (POS, a dataset):
+// delivered (or cancelled) and paid at ordered_at, items at their own
+// prices, each linked to the restaurant's menu item of that name when there
+// is one. One transaction per order, idempotent on (property, external_ref).
+// No contact_email is stored, so nothing (not even a review request) is
+// ever emailed for an imported order. guest_email links an existing guest.
+const ORDER_IMPORT_MAX = 500;
+const ORDER_IMPORT_STATUSES = ['delivered', 'cancelled'];
+const nonEmptyStr = (v) => typeof v === 'string' && v.trim() !== '';
+
+function invalidOrderField(o) {
+  if (!nonEmptyStr(o.external_ref) || o.external_ref.length > 100) return 'external_ref';
+  if (!isValidUuid(o.restaurant_id)) return 'restaurant_id';
+  if (typeof o.ordered_at !== 'string' || Number.isNaN(Date.parse(o.ordered_at))) return 'ordered_at';
+  if (o.status !== undefined && !ORDER_IMPORT_STATUSES.includes(o.status)) return 'status';
+  if (o.paid !== undefined && typeof o.paid !== 'boolean') return 'paid';
+  if (o.contact_name !== undefined && (!nonEmptyStr(o.contact_name) || o.contact_name.length > 100)) return 'contact_name';
+  if (o.guest_email !== undefined && !nonEmptyStr(o.guest_email)) return 'guest_email';
+  if (o.notes !== undefined && typeof o.notes !== 'string') return 'notes';
+  if (!Array.isArray(o.items) || !o.items.length || o.items.length > 100) return 'items';
+  for (const it of o.items) {
+    if (!it || !nonEmptyStr(it.item_name) || it.item_name.length > 100) return 'items.item_name';
+    if (it.quantity !== undefined && !(Number.isInteger(it.quantity) && it.quantity > 0)) return 'items.quantity';
+    if (!(typeof it.unit_price === 'number' && Number.isFinite(it.unit_price) && it.unit_price >= 0)) return 'items.unit_price';
+    if (it.menu_item_id !== undefined && !isValidUuid(it.menu_item_id)) return 'items.menu_item_id';
+  }
+  return null;
+}
+
+async function importOneOrder(propertyId, o) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = (await client.query(
+      'SELECT id FROM restaurant_order WHERE property_id = $1 AND external_ref = $2', [propertyId, o.external_ref])).rows[0];
+    if (existing) { await client.query('ROLLBACK'); return { outcome: 'duplicate', order_id: existing.id }; }
+    const restaurant = (await client.query('SELECT id FROM restaurant WHERE id = $1 AND property_id = $2', [o.restaurant_id, propertyId])).rows[0];
+    if (!restaurant) { await client.query('ROLLBACK'); return { outcome: 'rejected', reason: 'restaurant not found' }; }
+    let guest = null;
+    if (o.guest_email) {
+      guest = (await client.query(
+        'SELECT id, first_name, last_name FROM guest WHERE property_id = $1 AND email = lower(trim($2))', [propertyId, o.guest_email])).rows[0] ?? null;
+    }
+    // Menu item by id (must be this restaurant's) or else by name.
+    const lines = [];
+    for (const it of o.items) {
+      const menu = (await client.query(
+        `SELECT id FROM restaurant_menu_item WHERE property_id = $1 AND restaurant_id = $2
+           AND ($3::uuid IS NOT NULL AND id = $3 OR $3::uuid IS NULL AND lower(name) = lower($4)) LIMIT 1`,
+        [propertyId, o.restaurant_id, it.menu_item_id ?? null, it.item_name.trim()])).rows[0];
+      if (it.menu_item_id && !menu) { await client.query('ROLLBACK'); return { outcome: 'rejected', reason: 'menu item not found' }; }
+      lines.push({ item_id: menu?.id ?? null, item_name: it.item_name.trim(), quantity: it.quantity ?? 1, unit_price: it.unit_price });
+    }
+    const total = lines.reduce((sum, l) => sum + l.quantity * l.unit_price, 0);
+    const paid = o.paid ?? true;
+    const contactName = o.contact_name ?? (guest ? `${guest.first_name} ${guest.last_name}` : 'Walk-in');
+    const { rows: [order] } = await client.query(
+      `INSERT INTO restaurant_order (property_id, restaurant_id, guest_id, status, notes, total_price, items_subtotal,
+                                     contact_name, payment_status, paid_at, created_at, external_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8::varchar, CASE WHEN $8::varchar = 'paid' THEN $9::timestamptz END, $9::timestamptz, $10) RETURNING id`,
+      [propertyId, o.restaurant_id, guest?.id ?? null, o.status ?? 'delivered', o.notes ?? null, total.toFixed(2),
+        contactName, paid ? 'paid' : 'unpaid', o.ordered_at, o.external_ref]);
+    for (const l of lines) {
+      await client.query(
+        'INSERT INTO restaurant_order_item (order_id, item_id, item_name, quantity, unit_price) VALUES ($1, $2, $3, $4, $5)',
+        [order.id, l.item_id, l.item_name, l.quantity, l.unit_price.toFixed(2)]);
+    }
+    await client.query('COMMIT');
+    return { outcome: 'created', order_id: order.id };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function importOrders(req, res, next) {
+  try {
+    const list = req.body?.orders;
+    if (!Array.isArray(list) || !list.length || list.length > ORDER_IMPORT_MAX) {
+      return res.status(400).json({ error: `orders must be an array of 1-${ORDER_IMPORT_MAX} orders` });
+    }
+    const results = [];
+    for (const [index, raw] of list.entries()) {
+      const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+      const bad = invalidOrderField(o);
+      const out = bad ? { outcome: 'rejected', reason: `invalid order: ${bad}` } : await importOneOrder(req.property_id, o);
+      results.push({ index, external_ref: o.external_ref ?? null, ...out });
+    }
+    const counts = {};
+    for (const r of results) counts[r.outcome] = (counts[r.outcome] || 0) + 1;
+    res.json({ counts, results });
+  } catch (err) { next(err); }
+}
+
+module.exports = { importOrders, listMenuItems, createMenuItem, updateMenuItem, bulkDeleteMenuItems, reorderMenuItems, reorderMenuCategories, renameMenuCategory, listBoardItems, createBoardItem, updateBoardItem, getBoardAblyToken, listOrders, getOrder, createOrder, updateOrder, updateOrderStatus, createOrderPaymentIntent, confirmOrderPayment, getAblyToken, getOrderAblyToken };

@@ -1021,6 +1021,29 @@ function createTools(apiRequest) {
     run: ({ id, ...body }) => apiRequest('PUT', `/api/restaurant-orders/menu/${id}`, { body }),
   },
   {
+    name: 'import_restaurant_orders',
+    description: "Import up to 500 past restaurant/bar orders (POS receipts, a dataset), each in its own transaction, in order: status delivered (or cancelled), paid at ordered_at unless paid: false, items at their own prices (each linked to this restaurant's menu item of that name when one exists; total = sum of items). guest_email links an existing guest. No contact email is stored, so nothing is ever emailed for an imported order. Re-importing an external_ref returns duplicate. Returns counts and a per-order outcome (created | duplicate | rejected with reason).",
+    inputSchema: {
+      orders: z.array(z.object({
+        external_ref: z.string().max(100).describe('Id in the source system; unique per property'),
+        restaurant_id: z.string(),
+        ordered_at: z.string().describe('ISO timestamp'),
+        status: z.enum(['delivered', 'cancelled']).optional().describe('Default delivered'),
+        paid: z.boolean().optional().describe('Default true'),
+        contact_name: z.string().max(100).optional().describe('Default the guest name, else Walk-in'),
+        guest_email: z.string().optional().describe('Links an existing guest of this property'),
+        notes: z.string().optional(),
+        items: z.array(z.object({
+          item_name: z.string().max(100),
+          quantity: z.number().int().positive().optional(),
+          unit_price: z.number().nonnegative(),
+          menu_item_id: z.string().optional().describe('Default: the menu item of that name, if any'),
+        })).min(1).max(100),
+      })).min(1).max(500),
+    },
+    run: (body) => apiRequest('POST', '/api/restaurant-orders/import', { body }),
+  },
+  {
     name: 'bulk_delete_restaurant_menu_items',
     description: 'Soft-delete multiple menu items at once by setting their status to "inactive" — there is no hard-delete endpoint',
     inputSchema: { ids: z.array(z.string()).min(1) },

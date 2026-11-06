@@ -23,6 +23,8 @@ router.get('/', authenticateOrApiKey, ctrl.listOrders);
 router.get('/:id/ably-token', authenticateOrApiKey, ctrl.getOrderAblyToken);
 router.get('/:id', authenticateOrApiKey, requireRoleOrApiKey('admin', 'staff'), ctrl.getOrder); // staff or a full key
 router.post('/', authenticateOrApiKey, ctrl.createOrder);
+// Bulk import of past orders: staff or a FULL api key.
+router.post('/import', authenticateOrApiKey, requireRoleOrApiKey('admin', 'staff'), ctrl.importOrders);
 router.put('/:id', authenticateOrApiKey, ctrl.updateOrder);
 router.put('/:id/status', authenticateOrApiKey, ctrl.updateOrderStatus);
 // Pickup orders only (see restaurantOrders.js) -- an at-table order pays
