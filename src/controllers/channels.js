@@ -3,7 +3,7 @@
 const pool = require('../db');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { HORIZON_DAYS } = require('../lib/availabilitySeeder');
-const { ADAPTERS } = require('../lib/channels');
+const { ADAPTERS, SECRET_KEYS } = require('../lib/channels');
 const { drift, syncChannel, requestSync } = require('../lib/channels/sync');
 const { receiveReservation } = require('../lib/channels/reservations');
 const roomPayments = require('../lib/roomPayments');
@@ -11,9 +11,9 @@ const roomPayments = require('../lib/roomPayments');
 const COLLECT = ['hotel', 'channel'];
 const DRIFT_MAX = 500;
 
-// Adapter settings may hold credentials: only the test switch is shown as is.
+// Adapter settings may hold credentials: only SECRET_KEYS are masked.
 function present(ch) {
-  const config = Object.fromEntries(Object.entries(ch.config || {}).map(([k, v]) => [k, k === 'fail_pushes' ? v : '***']));
+  const config = Object.fromEntries(Object.entries(ch.config || {}).map(([k, v]) => [k, SECRET_KEYS.includes(k) ? '***' : v]));
   return { ...ch, config };
 }
 
@@ -25,7 +25,7 @@ async function loadChannel(req, res) {
 }
 
 // Shared by create and update; returns an error message or null.
-function invalidSettings(b, adapter) {
+function invalidSettings(b, adapter, current = {}) {
   if (b.name !== undefined && !(typeof b.name === 'string' && b.name.trim() && b.name.length <= 100)) return 'name must be 1-100 characters';
   if (b.horizon_days !== undefined && !(Number.isInteger(b.horizon_days) && b.horizon_days >= 1 && b.horizon_days <= HORIZON_DAYS)) {
     return `horizon_days must be a whole number from 1 to ${HORIZON_DAYS}`;
@@ -33,7 +33,7 @@ function invalidSettings(b, adapter) {
   if (b.collect !== undefined && !COLLECT.includes(b.collect)) return 'collect must be hotel or channel';
   if (b.config !== undefined) {
     if (!b.config || typeof b.config !== 'object' || Array.isArray(b.config)) return 'config must be an object';
-    const errors = adapter.validateConfig(b.config);
+    const errors = adapter.validateConfig(Object.fromEntries(Object.entries({ ...current, ...b.config }).filter(([, v]) => v !== null)));
     if (errors.length) return { error: 'Invalid config', details: errors.join('; ') };
   }
   return null;
@@ -83,7 +83,7 @@ async function updateChannel(req, res, next) {
     const ch = await loadChannel(req, res);
     if (!ch) return;
     const b = req.body || {};
-    const bad = invalidSettings(b, ADAPTERS[ch.adapter] || { validateConfig: () => [] });
+    const bad = invalidSettings(b, ADAPTERS[ch.adapter] || { validateConfig: () => [] }, ch.config);
     if (bad) return sendInvalid(res, bad);
     if (b.status !== undefined && !['active', 'paused'].includes(b.status)) return res.status(400).json({ error: 'status must be active or paused' });
     let status = ch.status;
@@ -91,7 +91,7 @@ async function updateChannel(req, res, next) {
     if (b.status === 'active') status = 'active';
     const { rows } = await pool.query(
       `UPDATE channel SET name = COALESCE($2, name), horizon_days = COALESCE($3, horizon_days), collect = COALESCE($4, collect),
-         config = COALESCE($5, config), status = $6
+         config = CASE WHEN $5::jsonb IS NULL THEN config ELSE jsonb_strip_nulls(config || $5::jsonb) END, status = $6
        WHERE id = $1 RETURNING *`,
       [ch.id, b.name?.trim() ?? null, b.horizon_days ?? null, b.collect ?? null, b.config ? JSON.stringify(b.config) : null, status]
     );

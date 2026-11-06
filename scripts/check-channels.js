@@ -455,9 +455,9 @@ const apiKeys = require('../src/lib/apiKeys');
       const ok = await api('POST', '/api/channels', { adapter: 'test', name: 'Web', collect: 'channel', config: { fail_pushes: false } });
       assert.equal(ok.status, 201);
       assert.deepEqual([ok.body.status, ok.body.horizon_days, ok.body.collect, ok.body.config], ['active', 365, 'channel', { fail_pushes: false }]);
-      const other = await one(`INSERT INTO channel (property_id, adapter, name, config) VALUES ($1, 'other', 'Other', '{"api_key":"s3cret"}') RETURNING id`, [P]);
+      const other = await one(`INSERT INTO channel (property_id, adapter, name, config) VALUES ($1, 'other', 'Other', '{"password":"s3cret","note":"x"}') RETURNING id`, [P]);
       const got = await api('GET', `/api/channels/${other.id}`);
-      assert.deepEqual(got.body.config, { api_key: '***' });
+      assert.deepEqual(got.body.config, { password: '***', note: 'x' });
       assert.ok((await api('GET', '/api/channels')).body.some((c) => c.id === ok.body.id));
     });
     await check('http: another property gets 404', async () => {
@@ -552,6 +552,14 @@ const apiKeys = require('../src/lib/apiKeys');
       assert.equal((await api('GET', `/api/channels/${spare.id}`)).status, 404);
       const r = await api('PUT', `/api/channels/${ch.id}`, { status: 'active', name: 'Renamed' });
       assert.deepEqual([r.body.status, r.body.name], ['active', 'Renamed']);
+    });
+    await check('http: config merges on update; null removes a key', async () => {
+      const c = (await api('POST', '/api/channels', { adapter: 'test', name: 'Cfg', config: { fail_pushes: true } })).body;
+      const cfg = async () => (await one('SELECT config FROM channel WHERE id = $1', [c.id])).config;
+      await api('PUT', `/api/channels/${c.id}`, { config: {} });
+      assert.equal((await cfg()).fail_pushes, true);
+      await api('PUT', `/api/channels/${c.id}`, { config: { fail_pushes: null } });
+      assert.equal('fail_pushes' in (await cfg()), false);
     });
   } finally {
     const props = [P, Q];

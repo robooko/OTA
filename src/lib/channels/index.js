@@ -9,4 +9,7 @@ const ADAPTERS = {
   test: require('./test'),
 };
 
-module.exports = { ADAPTERS };
+// Config keys never returned by the API (masked as ***).
+const SECRET_KEYS = ['password', 'inbound_password'];
+
+module.exports = { ADAPTERS, SECRET_KEYS };
