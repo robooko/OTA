@@ -39,6 +39,8 @@ const quickbooksRoutes = require('./routes/quickbooks');
 const integrationsRoutes = require('./routes/integrations');
 
 const app = express();
+// Render is one proxy hop; without this req.ip is the proxy for everyone (the inbound limiter keys on it).
+app.set('trust proxy', 1);
 
 const { handleResendInboundWebhook } = require('./controllers/eventInquiries');
 const { handleStripeWebhook } = require('./controllers/billing');
