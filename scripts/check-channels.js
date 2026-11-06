@@ -255,6 +255,30 @@ const apiKeys = require('../src/lib/apiKeys');
       assert.equal(await lockHeld(`channel_sync_v2:${ch.id}`), false);
       assert.ok(!(await syncChannel(ch.id)).skipped);
     });
+    await check('sync: lock backend killed mid-run does not crash, next run takes the lock', async () => {
+      const d5 = (await one(`SELECT (CURRENT_DATE + 5)::text AS d`)).d;
+      await pool.query('UPDATE room_type_rate SET rate = 160 WHERE room_type_id = $1 AND date = $2', [RT, d5]);
+      const push = ADAPTERS.test.push;
+      let killed = 0;
+      ADAPTERS.test.push = async (...args) => {
+        killed = (await one(
+          `SELECT count(pg_terminate_backend(pid))::int AS n FROM pg_locks
+           WHERE locktype = 'advisory' AND objsubid = 1 AND objid::bigint = (hashtext($1)::bigint & 4294967295)`,
+          [`channel_sync_v2:${ch.id}`])).n;
+        await new Promise((r) => setTimeout(r, 100)); // let the client see its socket close
+        return push(...args);
+      };
+      const log = console.error;
+      console.error = () => {}; // the expected 'lock client' / 'could not end' lines
+      try {
+        assert.equal((await syncChannel(ch.id)).pushed, 2);
+      } finally {
+        ADAPTERS.test.push = push;
+        console.error = log;
+      }
+      assert.equal(killed, 1);
+      assert.ok(!(await syncChannel(ch.id)).skipped);
+    });
     await check('sync: a lock leaked under the old key does not block', async () => {
       const c = await pool.connect();
       try {

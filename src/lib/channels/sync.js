@@ -77,6 +77,12 @@ const LOCK_KEY = 'channel_sync_v2:';
 
 async function syncChannel(channelId) {
   const client = await pool.connect();
+  // pg-pool drops its idle error listener on checkout, and this client sits
+  // idle in a transaction for the whole run: if its backend dies meanwhile
+  // (a timeout, a terminate, a Neon restart), an unhandled 'error' would
+  // crash the process. Removed in finally, as the client goes back to the pool.
+  const onError = (e) => console.error('channel sync lock client:', e.message);
+  client.on('error', onError);
   try {
     await client.query('BEGIN');
     const locked = (await client.query(`SELECT pg_try_advisory_xact_lock(hashtext($1 || $2)) AS ok`, [LOCK_KEY, channelId])).rows[0].ok;
@@ -140,6 +146,8 @@ async function syncChannel(channelId) {
     // connection is suspect: destroy it rather than pool it mid-transaction.
     let err;
     await client.query('COMMIT').catch(() => client.query('ROLLBACK')).catch((e) => { err = e; });
+    if (err) console.error(`channel sync ${channelId}: could not end the lock transaction, dropping the connection:`, err.message);
+    client.off('error', onError);
     client.release(err);
   }
 }
