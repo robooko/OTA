@@ -33,13 +33,14 @@ async function send(config, xml) {
       method: 'POST',
       headers: { 'Content-Type': 'text/xml; charset=utf-8', SOAPAction: '""' },
       body: xml,
+      redirect: 'error', // a 307/308 would resend the WS-Security password to wherever it points
       signal: AbortSignal.timeout(timeouts.ms),
     });
     const rs = parseNotifRS(await res.text());
     // A SOAP fault is a 500 with a body; parseNotifRS has already said why.
     return !res.ok && rs.ok ? { ok: false, error: `HTTP ${res.status}` } : rs;
   } catch (err) {
-    return { ok: false, error: err.name === 'TimeoutError' ? 'timed out' : err.message };
+    return { ok: false, error: err.name === 'TimeoutError' ? 'timed out' : `${err.message}${err.cause?.code ? ` (${err.cause.code})` : ''}` };
   }
 }
 

@@ -570,10 +570,18 @@ const apiKeys = require('../src/lib/apiKeys');
       assert.equal(got.body.config.endpoint_url, 'https://x.test/ota');
       assert.equal(got.body.config.password, '***');
       const stored = async () => (await one('SELECT config FROM channel WHERE id = $1', [made.body.id])).config;
-      assert.equal((await api('PUT', `/api/channels/${made.body.id}`, { config: { endpoint_url: 'https://y.test/ota' } })).status, 200);
-      assert.deepEqual([(await stored()).endpoint_url, (await stored()).password], ['https://y.test/ota', 'pw1']);
-      assert.equal((await api('PUT', `/api/channels/${made.body.id}`, { config: { ...got.body.config, endpoint_url: 'https://z.test/ota' } })).status, 200);
-      assert.deepEqual([(await stored()).endpoint_url, (await stored()).password, (await stored()).inbound_password], ['https://z.test/ota', 'pw1', 'ipw']);
+      const put = (config) => api('PUT', `/api/channels/${made.body.id}`, { config });
+      assert.equal((await put({ hotel_code: 'H2' })).status, 200);
+      assert.deepEqual([(await stored()).hotel_code, (await stored()).password], ['H2', 'pw1']);
+      for (const cfg of [{ endpoint_url: 'https://y.test/ota' }, { ...got.body.config, endpoint_url: 'https://y.test/ota' }, { endpoint_url: 'https://y.test/ota', password: '  ' }]) {
+        const bad = await put(cfg);
+        assert.equal(bad.status, 400);
+        assert.match(bad.body.error, /password is required when the endpoint changes/);
+      }
+      assert.equal((await stored()).endpoint_url, 'https://x.test/ota');
+      assert.equal((await put({ ...got.body.config, hotel_code: 'H3' })).status, 200); // masked echo, endpoint unchanged
+      assert.equal((await put({ endpoint_url: 'https://z.test/ota', password: 'pw2' })).status, 200);
+      assert.deepEqual([(await stored()).endpoint_url, (await stored()).password, (await stored()).inbound_password], ['https://z.test/ota', 'pw2', 'ipw']);
     });
 
     // ---- OpenTravel inbound (SOAP) ----
@@ -631,6 +639,15 @@ const apiKeys = require('../src/lib/apiKeys');
       const big = await post(otCh, inb('res-notif-new.xml', 'CH-3003').replace(one1, one1.repeat(501)));
       assert.equal(big.status, 400);
       assert.match(big.text, /Fault/);
+      assert.equal(await logCount(), before);
+    });
+    await check('inbound: multi-room reservation is Errors and books nothing', async () => {
+      const x = inb('res-notif-new.xml', 'CH-4004').replace(/<RoomStay>[\s\S]*<\/RoomStay>/, (s) => s + s);
+      const before = await logCount();
+      const r = await post(otCh, x);
+      assert.equal(r.status, 200);
+      assert.match(r.text, /<Errors>.*multi-room/);
+      assert.equal((await bookingsOf()).filter((b) => b.channel_ref === 'CH-4004').length, 0);
       assert.equal(await logCount(), before);
     });
     await check('inbound: not xml is 400 Fault', async () => {

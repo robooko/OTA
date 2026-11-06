@@ -87,6 +87,11 @@ async function updateChannel(req, res, next) {
     if (b.config && typeof b.config === 'object' && !Array.isArray(b.config)) {
       b.config = Object.fromEntries(Object.entries(b.config).filter(([k, v]) => !(SECRET_KEYS.includes(k) && v === '***')));
     }
+    const c = b.config;
+    if (ch.adapter === 'opentravel' && c && typeof c === 'object' && c.endpoint_url !== undefined && c.endpoint_url !== ch.config?.endpoint_url
+        && !(typeof c.password === 'string' && c.password.trim())) {
+      return res.status(400).json({ error: 'password is required when the endpoint changes' });
+    }
     const bad = invalidSettings(b, ADAPTERS[ch.adapter] || { validateConfig: () => [] }, ch.config);
     if (bad) return sendInvalid(res, bad);
     if (b.status !== undefined && !['active', 'paused'].includes(b.status)) return res.status(400).json({ error: 'status must be active or paused' });

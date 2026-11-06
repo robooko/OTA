@@ -62,6 +62,9 @@ check('parseResNotifRQ new/modify/cancel/no-email', () => {
     guests: 3, total_price: 360, currency: 'GBP',
     guest: { first_name: 'Anna & Co', last_name: 'Lewis', email: 'anna@example.com', phone: '+447700900123' }, _uid: 'CH-1001',
   });
+  const two = fx('res-notif-new.xml').replace(/<RoomStay>[\s\S]*<\/RoomStay>/, (s) => s + s);
+  assert.equal(m.parseResNotifRQ(two).reservations[0].reject_reason, 'multi-room reservations not supported');
+  assert.equal(r.reservations[0].reject_reason, undefined);
   assert.equal(m.parseResNotifRQ(fx('res-notif-modify.xml')).reservations[0].action, 'modify');
   assert.equal(m.parseResNotifRQ(fx('res-notif-cancel.xml')).reservations[0].action, 'cancel');
   const ne = m.parseResNotifRQ(fx('res-notif-no-email.xml')).reservations[0];
@@ -158,6 +161,21 @@ const chan = (url) => ({ currency: 'GBP', config: { endpoint_url: url, username:
     slow.server.close();
     assert.equal(r[0].ok, false);
     assert.ok(Date.now() - t < 1400);
+  });
+  await acheck('push: a redirect is not followed and fails every change', async () => {
+    const target = await stand(() => ({ body: OK }));
+    const s = await stand(() => ({ body: '' }));
+    s.server.removeAllListeners('request');
+    s.server.on('request', (req, res) => { req.resume(); res.writeHead(307, { Location: target.url }); res.end(); });
+    const r = await ot.push(chan(s.url), [row('2026-12-01')]);
+    s.server.close(); target.server.close();
+    assert.equal(r[0].ok, false);
+    assert.equal(target.seen.length, 0);
+  });
+  await acheck('push: network error text carries the cause code', async () => {
+    const dead = await stand(() => ({ body: OK }));
+    dead.server.close();
+    assert.match((await ot.push(chan(dead.url), [row('2026-12-01')]))[0].error, /\(ECONNREFUSED\)/);
   });
   await acheck('push: 400 runs split into requests of at most MAX_RUNS', async () => {
     const s = await stand(() => ({ body: OK }));

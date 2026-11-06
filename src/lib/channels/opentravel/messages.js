@@ -65,7 +65,8 @@ const ACTION = { Commit: 'new', Book: 'new', Modify: 'modify', Cancel: 'cancel' 
 const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 
 function reservation(hr, rootStatus) {
-  const stay = arr(hr.RoomStays && hr.RoomStays.RoomStay)[0] || {};
+  const stays = arr(hr.RoomStays && hr.RoomStays.RoomStay);
+  const stay = stays[0] || {};
   const counts = arr(stay.GuestCounts && stay.GuestCounts.GuestCount).map((g) => Number(attr(g, 'Count')));
   const cust = (arr(hr.ResGuests && hr.ResGuests.ResGuest)[0] || {}).Profiles?.ProfileInfo?.Profile?.Customer || {};
   const ref = attr(arr(hr.UniqueID)[0], 'ID');
@@ -87,7 +88,7 @@ function reservation(hr, rootStatus) {
       phone: attr(arr(cust.Telephone)[0], 'PhoneNumber'),
     }),
   });
-  return { ...r, _uid: ref };
+  return { ...r, _uid: ref, ...(stays.length > 1 && { reject_reason: 'multi-room reservations not supported' }) };
 }
 
 function parseResNotifRQ(xml) {

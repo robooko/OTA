@@ -4,6 +4,7 @@
 // the body at HTTP 200 (OpenTravel); only auth/unknown/unparsable use 4xx.
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = rateLimit;
 const pool = require('../db');
 const { isValidUuid } = require('../middleware/validate');
 const { receiveReservation } = require('../lib/channels/reservations');
@@ -16,6 +17,7 @@ const send = (res, status, xml) => res.status(status).type('text/xml; charset=ut
 
 const inboundLimiter = rateLimit({
   windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false,
+  keyGenerator: (req) => `${req.params.id}:${ipKeyGenerator(req.ip)}`,
   handler: (req, res) => send(res, 429, soapFault('Client', 'too many requests')),
 });
 
@@ -39,7 +41,8 @@ async function handleChannelInbound(req, res) {
     if (!n) return send(res, 200, resNotifRS({ echoToken: msg.echoToken, results: [{ channel_ref: '', error: 'no reservations' }] }));
 
     const results = [];
-    for (const { _uid, ...r } of msg.reservations) {
+    for (const { _uid, reject_reason, ...r } of msg.reservations) {
+      if (reject_reason) { results.push({ channel_ref: r.channel_ref, error: reject_reason }); continue; }
       const out = await receiveReservation(channel, r);
       results.push(out.outcome === 'rejected'
         ? { channel_ref: r.channel_ref, error: out.reason }
