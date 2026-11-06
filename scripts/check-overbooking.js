@@ -55,7 +55,7 @@ const nightsOf = async (b) => (await pool.query(
   `SELECT night::text, room_id FROM booking_night WHERE booking_id = $1 ORDER BY night`, [b])).rows;
 async function book(P, body) {
   const { createBooking } = require('../src/controllers/bookings');
-  return call(createBooking, P, { body: { guest_id: await guest(P), ...body }, extra: { auth_method: 'clerk' } });
+  return call(createBooking, P, { body: { source: 'phone', guest_id: await guest(P), ...body }, extra: { auth_method: 'clerk' } });
 }
 
 const sections = {
@@ -116,8 +116,8 @@ const sections = {
     const q1 = await room(Q, QA, '1');
     await open(Q, [q1], T, 5);
     await pool.query(`INSERT INTO room_type_oversell (property_id, room_type_id, date, model_allowance) VALUES ($1, $2, $3, 1), ($1, $2, $4, 1)`, [Q, QA, T, addDays(T, 1)]);
-    const full = await call(require('../src/controllers/bookings').createBooking, Q, { body: { guest_id: await guest(Q), room_type_id: QA, check_in: T, check_out: addDays(T, 2) }, extra: { auth_method: 'clerk' } });
-    const wq = await call(require('../src/controllers/bookings').createBooking, Q, { body: { guest_id: await guest(Q), room_type_id: QA, check_in: T, check_out: addDays(T, 2) }, extra: { auth_method: 'clerk' } });
+    const full = await call(require('../src/controllers/bookings').createBooking, Q, { body: { source: 'phone', guest_id: await guest(Q), room_type_id: QA, check_in: T, check_out: addDays(T, 2) }, extra: { auth_method: 'clerk' } });
+    const wq = await call(require('../src/controllers/bookings').createBooking, Q, { body: { source: 'phone', guest_id: await guest(Q), room_type_id: QA, check_in: T, check_out: addDays(T, 2) }, extra: { auth_method: 'clerk' } });
     assert.equal(wq.body.room_id, null);
     // the first guest leaves without the room being handed on (as if staff cleared it by hand)
     await pool.query('DELETE FROM booking_night WHERE booking_id = $1', [full.body.id]);
@@ -448,7 +448,7 @@ const sections = {
     const [g1, g2] = [await guest(Q), await guest(Q)];
     const { createBooking } = require('../src/controllers/bookings');
     const race = await Promise.all([g1, g2].map((guest_id) => call(createBooking, Q,
-      { body: { guest_id, room_type_id: QA, check_in: d, check_out: addDays(d, 1) }, extra: { auth_method: 'clerk' } })));
+      { body: { source: 'phone', guest_id, room_type_id: QA, check_in: d, check_out: addDays(d, 1) }, extra: { auth_method: 'clerk' } })));
     assert.deepEqual(race.map((r) => r.status).sort(), [201, 409], 'race: two concurrent bookings for last slot');
 
     // a bumped guest moves whole-stay when a room is free for all their nights
@@ -457,7 +457,7 @@ const sections = {
     const [s1, s2] = [await room(S, SA, '1'), await room(S, SA, '2')];
     await open(S, [s1, s2], TODAY, 20);
     const sd = addDays(TODAY, 10);
-    const sb = (body) => call(createBooking, S, { body: { guest_id: null, ...body }, extra: { auth_method: 'clerk' } });
+    const sb = (body) => call(createBooking, S, { body: { source: 'phone', guest_id: null, ...body }, extra: { auth_method: 'clerk' } });
     const h = await sb({ guest_id: await guest(S), room_type_id: SA, check_in: sd, check_out: addDays(sd, 3) });
     assert.equal(h.body.room_id, s1);
     assert.equal((await sb({ guest_id: await guest(S), room_id: s1, check_in: addDays(sd, 1), check_out: addDays(sd, 2) })).status, 201);
@@ -522,7 +522,7 @@ const sections = {
     const u = addDays(TODAY, 8);
     await open(Q, [qa1, qd1], TODAY, 20);
     const g0 = await guest(Q);
-    const ub = await call(require('../src/controllers/bookings').createBooking, Q, { body: { guest_id: g0, room_type_id: QA, check_in: u, check_out: addDays(u, 1) }, extra: { auth_method: 'clerk' } });
+    const ub = await call(require('../src/controllers/bookings').createBooking, Q, { body: { source: 'phone', guest_id: g0, room_type_id: QA, check_in: u, check_out: addDays(u, 1) }, extra: { auth_method: 'clerk' } });
     assert.equal((await call(moveBooking, Q, { params: { id: ub.body.id }, body: { room_id: qd1 } })).status, 200);
     const qc = await typeCounts(pool, Q, null, [u]);
     assert.equal(qc.get(`${QD}|${u}`).sellable, 0, 'upgraded-into type has nothing left to sell');

@@ -153,7 +153,8 @@ async function createBooking(req, res, next) {
   if (metadata !== undefined && !isValidMetadata(metadata)) {
     return res.status(400).json({ error: 'metadata must be a JSON object' });
   }
-  if (source !== undefined && !SOURCES.includes(source)) {
+  // Staff must say how the booking came in; a website is web by default.
+  if ((source !== undefined || !viaApiKey) && !SOURCES.includes(source)) {
     return res.status(400).json({ error: SOURCE_ERROR });
   }
   if (pay_at_hotel !== undefined && typeof pay_at_hotel !== 'boolean') {

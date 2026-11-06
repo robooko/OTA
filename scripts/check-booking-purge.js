@@ -28,7 +28,7 @@ async function setup() {
   const book = async (d = D) => {
     const g = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'P', 'Urge', $2) RETURNING id`,
       [P, `purge-${Math.random()}@example.com`])).id;
-    const r = await call(createBooking, P, { guest_id: g, room_type_id: T, check_in: d, check_out: addDays(d, 1) });
+    const r = await call(createBooking, P, { source: 'phone', guest_id: g, room_type_id: T, check_in: d, check_out: addDays(d, 1) });
     assert.equal(r.status, 201, JSON.stringify(r.body));
     return r.body;
   };

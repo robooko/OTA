@@ -32,8 +32,9 @@ let P;
     assert.equal((await call(createBooking, P, { body: { ...stay, source: 'fax' } })).status, 400, 'unknown source refused');
     const phone = await call(createBooking, P, { body: { ...stay, source: 'phone' } });
     assert.equal(phone.status, 201, JSON.stringify(phone.body)); assert.equal(phone.body.source, 'phone');
-    const staff = await call(createBooking, P, { body: stay });
-    assert.equal(staff.body.source, null, 'staff default: not recorded');
+    assert.equal((await call(createBooking, P, { body: stay })).status, 400, 'staff must give a source');
+    const staff = await call(createBooking, P, { body: { ...stay, source: 'email' } });
+    assert.equal(staff.body.source, 'email');
     const web = await call(createBooking, P, { body: stay, auth_method: 'api_key' });
     assert.equal(web.status, 201, JSON.stringify(web.body)); assert.equal(web.body.source, 'web', 'API key default: web');
 
