@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Header>
+    <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+      <wsse:UsernameToken>
+        <wsse:Username>partner</wsse:Username>
+        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">s3cret</wsse:Password>
+      </wsse:UsernameToken>
+    </wsse:Security>
+  </soap:Header>
+  <soap:Body>
+    <OTA_HotelResNotifRQ xmlns="http://www.opentravel.org/OTA/2003/05" EchoToken="tok-Commit" TimeStamp="2026-11-06T09:30:00Z" Version="1.0" ResStatus="Commit">
+      <HotelReservations>
+        <HotelReservation CreateDateTime="2026-11-06T09:29:00Z" ResStatus="Commit">
+          <UniqueID Type="14" ID="CH-1001"/>
+          <RoomStays>
+            <RoomStay>
+              <RoomTypes><RoomType RoomTypeCode="DBL"/></RoomTypes>
+              <RatePlans><RatePlan RatePlanCode="BAR"/></RatePlans>
+              <GuestCounts>
+                <GuestCount AgeQualifyingCode="10" Count="2"/>
+                <GuestCount AgeQualifyingCode="8" Count="1"/>
+              </GuestCounts>
+              <TimeSpan Start="2026-12-01" End="2026-12-04"/>
+              <Total AmountAfterTax="360.00" CurrencyCode="GBP"/>
+              <BasicPropertyInfo HotelCode="H1"/>
+            </RoomStay>
+          </RoomStays>
+          <ResGuests>
+            <ResGuest>
+              <Profiles><ProfileInfo><Profile ProfileType="1"><Customer>
+                <PersonName><GivenName>Anna &amp; Co</GivenName><Surname>Lewis</Surname></PersonName>
+                <Telephone PhoneNumber="+447700900123"/>
+              </Customer></Profile></ProfileInfo></Profiles>
+            </ResGuest>
+          </ResGuests>
+        </HotelReservation>
+      </HotelReservations>
+    </OTA_HotelResNotifRQ>
+  </soap:Body>
+</soap:Envelope>
