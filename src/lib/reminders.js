@@ -23,6 +23,7 @@ const SPA_CLAIM_SQL = `
   WHERE p.id = sa.property_id
     AND p.reminder_enabled
     AND sa.status = 'confirmed'
+    AND sa.send_emails
     AND sa.reminder_sent_at IS NULL
     AND sa.reminder_attempts < $1
     AND (sa.contact_email IS NOT NULL OR sa.contact_phone IS NOT NULL)

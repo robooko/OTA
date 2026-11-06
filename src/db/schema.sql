@@ -1040,6 +1040,9 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
   confirm_token_hash       TEXT,
   hold_expires_at          TIMESTAMPTZ,
   pending_email_opts       JSONB,
+  -- false = the guest gets no confirmation, cancellation, reminder (email or
+  -- SMS) or review request for this appointment.
+  send_emails              BOOLEAN NOT NULL DEFAULT true,
   created_at                    TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT spa_appointment_payment_status CHECK (payment_status IN ('unpaid', 'paid')),
   CONSTRAINT spa_appointment_payment_method CHECK (payment_method IN ('card', 'cash'))

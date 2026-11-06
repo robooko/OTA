@@ -34,8 +34,9 @@ const CLAIM_SQL = `
       AND (p.enabled_modules IS NULL OR p.enabled_modules ? c.module)
       AND c.ended_at <= $1::timestamptz - make_interval(mins => p.review_request_delay_mins)
       AND c.ended_at >= $1::timestamptz - interval '2 days'
-      -- a room booking made with send_emails false never triggers one
+      -- a room booking or spa appointment made with send_emails false never triggers one
       AND NOT EXISTS (SELECT 1 FROM booking nb WHERE c.module = 'rooms' AND nb.id = c.booking_id AND NOT nb.send_emails)
+      AND NOT EXISTS (SELECT 1 FROM spa_appointment ns WHERE c.module = 'spa' AND ns.id = c.booking_id AND NOT ns.send_emails)
       AND NOT EXISTS (
         SELECT 1 FROM review_candidate f
         WHERE f.property_id = c.property_id AND f.email = c.email

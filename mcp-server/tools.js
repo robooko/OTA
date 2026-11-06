@@ -26,6 +26,7 @@ const SPA_APPOINTMENT_FIELDS = {
   member_email: z.string().optional().describe("Computed flow: an email you've verified belongs to the client; books at the regulars' rate if it qualifies. Never inferred from contact_email."),
   branding: BRANDING_SCHEMA.describe('Styles the confirmation email; relayed, never stored'),
   cancel_url: z.string().optional().describe('http(s) URL for the guest to cancel; may contain {id}'),
+  send_emails: z.boolean().optional().describe('Default true. false (staff only, not an X-Api-Key) = the guest gets no confirmation, cancellation, reminder (email or SMS) or review request for this appointment'),
 };
 
 // Marina columns accepted by POST/PUT /api/marina/marinas (MARINA_COLS in
@@ -2004,24 +2005,13 @@ function createTools(apiRequest) {
   },
   {
     name: 'bulk_create_spa_appointments',
-    description: 'Book up to 50 spa appointments at one spa, each with the same fields as create_spa_appointment. Booked one by one in order; one failing does not stop the rest (and nothing is rolled back). Returns created/failed counts and a per-appointment outcome: { index, appointment } or { index, status, error, details }.',
+    description: 'Book up to 50 spa appointments at one spa in one call, each with the same fields and rules as create_spa_appointment. Booked in order, each on its own: one failing does not stop the rest, and nothing is rolled back. Returns created/failed counts and a per-appointment outcome: { index, appointment } or { index, status, error, code, details }.',
     inputSchema: {
       spa_id: z.string(),
       appointments: z.array(z.object(SPA_APPOINTMENT_FIELDS)).min(1).max(50),
+      send_emails: z.boolean().optional().describe("Default for every appointment; an appointment's own send_emails wins"),
     },
-    run: async ({ spa_id, appointments }) => {
-      // ponytail: sequential calls to the single-create route, add a server bulk route if 50 is too few or atomicity matters
-      const results = [];
-      for (const [index, body] of appointments.entries()) {
-        try {
-          results.push({ index, appointment: await apiRequest('POST', `/api/spa/${spa_id}/appointments`, { body }) });
-        } catch (err) {
-          results.push({ index, status: err.status, error: err.message, details: err.body?.details });
-        }
-      }
-      const created = results.filter((r) => r.appointment).length;
-      return { created, failed: results.length - created, results };
-    },
+    run: ({ spa_id, ...body }) => apiRequest('POST', `/api/spa/${spa_id}/appointments/bulk`, { body }),
   },
   {
     name: 'update_spa_appointment',

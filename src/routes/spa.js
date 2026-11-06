@@ -55,6 +55,7 @@ router.put('/:spa_id/slots/:id', authenticateOrApiKey, ctrl.updateSlot);
 router.get('/:spa_id/appointments', authenticateOrApiKey, ctrl.listAppointments);
 router.get('/:spa_id/appointments/:id', authenticateOrApiKey, ctrl.getAppointment);
 router.post('/:spa_id/appointments', authenticateOrApiKey, ctrl.createAppointment);
+router.post('/:spa_id/appointments/bulk', authenticateOrApiKey, ctrl.bulkCreateAppointments);
 router.put('/:spa_id/appointments/:id', authenticateOrApiKey, ctrl.updateAppointment);
 
 // Tap to Pay (see 2026-08-30-spa-tap-to-pay-backend-requirements.md)

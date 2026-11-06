@@ -860,7 +860,7 @@ async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawI
   publishNewSpaBookingForSpa(spaId, toLiveSpaBooking(full))
     .catch((err) => console.error('Ably publish failed:', err.message));
 
-  if (full.contact_email) {
+  if (full.contact_email && full.send_emails) {
     // A literal `{id}` in cancel_url resolves to the new appointment's id
     // here -- the caller can't know it when supplying the URL (this email
     // sends during creation), and the unguessable UUID lets the link work
@@ -1026,7 +1026,7 @@ async function getAppointment(req, res, next) {
 // appointment -- slot-based or computed -- has them.
 async function createAppointmentFromSlot(req, res, next) {
   const { spa_id } = req.params;
-  const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, payment_verified, branding, cancel_url } = req.body;
+  const { slot_id, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, payment_verified, branding, cancel_url, send_emails } = req.body;
 
   const client = await pool.connect();
   try {
@@ -1079,13 +1079,13 @@ async function createAppointmentFromSlot(req, res, next) {
       `INSERT INTO spa_appointment
          (property_id, slot_id, treatment_id, therapist_id, appointment_date, start_time, end_time,
           guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, price,
-          status, contact_email_key, confirm_token_hash, hold_expires_at, pending_email_opts)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING *`,
+          status, contact_email_key, confirm_token_hash, hold_expires_at, pending_email_opts, send_emails)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING *`,
       [
         req.property_id, slot_id, slot.treatment_id, slot.therapist_id, slot.slot_date, slot.slot_time, endTime,
         guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
         treatmentRes.rows[0].price,
-        ...holdColumns(hold, contact_email, branding, cancel_url),
+        ...holdColumns(hold, contact_email, branding, cancel_url), send_emails ?? true,
       ]
     );
 
@@ -1164,7 +1164,7 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // see lib/spaMemberRate.js); when it qualifies for the regulars' rate on
 // `date`, the appointment books at member_price/member_duration_mins. The
 // price is frozen onto the appointment either way.
-async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, payment_verified = false, branding, cancel_url, enforceLeadTime = false, guestRail = false }) {
+async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, payment_verified = false, branding, cancel_url, enforceLeadTime = false, guestRail = false, send_emails = true }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1245,13 +1245,13 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
       `INSERT INTO spa_appointment
          (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time,
           guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, price, member_rate,
-          status, contact_email_key, confirm_token_hash, hold_expires_at, pending_email_opts)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING *`,
+          status, contact_email_key, confirm_token_hash, hold_expires_at, pending_email_opts, send_emails)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING *`,
       [
         property_id, treatment_id, chosenTherapistId, date, time, endTime,
         guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
         rate.price, rate.memberRate,
-        ...holdColumns(hold, contact_email, branding, cancel_url),
+        ...holdColumns(hold, contact_email, branding, cancel_url), send_emails,
       ]
     );
 
@@ -1278,7 +1278,7 @@ const BOOK_FAILURE_HTTP = {
 
 async function createAppointmentFromAvailability(req, res, next) {
   const { spa_id } = req.params;
-  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, payment_verified, branding, cancel_url } = req.body;
+  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, payment_verified, branding, cancel_url, send_emails } = req.body;
 
   if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
   if (!isValidTime(time)) return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
@@ -1288,6 +1288,7 @@ async function createAppointmentFromAvailability(req, res, next) {
       property_id: req.property_id, spa_id, treatment_id, therapist_id, date, time,
       guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, branding, cancel_url,
       payment_verified: payment_verified === true,
+      send_emails: send_emails ?? true,
       enforceLeadTime: isGuestRail(req),
       guestRail: isGuestRail(req),
     });
@@ -1309,6 +1310,14 @@ async function createAppointment(req, res, next) {
     return res.status(400).json({ error: 'Provide either slot_id or treatment_id, not both' });
   }
   if (!contact_name) return res.status(400).json({ error: 'contact_name is required' });
+  const { send_emails } = req.body;
+  if (send_emails !== undefined && typeof send_emails !== 'boolean') {
+    return res.status(400).json({ error: 'send_emails must be true or false' });
+  }
+  // The guest rail's booking is held until the guest clicks the emailed link.
+  if (send_emails === false && isGuestRail(req)) {
+    return res.status(403).json({ error: 'send_emails is staff-only' });
+  }
   // The guest rail's per-email cap and confirmation hold both hang off the
   // email, so a guest booking without one can't be let through.
   if (isGuestRail(req) && !EMAIL_RE.test(req.body.contact_email || '')) {
@@ -1327,6 +1336,46 @@ async function createAppointment(req, res, next) {
     return res.status(400).json({ error: 'treatment_id, date, and time are required (or slot_id for the legacy flow)' });
   }
   return createAppointmentFromAvailability(req, res, next);
+}
+
+// Books each item through createAppointment, in order, with a stand-in res,
+// so every validation, guest-rail rule and email matches a single booking.
+// Each item is its own transaction: one failing doesn't stop or undo the rest.
+// ponytail: not all-or-nothing; bookFromAvailability/createAppointmentFromSlot
+// would need to take a shared client for that.
+const BULK_APPOINTMENT_MAX = 50;
+async function bulkCreateAppointments(req, res, next) {
+  const { appointments, send_emails } = req.body;
+  if (!Array.isArray(appointments) || !appointments.length || appointments.length > BULK_APPOINTMENT_MAX) {
+    return res.status(400).json({ error: `appointments must be an array of 1-${BULK_APPOINTMENT_MAX} items` });
+  }
+  if (appointments.some((a) => !a || typeof a !== 'object' || Array.isArray(a))) {
+    return res.status(400).json({ error: 'Each appointment must be an object' });
+  }
+  try {
+    const results = [];
+    for (const [index, body] of appointments.entries()) {
+      const { status, json } = await new Promise((resolve) => {
+        const fakeRes = {
+          statusCode: 200,
+          status(code) { this.statusCode = code; return this; },
+          json(payload) { resolve({ status: this.statusCode, json: payload }); },
+        };
+        const fakeNext = (err) => {
+          console.error(err);
+          resolve({ status: err.status || 500, json: { error: err.status ? err.message : 'Internal server error', details: err.details } });
+        };
+        // A top-level send_emails is the default; an item's own wins.
+        const itemBody = send_emails === undefined ? body : { send_emails, ...body };
+        createAppointment(Object.assign(Object.create(req), { body: itemBody }), fakeRes, fakeNext);
+      });
+      results.push(status === 201
+        ? { index, appointment: json }
+        : { index, status, error: json.error, code: json.code, details: json.details });
+    }
+    const created = results.filter((r) => r.appointment).length;
+    res.status(created ? 201 : 200).json({ created, failed: results.length - created, results });
+  } catch (err) { next(err); }
 }
 
 // status/notes update in-place. Rescheduling (appointment_date/start_time/
@@ -1452,7 +1501,7 @@ async function updateAppointment(req, res, next) {
         publishSpaBookingStatusChangedForSpa(spa_id, toLiveSpaBooking(full))
           .catch((err) => console.error('Ably publish failed:', err.message));
 
-        if (rows[0].status === 'cancelled' && full.contact_email) {
+        if (rows[0].status === 'cancelled' && full.contact_email && full.send_emails) {
           resolveEmailBranding(req.property_id, branding, null)
             .then(({ branding: resolved }) => sendAppointmentCancellation(full, full.property_name, resolved))
             .catch((err) => console.error('Cancellation email failed:', err.message));
@@ -1603,7 +1652,7 @@ module.exports = {
   findSpaAvailability,
   bookFromAvailability,
   listSlots, bulkCreateSlots, searchSlots, updateSlot,
-  listAppointments, getAppointment, createAppointment, updateAppointment,
+  listAppointments, getAppointment, createAppointment, bulkCreateAppointments, updateAppointment,
   getSpaAblyToken,
   listAppointmentsForProperty,
   getFullAppointmentForEmail,
