@@ -74,6 +74,7 @@ async function syncChannel(channelId) {
     if (!locked) return { skipped: 'locked' };
     const channel = (await pool.query('SELECT * FROM channel WHERE id = $1', [channelId])).rows[0];
     if (!channel) return { skipped: 'missing' };
+    channel.currency = (await pool.query('SELECT currency FROM property WHERE id = $1', [channel.property_id])).rows[0]?.currency;
     if (channel.status === 'paused') return { skipped: 'paused' };
     const adapter = ADAPTERS[channel.adapter];
     if (!adapter) throw new Error(`unknown channel adapter ${channel.adapter}`);

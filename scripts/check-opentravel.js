@@ -96,5 +96,91 @@ check('resNotifRS reports failures', () => {
   assert.doesNotMatch(ok, /Errors/);
 });
 
-if (failed) { console.log(`${failed} failed`); process.exit(1); }
-console.log('all passed');
+
+
+const http = require('http');
+const ot = require('../src/lib/channels/opentravel');
+const acheck = async (name, fn) => {
+  try { await fn(); console.log(`ok   ${name}`); } catch (err) { failed++; console.log(`FAIL ${name}
+     ${err.stack}`); }
+};
+const OK = '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><OTA_X_RS xmlns="http://www.opentravel.org/OTA/2003/05" Version="1.0"><Success/></OTA_X_RS></s:Body></s:Envelope>';
+const ERR = '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><OTA_X_RS xmlns="http://www.opentravel.org/OTA/2003/05" Version="1.0"><Errors><Error Type="3">bad</Error></Errors></OTA_X_RS></s:Body></s:Envelope>';
+// Stand-in OTA: answer(kind, n) -> { body, status?, delay? }; records every request.
+async function stand(answer) {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let b = '';
+    req.on('data', (d) => (b += d));
+    req.on('end', () => {
+      const kind = /OTA_HotelAvailNotifRQ/.test(b) ? 'avail' : 'rate';
+      seen.push({ kind, body: b, headers: req.headers });
+      const a = answer(kind);
+      setTimeout(() => { res.writeHead(a.status || 200, { 'Content-Type': 'text/xml' }); res.end(a.body); }, a.delay || 0);
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return { seen, server, url: `http://127.0.0.1:${server.address().port}/ota` };
+}
+const chan = (url) => ({ currency: 'GBP', config: { endpoint_url: url, username: 'u', password: 'p', hotel_code: 'H1', inbound_username: 'iu', inbound_password: 'ip' } });
+
+(async () => {
+  await acheck('push: one avail + one rate request, ok in input order', async () => {
+    const s = await stand(() => ({ body: OK }));
+    const cs = [row('2026-12-03'), row('2026-12-01'), row('2026-12-10', { available: 5 })]; // 2 runs
+    const r = await ot.push(chan(s.url), cs);
+    s.server.close();
+    assert.deepEqual(r, cs.map(() => ({ ok: true })));
+    assert.deepEqual(s.seen.map((x) => x.kind).sort(), ['avail', 'rate']);
+    assert.equal(s.seen[0].headers['content-type'], 'text/xml; charset=utf-8');
+    assert.ok(s.seen[0].headers.soapaction !== undefined);
+  });
+  await acheck('push: rate errors fail every change in them, avail ones stay ok', async () => {
+    const s = await stand((k) => ({ body: k === 'rate' ? ERR : OK }));
+    const cs = [row('2026-12-01'), row('2026-12-02')];
+    const r = await ot.push(chan(s.url), cs);
+    s.server.close();
+    assert.ok(r.every((x) => x.ok === false && /rate/.test(x.error)));
+  });
+  await acheck('push: closed port, HTML answer and timeout all fail without throwing', async () => {
+    const dead = await stand(() => ({ body: OK }));
+    dead.server.close();
+    const cs = [row('2026-12-01')];
+    assert.equal((await ot.push(chan(dead.url), cs))[0].ok, false);
+    const html = await stand(() => ({ body: '<html><body>oops</body></html>' }));
+    assert.equal((await ot.push(chan(html.url), cs))[0].ok, false);
+    html.server.close();
+    const slow = await stand(() => ({ body: OK, delay: 1500 }));
+    ot.timeouts.ms = 200;
+    const t = Date.now();
+    const r = await ot.push(chan(slow.url), cs);
+    ot.timeouts.ms = 15000;
+    slow.server.close();
+    assert.equal(r[0].ok, false);
+    assert.ok(Date.now() - t < 1400);
+  });
+  await acheck('push: 400 runs split into requests of at most MAX_RUNS', async () => {
+    const s = await stand(() => ({ body: OK }));
+    const cs = Array.from({ length: 400 }, (_, i) => row('2027-01-01', { room_code: 'R' + String(i).padStart(3, '0') }));
+    const r = await ot.push(chan(s.url), cs);
+    s.server.close();
+    assert.equal(ot.MAX_RUNS, 200);
+    assert.ok(r.every((x) => x.ok));
+    assert.equal(s.seen.filter((x) => x.kind === 'avail').length, 2);
+    assert.ok(s.seen.every((x) => (x.body.match(/<(AvailStatusMessage|RateAmountMessage)[ >]/g) || []).length <= 200));
+  });
+  await acheck('validateConfig', async () => {
+    assert.equal(ot.validateConfig({}).length, 6);
+    const full = chan('https://x.test/ota').config;
+    assert.deepEqual(ot.validateConfig(full), []);
+    assert.equal(ot.validateConfig({ ...full, extra: 1 }).length, 1);
+    assert.equal(ot.validateConfig({ ...full, endpoint_url: 'http://x' }).length, 1);
+    const prev = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    assert.equal(ot.validateConfig({ ...full, endpoint_url: 'http://localhost:1/ota' }).length, 1);
+    process.env.NODE_ENV = prev;
+  });
+
+  if (failed) { console.log(`${failed} failed`); process.exit(1); }
+  console.log('all passed');
+})();

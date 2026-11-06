@@ -561,6 +561,19 @@ const apiKeys = require('../src/lib/apiKeys');
       await api('PUT', `/api/channels/${c.id}`, { config: { fail_pushes: null } });
       assert.equal('fail_pushes' in (await cfg()), false);
     });
+    await check('http: opentravel config masks secrets and survives partial and masked PUTs', async () => {
+      const full = { endpoint_url: 'https://x.test/ota', username: 'u', password: 'pw1', hotel_code: 'H1', inbound_username: 'iu', inbound_password: 'ipw' };
+      const made = await api('POST', '/api/channels', { adapter: 'opentravel', name: 'OT', config: full });
+      assert.equal(made.status, 201);
+      const got = await api('GET', `/api/channels/${made.body.id}`);
+      assert.equal(got.body.config.endpoint_url, 'https://x.test/ota');
+      assert.equal(got.body.config.password, '***');
+      const stored = async () => (await one('SELECT config FROM channel WHERE id = $1', [made.body.id])).config;
+      assert.equal((await api('PUT', `/api/channels/${made.body.id}`, { config: { endpoint_url: 'https://y.test/ota' } })).status, 200);
+      assert.deepEqual([(await stored()).endpoint_url, (await stored()).password], ['https://y.test/ota', 'pw1']);
+      assert.equal((await api('PUT', `/api/channels/${made.body.id}`, { config: { ...got.body.config, endpoint_url: 'https://z.test/ota' } })).status, 200);
+      assert.deepEqual([(await stored()).endpoint_url, (await stored()).password, (await stored()).inbound_password], ['https://z.test/ota', 'pw1', 'ipw']);
+    });
   } finally {
     const props = [P, Q];
     const has = async (t) => (await one('SELECT to_regclass($1) AS r', [t])).r;

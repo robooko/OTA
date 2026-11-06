@@ -83,6 +83,10 @@ async function updateChannel(req, res, next) {
     const ch = await loadChannel(req, res);
     if (!ch) return;
     const b = req.body || {};
+    // A client that PUTs back the masked config it GOT must not overwrite secrets with the mask.
+    if (b.config && typeof b.config === 'object' && !Array.isArray(b.config)) {
+      b.config = Object.fromEntries(Object.entries(b.config).filter(([k, v]) => !(SECRET_KEYS.includes(k) && v === '***')));
+    }
     const bad = invalidSettings(b, ADAPTERS[ch.adapter] || { validateConfig: () => [] }, ch.config);
     if (bad) return sendInvalid(res, bad);
     if (b.status !== undefined && !['active', 'paused'].includes(b.status)) return res.status(400).json({ error: 'status must be active or paused' });

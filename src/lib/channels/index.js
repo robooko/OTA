@@ -7,6 +7,7 @@
 // receiveReservation (src/lib/channels/reservations.js).
 const ADAPTERS = {
   test: require('./test'),
+  opentravel: require('./opentravel'),
 };
 
 // Config keys never returned by the API (masked as ***).
