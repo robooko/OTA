@@ -121,6 +121,21 @@ async function deleteChannel(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// The channel's own room/rate codes, or null if its adapter can't list them
+// (the test channel: no partner, so codes are free text).
+const productsOf = (ch) => ADAPTERS[ch.adapter]?.products?.(ch) ?? null;
+
+async function getProducts(req, res, next) {
+  try {
+    const ch = await loadChannel(req, res);
+    if (!ch) return;
+    const p = await productsOf(ch);
+    if (!p) return res.json({ supported: false, rooms: [], rates: [] });
+    if (!p.ok) return res.status(502).json({ error: "Couldn't get the channel's room list", details: p.error });
+    res.json({ supported: true, rooms: p.rooms, rates: p.rates });
+  } catch (err) { next(err); }
+}
+
 // Replace the mapping list: listed codes are kept/updated/added; mappings left
 // out become 'closing' (closed out on the channel, then removed by sync).
 async function replaceMappings(req, res, next) {
@@ -138,6 +153,18 @@ async function replaceMappings(req, res, next) {
     const key = `${m.room_code}\u0000${m.rate_code}`;
     if (seen.has(key)) return res.status(400).json({ error: `Duplicate codes ${m.room_code}/${m.rate_code}` });
     seen.add(key);
+  }
+  // Only codes the channel itself offers (asked live, so a typo can't slip in).
+  let p = null;
+  try { p = mappings.length ? await productsOf(ch) : null; } catch (err) { return next(err); }
+  if (p && !p.ok) return res.status(502).json({ error: "Couldn't get the channel's room list", details: p.error });
+  if (p) {
+    const rooms = new Set(p.rooms.map((r) => r.code));
+    const rates = new Set(p.rates.map((r) => r.code));
+    const bad = mappings.find((m) => !rooms.has(m.room_code) || !rates.has(m.rate_code));
+    if (bad) {
+      return res.status(400).json({ error: 'Not a code the channel offers', details: `${bad.room_code}/${bad.rate_code}: pick from the channel's room list` });
+    }
   }
   const client = await pool.connect();
   try {
@@ -284,7 +311,7 @@ async function importReservations(req, res, next) {
 }
 
 module.exports = {
-  listChannels, createChannel, getChannel, updateChannel, deleteChannel, replaceMappings,
+  listChannels, createChannel, getChannel, updateChannel, deleteChannel, getProducts, replaceMappings,
   listTrims, createTrim, deleteTrim, syncNow, getDrift, listInbound, testReservation,
   importReservations,
 };

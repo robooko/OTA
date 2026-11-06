@@ -1,4 +1,4 @@
-// The four OpenTravel messages the channel speaks (pure: strings in, strings out).
+// The OpenTravel messages the channel speaks (pure: strings in, strings out).
 const crypto = require('crypto');
 const { NS, esc, envelope, parse, bodyOf, arr, attr, text } = require('./xml');
 
@@ -61,6 +61,28 @@ function parseNotifRS(xml) {
   }
 }
 
+// OTA_HotelProductRQ: ask the channel which room and rate codes it sells for
+// this hotel. Mappings may only use codes from the reply.
+function hotelProductRQ({ hotelCode, username, password, echoToken }) {
+  return envelope({ username, password, body:
+    `${head('OTA_HotelProductRQ', echoToken)}><HotelProducts HotelCode="${esc(hotelCode)}"/></OTA_HotelProductRQ>` });
+}
+
+// First occurrence of a code wins.
+const uniq = (list) => list.filter((x, i) => x.code && list.findIndex((y) => y.code === x.code) === i);
+
+function parseHotelProductRS(xml) {
+  const ack = parseNotifRS(xml);
+  if (!ack.ok) return ack;
+  const [, rs] = bodyOf(parse(xml));
+  const products = arr(rs.HotelProducts).flatMap((hp) => arr(hp && hp.HotelProduct));
+  const rooms = uniq(products.flatMap((p) => arr(p && p.RoomTypes && p.RoomTypes.RoomType))
+    .map((r) => ({ code: attr(r, 'RoomTypeCode'), name: attr(r.RoomDescription, 'Name') ?? attr(r, 'RoomTypeCode') })));
+  const rates = uniq(products.flatMap((p) => arr(p && p.RatePlans && p.RatePlans.RatePlan))
+    .map((r) => ({ code: attr(r, 'RatePlanCode'), name: attr(r, 'RatePlanName') ?? attr(r, 'RatePlanCode') })));
+  return { ok: true, rooms, rates };
+}
+
 const ACTION = { Commit: 'new', Book: 'new', Modify: 'modify', Cancel: 'cancel' };
 const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 
@@ -120,4 +142,4 @@ function resNotifRS({ echoToken, results }) {
 const soapFault = (code, message) => envelope({ body:
   `<soap:Fault><faultcode>${esc(code)}</faultcode><faultstring>${esc(message)}</faultstring></soap:Fault>` });
 
-module.exports = { groupRuns, availNotifRQ, rateNotifRQ, availNotifRS, rateNotifRS, parseNotifRS, parseResNotifRQ, resNotifRS, soapFault };
+module.exports = { groupRuns, availNotifRQ, rateNotifRQ, hotelProductRQ, parseHotelProductRS, availNotifRS, rateNotifRS, parseNotifRS, parseResNotifRQ, resNotifRS, soapFault };

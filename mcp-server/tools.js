@@ -237,8 +237,14 @@ function createTools(apiRequest) {
     run: ({ id }) => apiRequest('DELETE', `/api/channels/${id}`),
   },
   {
+    name: 'list_channel_products',
+    description: "The room and rate codes a channel sells for this hotel, as the channel reports them. When supported is true, set_channel_mappings only accepts these codes. The test channel has no list (supported false, free-text codes).",
+    inputSchema: { id: z.string() },
+    run: ({ id }) => apiRequest('GET', `/api/channels/${id}/products`),
+  },
+  {
     name: 'set_channel_mappings',
-    description: "Replace a channel's mapping of its room/rate codes to room types (and optional rate plans). Mappings left out are closed out on the channel, then removed.",
+    description: "Replace a channel's mapping of its room/rate codes to room types (and optional rate plans). Codes must come from list_channel_products when the channel supports it. Mappings left out are closed out on the channel, then removed.",
     inputSchema: {
       id: z.string(),
       mappings: z.array(z.object({

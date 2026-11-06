@@ -1,7 +1,8 @@
 // OpenTravel (OTA XML over SOAP 1.1 + WS-Security) channel: pushes availability
 // and rates as OTA_HotelAvailNotifRQ / OTA_HotelRateAmountNotifRQ. A change is
-// ok only if every message that carried it was acknowledged.
-const { groupRuns, availNotifRQ, rateNotifRQ, parseNotifRS } = require('./messages');
+// ok only if every message that carried it was acknowledged. Its room/rate
+// codes come from the channel (OTA_HotelProductRQ).
+const { groupRuns, availNotifRQ, rateNotifRQ, parseNotifRS, hotelProductRQ, parseHotelProductRS } = require('./messages');
 
 const REQUIRED = ['endpoint_url', 'username', 'password', 'hotel_code', 'inbound_username', 'inbound_password'];
 const MAX_RUNS = 200;
@@ -27,7 +28,7 @@ function validateConfig(config) {
   return errors;
 }
 
-async function send(config, xml) {
+async function send(config, xml, parseRS = parseNotifRS) {
   try {
     const res = await fetch(config.endpoint_url, {
       method: 'POST',
@@ -36,7 +37,7 @@ async function send(config, xml) {
       redirect: 'error', // a 307/308 would resend the WS-Security password to wherever it points
       signal: AbortSignal.timeout(timeouts.ms),
     });
-    const rs = parseNotifRS(await res.text());
+    const rs = parseRS(await res.text());
     // A SOAP fault is a 500 with a body; parseNotifRS has already said why.
     return !res.ok && rs.ok ? { ok: false, error: `HTTP ${res.status}` } : rs;
   } catch (err) {
@@ -69,4 +70,10 @@ async function push(channel, changes) {
   return errors.map((e) => (e.length ? { ok: false, error: e.join('; ') } : { ok: true }));
 }
 
-module.exports = { label: 'OpenTravel', validateConfig, push, MAX_RUNS, timeouts };
+// -> { ok, rooms: [{ code, name }], rates: [{ code, name }] } | { ok: false, error }
+async function products(channel) {
+  const c = channel.config || {};
+  return send(c, hotelProductRQ({ hotelCode: c.hotel_code, username: c.username, password: c.password }), parseHotelProductRS);
+}
+
+module.exports = { label: 'OpenTravel', validateConfig, push, products, MAX_RUNS, timeouts };

@@ -10,6 +10,7 @@ router.post('/', staffOrFullKey, ctrl.createChannel);
 router.get('/:id', staffOrFullKey, ctrl.getChannel);
 router.put('/:id', staffOrFullKey, ctrl.updateChannel);
 router.delete('/:id', staffOrFullKey, ctrl.deleteChannel);
+router.get('/:id/products', staffOrFullKey, ctrl.getProducts);
 router.put('/:id/mappings', staffOrFullKey, ctrl.replaceMappings);
 router.get('/:id/trims', staffOrFullKey, ctrl.listTrims);
 router.post('/:id/trims', staffOrFullKey, ctrl.createTrim);

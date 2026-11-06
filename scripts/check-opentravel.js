@@ -199,6 +199,23 @@ const chan = (url) => ({ currency: 'GBP', config: { endpoint_url: url, username:
     process.env.NODE_ENV = prev;
   });
 
+  await acheck('products: HotelProductRQ out, codes back, deduped', async () => {
+    const RS = '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><OTA_HotelProductRS xmlns="http://www.opentravel.org/OTA/2003/05" Version="1.0"><Success/>' +
+      '<HotelProducts HotelCode="H1"><HotelProduct><RoomTypes><RoomType RoomTypeCode="DBL"><RoomDescription Name="Double &amp; view"/></RoomType><RoomType RoomTypeCode="TWN"/></RoomTypes>' +
+      '<RatePlans><RatePlan RatePlanCode="BAR" RatePlanName="Best"/><RatePlan RatePlanCode="BAR" RatePlanName="dup"/></RatePlans></HotelProduct></HotelProducts></OTA_HotelProductRS></s:Body></s:Envelope>';
+    const s = await stand(() => ({ body: RS }));
+    const r = await ot.products(chan(s.url));
+    s.server.close();
+    assert.match(s.seen[0].body, /<OTA_HotelProductRQ[^>]*><HotelProducts HotelCode="H1"\/>/);
+    assert.deepEqual(r, { ok: true, rooms: [{ code: 'DBL', name: 'Double & view' }, { code: 'TWN', name: 'TWN' }], rates: [{ code: 'BAR', name: 'Best' }] });
+  });
+  await acheck('products: an Errors reply is not ok', async () => {
+    const s = await stand(() => ({ body: ERR }));
+    const r = await ot.products(chan(s.url));
+    s.server.close();
+    assert.deepEqual(r, { ok: false, error: 'bad' });
+  });
+
   if (failed) { console.log(`${failed} failed`); process.exit(1); }
   console.log('all passed');
 })();
