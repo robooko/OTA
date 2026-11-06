@@ -159,13 +159,13 @@ function createTools(apiRequest) {
   },
   {
     name: 'create_channel',
-    description: "Connect a sales channel. adapter 'test' is the built-in test channel. collect = who takes the guest's money by default (hotel or channel). Map room types next with set_channel_mappings.",
+    description: "Connect a sales channel. adapter 'test' is the built-in test channel; 'opentravel' connects an OpenTravel (OTA XML) channel. collect = who takes the guest's money by default (hotel or channel). Map room types next with set_channel_mappings.",
     inputSchema: {
       adapter: z.string(),
       name: z.string(),
       horizon_days: z.number().int().optional().describe('Days ahead to publish (default 365, max 548)'),
       collect: z.enum(['hotel', 'channel']).optional(),
-      config: z.record(z.any()).optional().describe("Adapter settings; the test adapter takes { fail_pushes: boolean }"),
+      config: z.record(z.any()).optional().describe("Adapter settings; the test adapter takes { fail_pushes: boolean }; adapter 'opentravel' takes { endpoint_url (https), username, password, hotel_code, inbound_username, inbound_password }, all required"),
     },
     run: (body) => apiRequest('POST', '/api/channels', { body }),
   },
