@@ -1,5 +1,5 @@
 // Guest emails for room bookings on a rate plan: the staff-booking pay link
-// and the confirmation. Fire-and-forget -- errors are logged, never thrown,
+// and the confirmation. None when booking.send_emails is false. Fire-and-forget -- errors are logged, never thrown,
 // so an email failure can't undo a booking. See
 // docs/superpowers/specs/2026-10-30-room-rate-plans-design.md §10.
 const pool = require('../db');
@@ -30,7 +30,7 @@ async function loadEmailContext(bookingId) {
      LEFT JOIN room r      ON r.id = b.room_id
      JOIN room_type rt ON rt.id = b.room_type_id
      JOIN property p  ON p.id = b.property_id
-     WHERE b.id = $1`,
+     WHERE b.id = $1 AND b.send_emails`,
     [bookingId]
   );
   if (!b?.rate_plan_terms) return null;

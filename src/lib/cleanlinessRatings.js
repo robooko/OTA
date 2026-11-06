@@ -20,7 +20,7 @@ const CLAIM_SQL = `
   FROM booking b
   JOIN guest g    ON g.id = b.guest_id
   JOIN property p ON p.id = b.property_id
-  WHERE b.status = 'checked_out'
+  WHERE b.status = 'checked_out' AND b.send_emails
     AND p.enabled_modules IS NOT NULL AND p.enabled_modules ? 'housekeeping'
     AND b.check_out BETWEEN ($1::timestamptz AT TIME ZONE p.timezone)::date - 2 AND ($1::timestamptz AT TIME ZONE p.timezone)::date
     AND trim(coalesce(g.email, '')) <> ''

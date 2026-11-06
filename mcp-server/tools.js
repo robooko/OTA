@@ -9,6 +9,25 @@ const BRANDING_SCHEMA = z.object({
   header_bg: z.string().optional().describe('Hex background behind the logo, e.g. #ffffff -- keeps dark logos visible in dark mode'),
 }).optional();
 
+// Body of POST /api/spa/:spa_id/appointments (create_spa_appointment and
+// bulk_create_spa_appointments).
+const SPA_APPOINTMENT_FIELDS = {
+  slot_id: z.string().optional().describe('Legacy flow: book this pre-generated slot directly'),
+  treatment_id: z.string().optional().describe('Computed flow: required with date and time'),
+  therapist_id: z.string().optional().describe('Computed flow: omit to auto-pick the first free therapist'),
+  date: z.string().optional().describe('Computed flow: YYYY-MM-DD'),
+  time: z.string().optional().describe('Computed flow: HH:MM'),
+  guest_id: z.string().optional(),
+  clerk_user_id: z.string().optional(),
+  contact_name: z.string(),
+  contact_email: z.string().optional(),
+  contact_phone: z.string().optional(),
+  notes: z.string().optional(),
+  member_email: z.string().optional().describe("Computed flow: an email you've verified belongs to the client; books at the regulars' rate if it qualifies. Never inferred from contact_email."),
+  branding: BRANDING_SCHEMA.describe('Styles the confirmation email; relayed, never stored'),
+  cancel_url: z.string().optional().describe('http(s) URL for the guest to cancel; may contain {id}'),
+};
+
 // Marina columns accepted by POST/PUT /api/marina/marinas (MARINA_COLS in
 // src/controllers/marinaCatalogue.js), all optional here.
 const MARINA_SLUG = z.string().max(100).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).describe('Lowercase letters, digits and dashes, e.g. porto-montenegro');
@@ -342,19 +361,21 @@ function createTools(apiRequest) {
       guests: z.number().int().min(1).optional(),
       rate_plan_id: z.string().optional(),
       source: z.enum(['web', 'phone', 'email', 'walk_in', 'agent']).optional().describe('How the booking came in: web, phone, email, walk_in, agent (travel agent). Set it when booking for a guest who called, emailed or walked in.'),
+      send_emails: z.boolean().optional().describe('Default true. false = the guest gets no emails for this booking: no pay link (send it yourself or it expires), confirmation, review request or cleanliness rating'),
       metadata: z.record(z.any()).optional().describe('Free-form JSON object kept on the booking'),
     },
     run: (args) => apiRequest('POST', '/api/bookings', { body: args }),
   },
   {
     name: 'update_booking',
-    description: 'Change a booking status, party size, source or metadata. checked_out is refused while the folio has a balance and checked_in while the room is not ready (409); force overrides both. checked_in needs a room for tonight: an oversold booking without one gets 409 room_required -- pass room_id to place it. Use cancel_booking to cancel, walk_booking to walk.',
+    description: 'Change a booking status, party size, source, send_emails or metadata. checked_out is refused while the folio has a balance and checked_in while the room is not ready (409); force overrides both. checked_in needs a room for tonight: an oversold booking without one gets 409 room_required -- pass room_id to place it. Use cancel_booking to cancel, walk_booking to walk.',
     inputSchema: {
       id: z.string(),
       status: z.enum(['confirmed', 'checked_in', 'checked_out']).optional(),
       guests: z.number().int().min(1).optional(),
       metadata: z.record(z.any()).optional(),
       source: z.enum(['web', 'phone', 'email', 'walk_in', 'agent']).nullable().optional().describe('How the booking came in; null clears it'),
+      send_emails: z.boolean().optional().describe('false stops all guest emails for this booking; true turns them back on'),
       force: z.boolean().optional(),
       room_id: z.string().describe('checked_in only: room for tonight when the booking has none').optional(),
     },
@@ -1978,24 +1999,29 @@ function createTools(apiRequest) {
   {
     name: 'create_spa_appointment',
     description: 'Book a spa appointment. Preferred: treatment_id + date + time (computed against working hours, therapist_id optional -- omit to auto-pick whoever is free). Legacy: slot_id alone, against a pre-generated spa_slot. Provide one or the other, not both. A confirmation email sends automatically when contact_email is given. With an X-Api-Key (guest booking): contact_email is required, each email can hold at most 3 upcoming bookings (429 past that), and the booking comes back status "pending" with awaiting_email_confirmation: true -- the guest must click the link emailed to them within 30 minutes or the time is released. Tell the guest to check their inbox.',
+    inputSchema: { spa_id: z.string(), ...SPA_APPOINTMENT_FIELDS },
+    run: ({ spa_id, ...body }) => apiRequest('POST', `/api/spa/${spa_id}/appointments`, { body }),
+  },
+  {
+    name: 'bulk_create_spa_appointments',
+    description: 'Book up to 50 spa appointments at one spa, each with the same fields as create_spa_appointment. Booked one by one in order; one failing does not stop the rest (and nothing is rolled back). Returns created/failed counts and a per-appointment outcome: { index, appointment } or { index, status, error, details }.',
     inputSchema: {
       spa_id: z.string(),
-      slot_id: z.string().optional().describe('Legacy flow: book this pre-generated slot directly'),
-      treatment_id: z.string().optional().describe('Computed flow: required with date and time'),
-      therapist_id: z.string().optional().describe('Computed flow: omit to auto-pick the first free therapist'),
-      date: z.string().optional().describe('Computed flow: YYYY-MM-DD'),
-      time: z.string().optional().describe('Computed flow: HH:MM'),
-      guest_id: z.string().optional(),
-      clerk_user_id: z.string().optional(),
-      contact_name: z.string(),
-      contact_email: z.string().optional(),
-      contact_phone: z.string().optional(),
-      notes: z.string().optional(),
-      member_email: z.string().optional().describe("Computed flow: an email you've verified belongs to the client; books at the regulars' rate if it qualifies. Never inferred from contact_email."),
-      branding: BRANDING_SCHEMA.describe('Styles the confirmation email; relayed, never stored'),
-      cancel_url: z.string().optional().describe('http(s) URL for the guest to cancel; may contain {id}'),
+      appointments: z.array(z.object(SPA_APPOINTMENT_FIELDS)).min(1).max(50),
     },
-    run: ({ spa_id, ...body }) => apiRequest('POST', `/api/spa/${spa_id}/appointments`, { body }),
+    run: async ({ spa_id, appointments }) => {
+      // ponytail: sequential calls to the single-create route, add a server bulk route if 50 is too few or atomicity matters
+      const results = [];
+      for (const [index, body] of appointments.entries()) {
+        try {
+          results.push({ index, appointment: await apiRequest('POST', `/api/spa/${spa_id}/appointments`, { body }) });
+        } catch (err) {
+          results.push({ index, status: err.status, error: err.message, details: err.body?.details });
+        }
+      }
+      const created = results.filter((r) => r.appointment).length;
+      return { created, failed: results.length - created, results };
+    },
   },
   {
     name: 'update_spa_appointment',

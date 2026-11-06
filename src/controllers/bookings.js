@@ -136,7 +136,7 @@ async function getBooking(req, res, next) {
 }
 
 async function createBooking(req, res, next) {
-  const { guest_id, room_id, room_type_id, check_in, check_out, guests, metadata, rate_plan_id, pay_at_hotel, source } = req.body;
+  const { guest_id, room_id, room_type_id, check_in, check_out, guests, metadata, rate_plan_id, pay_at_hotel, source, send_emails } = req.body;
   // The API-key rail is a website acting for a guest; anything else here is
   // signed-in staff (rate plans spec §4).
   const viaApiKey = req.auth_method === 'api_key';
@@ -156,6 +156,9 @@ async function createBooking(req, res, next) {
   // Staff must say how the booking came in; a website is web by default.
   if ((source !== undefined || !viaApiKey) && !SOURCES.includes(source)) {
     return res.status(400).json({ error: SOURCE_ERROR });
+  }
+  if (send_emails !== undefined && typeof send_emails !== 'boolean') {
+    return res.status(400).json({ error: 'send_emails must be true or false' });
   }
   if (pay_at_hotel !== undefined && typeof pay_at_hotel !== 'boolean') {
     return res.status(400).json({ error: 'pay_at_hotel must be true or false' });
@@ -278,12 +281,12 @@ async function createBooking(req, res, next) {
     const terms = plan ? termsSnapshot(plan, { pay_at_hotel: !card }) : null;
     const { rows: [inserted] } = await client.query(
       `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata,
-                            status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout, room_type_id, room_pick, source)
+                            status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout, room_type_id, room_pick, source, send_emails)
        VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10,
-               CASE WHEN $11::int IS NULL THEN NULL ELSE now() + make_interval(mins => $11::int) END, $12, $13, $14, $15) RETURNING id`,
+               CASE WHEN $11::int IS NULL THEN NULL ELSE now() + make_interval(mins => $11::int) END, $12, $13, $14, $15, $16) RETURNING id`,
       [req.property_id, guest_id, check_in, check_out, guests || 1, total.toFixed(2), metadata ?? {},
         status, plan?.id ?? null, terms, payWindow, card && viaApiKey, rateTypeId, !!room_id,
-        source ?? (viaApiKey ? 'web' : null)]
+        source ?? (viaApiKey ? 'web' : null), send_emails ?? true]
     );
     // Auto-assigns a room, takes the named one (bumping an auto-assigned
     // holder), or holds the stay with no room against the oversell allowance.
@@ -328,7 +331,10 @@ async function createBooking(req, res, next) {
 
 async function updateBooking(req, res, next) {
   try {
-    const { status, guests, metadata, source } = req.body;
+    const { status, guests, metadata, source, send_emails } = req.body;
+    if (send_emails !== undefined && typeof send_emails !== 'boolean') {
+      return res.status(400).json({ error: 'send_emails must be true or false' });
+    }
     if (source !== undefined && source !== null && !SOURCES.includes(source)) {
       return res.status(400).json({ error: SOURCE_ERROR });
     }
@@ -362,8 +368,12 @@ async function updateBooking(req, res, next) {
       if (status !== 'confirmed') {
         return res.status(409).json({ error: 'Confirm this unpaid booking first, or cancel it (DELETE) to release the card payment' });
       }
+      // Before settling: settling sends the confirmation.
+      if (send_emails !== undefined) {
+        await pool.query('UPDATE booking SET send_emails = $1 WHERE id = $2 AND property_id = $3', [send_emails, req.params.id, req.property_id]);
+      }
       const settled = await roomPayments.settleByHand(req.params.id, req.property_id);
-      if (settled.status !== 200 || (guests === undefined && metadata === undefined && source === undefined)) {
+      if (settled.status !== 200 || (guests === undefined && metadata === undefined && source === undefined && send_emails === undefined)) {
         return res.status(settled.status).json(settled.body);
       }
       statusBefore = 'confirmed';
@@ -423,9 +433,10 @@ async function updateBooking(req, res, next) {
            status   = COALESCE($1, status),
            guests   = COALESCE($2, guests),
            metadata = COALESCE($3::jsonb, metadata),
-           source   = CASE WHEN $6 THEN $7 ELSE source END
+           source   = CASE WHEN $6 THEN $7 ELSE source END,
+           send_emails = COALESCE($8, send_emails)
          WHERE id = $4 AND property_id = $5 RETURNING *`,
-        [nextStatus, guests, metadata ?? null, req.params.id, req.property_id, source !== undefined, source ?? null]
+        [nextStatus, guests, metadata ?? null, req.params.id, req.property_id, source !== undefined, source ?? null, send_emails ?? null]
       ));
       if (rows.length && rows[0].status !== statusBefore
           && roomNights.HOLDING.includes(statusBefore) && !roomNights.HOLDING.includes(rows[0].status)) {
