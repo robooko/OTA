@@ -201,6 +201,7 @@ const apiKeys = require('../src/lib/apiKeys');
       await syncChannel(ch.id);
     });
     await check('sync: fail_pushes → failed counted, keeps old values; clearing it heals', async () => {
+      await sync._flush(); // the rate edit's debounced background sync would race this one ('locked')
       const d5 = (await one(`SELECT (CURRENT_DATE + 5)::text AS d`)).d;
       await pool.query(`UPDATE channel SET config = '{"fail_pushes": true}' WHERE id = $1`, [ch.id]);
       await pool.query('UPDATE room_type_rate SET rate = 140 WHERE room_type_id = $1 AND date = $2', [RT, d5]);
@@ -221,6 +222,48 @@ const apiKeys = require('../src/lib/apiKeys');
       await pool.query('UPDATE room_type_rate SET rate = 150 WHERE room_type_id = $1 AND date = $2', [RT, d5]);
       const [a, b] = await Promise.all([syncChannel(ch.id), syncChannel(ch.id)]);
       assert.equal((a.pushed || 0) + (b.pushed || 0), 2); // the other run was skipped ('locked') or found nothing
+      assert.deepEqual([a, b].filter((r) => r.skipped).map((r) => r.skipped), ['locked']);
+      assert.ok(!(await syncChannel(ch.id)).skipped, 'lock released after the concurrent pair');
+    });
+    // A one-bigint advisory lock shows in pg_locks with its low 32 bits as objid.
+    const lockHeld = async (key) => (await one(
+      `SELECT count(*)::int AS n FROM pg_locks
+       WHERE locktype = 'advisory' AND objsubid = 1 AND objid::bigint = (hashtext($1)::bigint & 4294967295)`, [key])).n > 0;
+    await check('sync: lock held during a sync, none left behind after', async () => {
+      await sync._flush();
+      const d5 = (await one(`SELECT (CURRENT_DATE + 5)::text AS d`)).d;
+      await pool.query('UPDATE room_type_rate SET rate = 155 WHERE room_type_id = $1 AND date = $2', [RT, d5]);
+      const push = ADAPTERS.test.push;
+      let heldDuring = null;
+      ADAPTERS.test.push = async (...args) => { heldDuring = await lockHeld(`channel_sync_v2:${ch.id}`); return push(...args); };
+      try {
+        assert.equal((await syncChannel(ch.id)).pushed, 2);
+      } finally {
+        ADAPTERS.test.push = push;
+      }
+      assert.equal(heldDuring, true);
+      assert.equal(await lockHeld(`channel_sync_v2:${ch.id}`), false);
+    });
+    await check('sync: a thrown sync still releases the lock', async () => {
+      const saved = ADAPTERS.test;
+      delete ADAPTERS.test;
+      try {
+        await assert.rejects(syncChannel(ch.id), /unknown channel adapter test/);
+      } finally {
+        ADAPTERS.test = saved;
+      }
+      assert.equal(await lockHeld(`channel_sync_v2:${ch.id}`), false);
+      assert.ok(!(await syncChannel(ch.id)).skipped);
+    });
+    await check('sync: a lock leaked under the old key does not block', async () => {
+      const c = await pool.connect();
+      try {
+        await c.query(`SELECT pg_advisory_lock(hashtext('channel_sync:' || $1))`, [ch.id]);
+        assert.ok(!(await syncChannel(ch.id)).skipped);
+      } finally {
+        await c.query(`SELECT pg_advisory_unlock(hashtext('channel_sync:' || $1))`, [ch.id]);
+        c.release();
+      }
     });
     await check('sync: pausing pushes close-out then becomes paused', async () => {
       await sync._flush();

@@ -64,13 +64,22 @@ async function record(db, batch, results) {
   );
 }
 
-// The dedicated client only holds the advisory lock (session-level); the
-// work goes through the pool, since drift/desiredAri run queries in parallel.
+// The dedicated client only holds the advisory lock, inside a transaction it
+// keeps open for the run; the work goes through the pool, since
+// drift/desiredAri run queries in parallel. Transaction-scoped, not session:
+// production goes through Neon's PgBouncer in transaction mode, where an
+// unlock can land on a different backend than its lock, leaking the lock for
+// that backend's life. An open transaction pins one backend, and COMMIT (or
+// the connection dying) always ends the lock.
+// The key was 'channel_sync:' until 6 Nov 2026; locks leaked under it on
+// production backends block nothing under the new key.
+const LOCK_KEY = 'channel_sync_v2:';
+
 async function syncChannel(channelId) {
   const client = await pool.connect();
-  let locked = false;
   try {
-    locked = (await client.query(`SELECT pg_try_advisory_lock(hashtext('channel_sync:' || $1)) AS ok`, [channelId])).rows[0].ok;
+    await client.query('BEGIN');
+    const locked = (await client.query(`SELECT pg_try_advisory_xact_lock(hashtext($1 || $2)) AS ok`, [LOCK_KEY, channelId])).rows[0].ok;
     if (!locked) return { skipped: 'locked' };
     const channel = (await pool.query('SELECT * FROM channel WHERE id = $1', [channelId])).rows[0];
     if (!channel) return { skipped: 'missing' };
@@ -126,8 +135,12 @@ async function syncChannel(channelId) {
 
     return { pushed, ok, failed: pushed - ok };
   } finally {
-    if (locked) await client.query(`SELECT pg_advisory_unlock(hashtext('channel_sync:' || $1))`, [channelId]).catch(() => {});
-    client.release();
+    // Nothing was written on this client, so COMMIT and ROLLBACK both just
+    // end the transaction and its lock. If neither gets through, the
+    // connection is suspect: destroy it rather than pool it mid-transaction.
+    let err;
+    await client.query('COMMIT').catch(() => client.query('ROLLBACK')).catch((e) => { err = e; });
+    client.release(err);
   }
 }
 
