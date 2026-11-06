@@ -44,6 +44,7 @@ const { handleResendInboundWebhook } = require('./controllers/eventInquiries');
 const { handleStripeWebhook } = require('./controllers/billing');
 const { handleVoiceWebhook } = require('./controllers/voice');
 const { handleSmsWebhook } = require('./controllers/sms');
+const { handleChannelInbound, inboundLimiter } = require('./controllers/channelInbound');
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
@@ -65,6 +66,14 @@ app.post(
 // Twilio posts form-encoded; it verifies X-Twilio-Signature itself.
 app.post('/api/voice', express.urlencoded({ extended: false }), handleVoiceWebhook);
 app.post('/api/sms', express.urlencoded({ extended: false }), handleSmsWebhook);
+
+// OpenTravel partners post SOAP XML here; the channel's own credentials authenticate it.
+app.post(
+  '/api/channels/:id/inbound',
+  inboundLimiter,
+  express.text({ type: ['text/xml', 'application/soap+xml', 'application/xml'], limit: '1mb' }),
+  handleChannelInbound
+);
 
 // Marina layouts, pontoon SVGs and berths/bulk exceed the 100 kB default.
 // express.json() below then skips these requests (body already parsed).

@@ -10,6 +10,7 @@ const { createTools } = require('../mcp-server/tools');
 const EXCLUDE = [
   /^\S+ \/api\/(mcp|docs|auth|voice|sms)\b/,           // transport, auth, inbound telephony
   /\/webhooks\//,                                      // provider callbacks
+  /^POST \/api\/channels\/:p\/inbound$/,                // OpenTravel partner SOAP callback; the GET log is list_channel_inbound
   /\/(connect|callback)$/,                             // OAuth redirects
   /ably-token$|connection-token$/,                     // realtime / terminal client tokens
   /\/(payment-intent|confirm-payment)(\/confirm)?$/,   // Stripe client-side payment flows

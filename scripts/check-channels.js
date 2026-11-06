@@ -30,6 +30,7 @@ const apiKeys = require('../src/lib/apiKeys');
   const Q = (await one(`INSERT INTO property (name) VALUES ('Channel Check Other') RETURNING id`)).id;
   await apiKeys.create(pool, { property_id: Q }, { key: `${KEY}_other` });
 
+  let R;
   try {
     await check('schema: channel tables and booking columns exist', async () => {
       for (const t of ['channel', 'channel_mapping', 'channel_trim', 'channel_ari', 'channel_reservation_log']) {
@@ -574,8 +575,79 @@ const apiKeys = require('../src/lib/apiKeys');
       assert.equal((await api('PUT', `/api/channels/${made.body.id}`, { config: { ...got.body.config, endpoint_url: 'https://z.test/ota' } })).status, 200);
       assert.deepEqual([(await stored()).endpoint_url, (await stored()).password, (await stored()).inbound_password], ['https://z.test/ota', 'pw1', 'ipw']);
     });
+
+    // ---- OpenTravel inbound (SOAP) ----
+    R = (await one(`INSERT INTO property (name, timezone, currency) VALUES ('Channel Inbound', 'Europe/London', 'GBP') RETURNING id`)).id;
+    const fs = require('fs');
+    const fx = (n) => fs.readFileSync(require('path').join(__dirname, 'fixtures/opentravel', n), 'utf8');
+    const rtIn = (await one('INSERT INTO room_type (property_id, name, max_occupancy, base_rate) VALUES ($1, $2, 2, 100) RETURNING id', [R, 'Double'])).id;
+    const roomIn = (await one('INSERT INTO room (property_id, room_type_id, room_number) VALUES ($1, $2, $3) RETURNING id', [R, rtIn, '1'])).id;
+    await seedRoomAvailability(roomIn);
+    const otCh = (await one(
+      `INSERT INTO channel (property_id, adapter, name, horizon_days, config) VALUES ($1, 'opentravel', 'OT in', 30, $2) RETURNING id`,
+      [R, { endpoint_url: 'https://x.test/ota', username: 'u', password: 'p', hotel_code: 'H1', inbound_username: 'partner', inbound_password: 's3cret' }])).id;
+    await pool.query(`INSERT INTO channel_mapping (property_id, channel_id, room_type_id, room_code, rate_code) VALUES ($1, $2, $3, 'DBL', 'BAR')`, [R, otCh, rtIn]);
+    const post = async (id, xml) => {
+      const r = await fetch(`${base}/api/channels/${id}/inbound`, { method: 'POST', headers: { 'Content-Type': 'text/xml' }, body: xml });
+      return { status: r.status, type: r.headers.get('content-type'), text: await r.text() };
+    };
+    const inb = (name, ref = 'CH-1001') => fx(name).replace('2026-12-01', d0).replace('2026-12-04', d2).replaceAll('CH-1001', ref);
+    const logCount = async () => Number((await one('SELECT count(*) AS n FROM channel_reservation_log WHERE channel_id = $1', [otCh])).n);
+    const bookingsOf = async () => (await pool.query('SELECT * FROM booking WHERE channel_id = $1', [otCh])).rows;
+    const resId = (t) => (t.match(/ResID_Value="([^"]+)"/) || [])[1];
+    let bookedId;
+
+    await check('inbound: wrong password is 401 Fault and logs nothing', async () => {
+      const before = await logCount();
+      const r = await post(otCh, inb('res-notif-new.xml').replace('s3cret', 'nope'));
+      assert.equal(r.status, 401);
+      assert.match(r.text, /Fault/);
+      assert.match(r.type, /text\/xml/);
+      assert.equal(await logCount(), before);
+      assert.equal((await bookingsOf()).length, 0);
+    });
+    await check('inbound: unknown channel and non-opentravel channel are 404', async () => {
+      assert.equal((await post(crypto.randomUUID(), inb('res-notif-new.xml'))).status, 404);
+      assert.equal((await post(ch.id, inb('res-notif-new.xml'))).status, 404);
+      assert.equal((await post('not-a-uuid', inb('res-notif-new.xml'))).status, 404);
+    });
+    await check('inbound: not xml is 400 Fault', async () => {
+      const r = await post(otCh, 'not xml');
+      assert.equal(r.status, 400);
+      assert.match(r.text, /Fault/);
+    });
+    await check('inbound: new reservation books a room, XML-escaped name survives', async () => {
+      const r = await post(otCh, inb('res-notif-new.xml'));
+      assert.equal(r.status, 200);
+      assert.match(r.text, /<Success\/>/);
+      const b = await bookingsOf();
+      assert.equal(b.length, 1);
+      assert.equal(b[0].channel_ref, 'CH-1001');
+      assert.equal(resId(r.text), b[0].id);
+      bookedId = b[0].id;
+      assert.equal((await one('SELECT first_name FROM guest WHERE id = $1', [b[0].guest_id])).first_name, 'Anna & Co');
+    });
+    await check('inbound: same body again is a duplicate, same id, one booking', async () => {
+      const r = await post(otCh, inb('res-notif-new.xml'));
+      assert.equal(r.status, 200);
+      assert.match(r.text, /<Success\/>/);
+      assert.equal(resId(r.text), bookedId);
+      assert.equal((await bookingsOf()).length, 1);
+    });
+    await check('inbound: no room left is 200 with Errors and no booking', async () => {
+      const r = await post(otCh, inb('res-notif-new.xml', 'CH-2002'));
+      assert.equal(r.status, 200);
+      assert.match(r.text, /<Errors>.*no room available/);
+      assert.equal((await bookingsOf()).length, 1);
+    });
+    await check('inbound: cancel cancels the booking', async () => {
+      const r = await post(otCh, inb('res-notif-cancel.xml'));
+      assert.equal(r.status, 200);
+      assert.match(r.text, /<Success\/>/);
+      assert.equal((await one('SELECT status FROM booking WHERE id = $1', [bookedId])).status, 'cancelled');
+    });
   } finally {
-    const props = [P, Q];
+    const props = [P, Q, R].filter(Boolean);
     const has = async (t) => (await one('SELECT to_regclass($1) AS r', [t])).r;
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);
     if (await has('channel_reservation_log')) await pool.query('DELETE FROM channel_reservation_log WHERE property_id = ANY($1)', [props]);
