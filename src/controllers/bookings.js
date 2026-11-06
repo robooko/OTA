@@ -12,7 +12,7 @@ const { stayNights } = require('../lib/roomPlacement');
 const roomNights = require('../lib/roomNights');
 
 // How a direct booking came in. Channel bookings leave it null (channel_id).
-const SOURCES = ['web', 'phone', 'email', 'walk_in', 'agent'];
+const SOURCES = ['web', 'phone', 'email', 'walk_in', 'agent', 'ota', 'corporate'];
 const SOURCE_ERROR = `source must be one of ${SOURCES.join(', ')}`;
 
 function isValidMetadata(v) {
@@ -749,8 +749,103 @@ async function purgeBookings(req, res, next) {
   }
 }
 
+// Bulk import of bookings made elsewhere (another system, a dataset):
+// the given price, booked_at and status (confirmed or cancelled), the guest
+// matched by email or added. One transaction per booking, idempotent on
+// (property, external_ref). Nothing is emailed at creation; send_emails
+// (default false here) is stored for the later ones (review request,
+// cleanliness rating).
+// ponytail: confirmed/cancelled only -- an in-house or checked-out import
+// needs room assignment history; add when a past-dated load needs it.
+const IMPORT_MAX = 500;
+const IMPORT_STATUSES = ['confirmed', 'cancelled'];
+const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
+
+function invalidImportField(b) {
+  if (!nonEmpty(b.external_ref) || b.external_ref.length > 100) return 'external_ref';
+  if (!isValidUuid(b.room_type_id)) return 'room_type_id';
+  if (!isValidDate(b.check_in)) return 'check_in';
+  if (!isValidDate(b.check_out) || b.check_out <= b.check_in) return 'check_out';
+  if (b.guests !== undefined && !(Number.isInteger(b.guests) && b.guests > 0)) return 'guests';
+  if (!(typeof b.total_price === 'number' && Number.isFinite(b.total_price) && b.total_price >= 0)) return 'total_price';
+  if (b.status !== undefined && !IMPORT_STATUSES.includes(b.status)) return 'status';
+  if (b.source !== undefined && b.source !== null && !SOURCES.includes(b.source)) return 'source';
+  if (b.booked_at !== undefined && (typeof b.booked_at !== 'string' || Number.isNaN(Date.parse(b.booked_at)))) return 'booked_at';
+  if (b.metadata !== undefined && !isValidMetadata(b.metadata)) return 'metadata';
+  if (b.send_emails !== undefined && typeof b.send_emails !== 'boolean') return 'send_emails';
+  const g = b.guest;
+  if (!g || !nonEmpty(g.first_name) || !nonEmpty(g.last_name) || (g.email != null && !nonEmpty(g.email))) return 'guest';
+  return null;
+}
+
+async function importOne(propertyId, b, sendEmails) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = (await client.query(
+      'SELECT id FROM booking WHERE property_id = $1 AND external_ref = $2', [propertyId, b.external_ref])).rows[0];
+    if (existing) { await client.query('ROLLBACK'); return { outcome: 'duplicate', booking_id: existing.id }; }
+    const type = (await client.query('SELECT id FROM room_type WHERE id = $1 AND property_id = $2', [b.room_type_id, propertyId])).rows[0];
+    if (!type) { await client.query('ROLLBACK'); return { outcome: 'rejected', reason: 'room type not found' }; }
+    const email = (b.guest.email ?? `${b.external_ref}@import.invalid`).trim().toLowerCase();
+    const guestId = (await client.query(
+      `INSERT INTO guest (property_id, first_name, last_name, email, phone) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (property_id, email) DO UPDATE SET first_name = guest.first_name RETURNING id`,
+      [propertyId, b.guest.first_name.trim(), b.guest.last_name.trim(), email, b.guest.phone ?? null])).rows[0].id;
+    const status = b.status ?? 'confirmed';
+    const { rows: [inserted] } = await client.query(
+      `INSERT INTO booking (property_id, guest_id, room_id, room_type_id, check_in, check_out, guests, total_price, status,
+                            metadata, source, send_emails, external_ref, created_at)
+       VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13::timestamptz, now())) RETURNING id`,
+      [propertyId, guestId, b.room_type_id, b.check_in, b.check_out, b.guests ?? 1, b.total_price.toFixed(2), status,
+        b.metadata ?? {}, b.source ?? null, b.send_emails ?? sendEmails, b.external_ref, b.booked_at ?? null]);
+    if (status === 'confirmed') {
+      try {
+        await roomNights.holdStay(client, {
+          propertyId, bookingId: inserted.id, roomTypeId: b.room_type_id, nights: stayNights(b.check_in, b.check_out),
+        });
+      } catch (err) {
+        if (err.status !== 409) throw err;
+        await client.query('ROLLBACK');
+        return { outcome: 'rejected', reason: 'no room available' };
+      }
+    }
+    await client.query('COMMIT');
+    return { outcome: 'created', booking_id: inserted.id };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function importBookings(req, res, next) {
+  try {
+    const { bookings: list, send_emails } = req.body || {};
+    if (!Array.isArray(list) || !list.length || list.length > IMPORT_MAX) {
+      return res.status(400).json({ error: `bookings must be an array of 1-${IMPORT_MAX} bookings` });
+    }
+    if (send_emails !== undefined && typeof send_emails !== 'boolean') {
+      return res.status(400).json({ error: 'send_emails must be true or false' });
+    }
+    const results = [];
+    for (const [index, raw] of list.entries()) {
+      const b = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+      const bad = invalidImportField(b);
+      const out = bad ? { outcome: 'rejected', reason: `invalid booking: ${bad}` } : await importOne(req.property_id, b, send_emails ?? false);
+      results.push({ index, external_ref: b.external_ref ?? null, ...out });
+    }
+    // Once for the batch, not per booking (also nudges channel sync).
+    await roomPayments.refreshAvailabilityView();
+    const counts = {};
+    for (const r of results) counts[r.outcome] = (counts[r.outcome] || 0) + 1;
+    res.json({ counts, results });
+  } catch (err) { next(err); }
+}
+
 module.exports = {
-  purgeBookings,
+  purgeBookings, importBookings,
   addCancelScores, listRoomBaskets, listBookings, getBooking, createBooking, updateBooking, cancelBooking,
   createPaymentIntent, confirmPayment, moveBooking, walkBooking,
 };

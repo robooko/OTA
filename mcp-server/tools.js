@@ -26,7 +26,7 @@ const SPA_APPOINTMENT_FIELDS = {
   member_email: z.string().optional().describe("Computed flow: an email you've verified belongs to the client; books at the regulars' rate if it qualifies. Never inferred from contact_email."),
   branding: BRANDING_SCHEMA.describe('Styles the confirmation email; relayed, never stored'),
   cancel_url: z.string().optional().describe('http(s) URL for the guest to cancel; may contain {id}'),
-  send_emails: z.boolean().optional().describe('Default true. false (staff only, not an X-Api-Key) = the guest gets no confirmation, cancellation, reminder (email or SMS) or review request for this appointment'),
+  send_emails: z.boolean().optional().describe('Default true. false (staff or a full api key; a scoped key gets 403) = the guest gets no confirmation, cancellation, reminder (email or SMS) or review request for this appointment, and a full key books it as staff (no email-confirmation hold)'),
 };
 
 // Marina columns accepted by POST/PUT /api/marina/marinas (MARINA_COLS in
@@ -133,7 +133,7 @@ function createTools(apiRequest) {
       from: z.string().optional(),
       to: z.string().optional(),
       channel_id: z.string().optional().describe("A channel id for that channel's bookings, or 'direct' for bookings made in OTA"),
-      source: z.enum(['web', 'phone', 'email', 'walk_in', 'agent']).optional().describe('How the booking came in'),
+      source: z.enum(['web', 'phone', 'email', 'walk_in', 'agent', 'ota', 'corporate']).optional().describe('How the booking came in'),
     },
     run: (args) => apiRequest('GET', '/api/bookings', { query: args }),
   },
@@ -160,6 +160,28 @@ function createTools(apiRequest) {
     description: 'Cancel a booking and restore its room availability. A booking from a sales channel must be cancelled on the channel; force: true cancels it in OTA only.',
     inputSchema: { id: z.string(), force: z.boolean().optional() },
     run: ({ id, force }) => apiRequest('DELETE', `/api/bookings/${id}`, force ? { query: { force: 'true' } } : undefined),
+  },
+  {
+    name: 'import_bookings',
+    description: "Import up to 500 room bookings made elsewhere (another system, a dataset), each in its own transaction, in order. Takes each booking's own total_price, status (confirmed or cancelled), source and booked_at; the guest is matched by email or added. A confirmed booking holds its nights like any booking (rejected 'no room available' if the type is full). Re-importing an external_ref returns duplicate. Nothing is emailed at creation; send_emails (default false) only decides the later review request and cleanliness rating. Returns counts and a per-booking outcome (created | duplicate | rejected with reason). Undo with purge_bookings.",
+    inputSchema: {
+      send_emails: z.boolean().optional().describe("Default false for every booking; a booking's own send_emails wins"),
+      bookings: z.array(z.object({
+        external_ref: z.string().max(100).describe('Id in the source system; unique per property'),
+        room_type_id: z.string(),
+        check_in: z.string().describe('YYYY-MM-DD'),
+        check_out: z.string().describe('YYYY-MM-DD, exclusive'),
+        guests: z.number().int().positive().optional(),
+        total_price: z.number().nonnegative().describe('Whole stay, property currency'),
+        status: z.enum(['confirmed', 'cancelled']).optional().describe('Default confirmed'),
+        source: z.enum(['web', 'phone', 'email', 'walk_in', 'agent', 'ota', 'corporate']).optional().describe('ota = an online travel agency (put which one in metadata)'),
+        booked_at: z.string().optional().describe('ISO timestamp the booking was made; default now'),
+        metadata: z.record(z.any()).optional(),
+        send_emails: z.boolean().optional(),
+        guest: z.object({ first_name: z.string(), last_name: z.string(), email: z.string().optional(), phone: z.string().optional() }),
+      })).min(1).max(500),
+    },
+    run: (body) => apiRequest('POST', '/api/bookings/import', { body }),
   },
   {
     name: 'purge_bookings',
@@ -361,7 +383,7 @@ function createTools(apiRequest) {
       check_out: z.string().describe('YYYY-MM-DD, exclusive'),
       guests: z.number().int().min(1).optional(),
       rate_plan_id: z.string().optional(),
-      source: z.enum(['web', 'phone', 'email', 'walk_in', 'agent']).optional().describe('How the booking came in: web, phone, email, walk_in, agent (travel agent). Set it when booking for a guest who called, emailed or walked in.'),
+      source: z.enum(['web', 'phone', 'email', 'walk_in', 'agent', 'ota', 'corporate']).optional().describe('How the booking came in: web, phone, email, walk_in, agent (travel agent). Set it when booking for a guest who called, emailed or walked in.'),
       send_emails: z.boolean().optional().describe('Default true. false = the guest gets no emails for this booking: no pay link (send it yourself or it expires), confirmation, review request or cleanliness rating'),
       metadata: z.record(z.any()).optional().describe('Free-form JSON object kept on the booking'),
     },
@@ -375,7 +397,7 @@ function createTools(apiRequest) {
       status: z.enum(['confirmed', 'checked_in', 'checked_out']).optional(),
       guests: z.number().int().min(1).optional(),
       metadata: z.record(z.any()).optional(),
-      source: z.enum(['web', 'phone', 'email', 'walk_in', 'agent']).nullable().optional().describe('How the booking came in; null clears it'),
+      source: z.enum(['web', 'phone', 'email', 'walk_in', 'agent', 'ota', 'corporate']).nullable().optional().describe('How the booking came in; null clears it'),
       send_emails: z.boolean().optional().describe('false stops all guest emails for this booking; true turns them back on'),
       force: z.boolean().optional(),
       room_id: z.string().describe('checked_in only: room for tonight when the booking has none').optional(),
@@ -1270,6 +1292,20 @@ function createTools(apiRequest) {
       cancel_url: z.string().optional().describe('http(s) URL for the guest to cancel; may contain {id}, filled in when booked'),
     },
     run: (args) => apiRequest('POST', '/api/event-inquiries', { body: args }),
+  },
+  {
+    name: 'bulk_create_event_inquiries',
+    description: 'Create up to 500 event or general enquiries (each with the same fields as create_event_inquiry), in order, each on its own. send_emails false (the default) = no AI reply goes to the guest, and no token balance is needed. Returns created/failed counts and a per-enquiry outcome: { index, inquiry } or { index, status, error }.',
+    inputSchema: {
+      send_emails: z.boolean().optional().describe('Default false. true = each enquiry gets the AI reply as if it came from the website'),
+      inquiries: z.array(z.object({
+        name: z.string(), email: z.string(), phone: z.string().optional(),
+        event_date: z.string().optional().describe('YYYY-MM-DD'), guests: z.number().int().optional(),
+        event_type: z.string().optional(), format: z.string().optional(), message: z.string().optional(),
+        restaurant_id: z.string().optional(), spa_id: z.string().optional(),
+      })).min(1).max(500),
+    },
+    run: (body) => apiRequest('POST', '/api/event-inquiries/bulk', { body }),
   },
   {
     name: 'update_event_inquiry',

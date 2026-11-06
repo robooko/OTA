@@ -13,6 +13,8 @@ router.get('/baskets', authenticateOrApiKey, ctrl.listRoomBaskets);
 router.post('/cancel-scores', staffOrFullKey, ctrl.addCancelScores);
 // Hard-delete test bookings: admins or a FULL api key.
 router.post('/purge', authenticateOrApiKey, requireRoleOrApiKey('admin'), ctrl.purgeBookings);
+// Bulk import from another system: staff or a FULL api key.
+router.post('/import', staffOrFullKey, ctrl.importBookings);
 router.get('/:id', authenticateOrApiKey, ctrl.getBooking);
 router.post('/', authenticateOrApiKey, ctrl.createBooking);
 router.put('/:id', staffOrFullKey, ctrl.updateBooking);

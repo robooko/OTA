@@ -531,7 +531,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_booking_channel_ref ON booking (channel_id
 -- How a direct booking came in (migrate-2026-11-06-booking-source.sql).
 -- Null = not recorded; channel bookings use channel_id.
 ALTER TABLE booking ADD COLUMN IF NOT EXISTS source VARCHAR(10)
-  CHECK (source IN ('web', 'phone', 'email', 'walk_in', 'agent'));
+  CONSTRAINT booking_source_check CHECK (source IN ('web', 'phone', 'email', 'walk_in', 'agent', 'ota', 'corporate'));
+
+-- Id in the system a booking was imported from (POST /api/bookings/import,
+-- migrate-2026-11-06-bulk-imports.sql); re-imports skip it.
+ALTER TABLE booking ADD COLUMN IF NOT EXISTS external_ref VARCHAR(100);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_booking_external_ref ON booking (property_id, external_ref) WHERE external_ref IS NOT NULL;
 
 -- false = no guest emails for this booking: pay link, confirmation, review
 -- request, cleanliness rating (migrate-2026-11-06-booking-send-emails.sql).

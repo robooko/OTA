@@ -120,7 +120,9 @@ async function validateMarinaId(marina_id, property_id) {
 // The whole create path, shared by POST /api/event-inquiries and the marina
 // guest route (POST /api/marina/guest/:marina/enquiries). Returns the HTTP
 // status and body instead of writing the response.
-async function createInquiryCore(propertyId, body) {
+// sendEmails false (bulk import only): no AI reply, so no token balance
+// needed either -- nothing will be sent to the guest.
+async function createInquiryCore(propertyId, body, { sendEmails = true } = {}) {
   const { name, email, phone, event_date, guests, event_type, format, message, restaurant_id, spa_id, marina_id, branding, cancel_url } = body || {};
   if (!name || !email) {
     return { status: 400, json: { error: 'name and email are required' } };
@@ -153,7 +155,7 @@ async function createInquiryCore(propertyId, body) {
   // brand-new submission that doesn't exist anywhere yet, so nothing is
   // lost -- an inbound email has already arrived and can only be stored
   // or silently dropped, which is why that path isn't gated the same way.
-  const balance = await tokens.getBalance(propertyId);
+  const balance = sendEmails ? await tokens.getBalance(propertyId) : Infinity;
   if (balance < tokens.TOKEN_COSTS.reply_send) {
     return { status: 402, json: { error: 'This venue cannot currently respond to enquiries — please contact them directly' } };
   }
@@ -173,8 +175,10 @@ async function createInquiryCore(propertyId, body) {
   // and the inquiry is already safely stored, so the caller (usually the
   // property's public website) gets its 201 immediately. The pipeline
   // no-ops unless the property has opted in (ai_reply_mode != 'off').
-  runAiReply({ inquiryId: rows[0].id, triggerType: 'new_inquiry' })
-    .catch((err) => console.error('AI reply pipeline failed:', err.message));
+  if (sendEmails) {
+    runAiReply({ inquiryId: rows[0].id, triggerType: 'new_inquiry' })
+      .catch((err) => console.error('AI reply pipeline failed:', err.message));
+  }
 
   return { status: 201, json: rows[0] };
 }
@@ -184,6 +188,29 @@ async function createInquiry(req, res, next) {
   try {
     const { status, json } = await createInquiryCore(req.property_id, req.body);
     res.status(status).json(json);
+  } catch (err) { next(err); }
+}
+
+// Up to 500 enquiries through the same create path, in order, each on its
+// own. send_emails false (the default) = no AI reply to the guest.
+const BULK_INQUIRY_MAX = 500;
+async function bulkCreateInquiries(req, res, next) {
+  try {
+    const { inquiries, send_emails } = req.body || {};
+    if (!Array.isArray(inquiries) || !inquiries.length || inquiries.length > BULK_INQUIRY_MAX) {
+      return res.status(400).json({ error: `inquiries must be an array of 1-${BULK_INQUIRY_MAX} items` });
+    }
+    if (send_emails !== undefined && typeof send_emails !== 'boolean') {
+      return res.status(400).json({ error: 'send_emails must be true or false' });
+    }
+    const results = [];
+    for (const [index, item] of inquiries.entries()) {
+      const body = item && typeof item === 'object' && !Array.isArray(item) ? item : {};
+      const { status, json } = await createInquiryCore(req.property_id, body, { sendEmails: send_emails ?? false });
+      results.push(status === 201 ? { index, inquiry: json } : { index, status, error: json.error });
+    }
+    const created = results.filter((r) => r.inquiry).length;
+    res.status(created ? 201 : 200).json({ created, failed: results.length - created, results });
   } catch (err) { next(err); }
 }
 
@@ -519,6 +546,6 @@ async function rejectAiDraft(req, res, next) {
 }
 
 module.exports = {
-  listInquiries, createInquiry, createInquiryCore, updateInquiry, listReplies, createReply, handleResendInboundWebhook,
+  listInquiries, createInquiry, createInquiryCore, bulkCreateInquiries, updateInquiry, listReplies, createReply, handleResendInboundWebhook,
   listAiDrafts, listInquiryAiDrafts, generateAiDraft, approveAiDraft, rejectAiDraft,
 };

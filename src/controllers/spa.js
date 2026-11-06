@@ -99,7 +99,9 @@ async function withinLeadTime(db, spaId, date, time) {
 
 // Staff (Clerk bearer) book walk-ins and phone calls, so the lead time is
 // for the guest rail only -- the X-Api-Key proxy guest websites use.
-const isGuestRail = (req) => req.auth_method === 'api_key';
+// staffImport: a FULL key booking with send_emails false (MCP, import
+// scripts) books as staff -- no hold, no lead time, nothing emailed.
+const isGuestRail = (req) => req.auth_method === 'api_key' && !req.staffImport;
 
 const leadTimeError = (hours) => `Bookings need at least ${hours} hour${hours === 1 ? '' : 's'}' notice`;
 
@@ -1316,7 +1318,8 @@ async function createAppointment(req, res, next) {
   }
   // The guest rail's booking is held until the guest clicks the emailed link.
   if (send_emails === false && isGuestRail(req)) {
-    return res.status(403).json({ error: 'send_emails is staff-only' });
+    if (req.api_key?.permissions !== null) return res.status(403).json({ error: 'send_emails false needs staff or a full api key' });
+    req = Object.assign(Object.create(req), { staffImport: true });
   }
   // The guest rail's per-email cap and confirmation hold both hang off the
   // email, so a guest booking without one can't be let through.

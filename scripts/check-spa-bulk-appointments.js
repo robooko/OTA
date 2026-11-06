@@ -77,9 +77,15 @@ const spa = require('../src/controllers/spa');
       assert.equal(bad.body.results[0].status, 400);
     });
 
-    await check('send_emails false is staff-only', async () => {
-      const r = await call({ send_emails: false, appointments: [appt('14:00', { contact_email: 'g@example.com' })] }, { auth_method: 'api_key', api_key: { permissions: null }, user: undefined });
-      assert.equal(r.body.results[0].status, 403);
+    await check('send_emails false: scoped key 403; full key books as staff (no hold, no email needed)', async () => {
+      const scoped = await call({ send_emails: false, appointments: [appt('14:00', { contact_email: 'g@example.com' })] }, { auth_method: 'api_key', api_key: { permissions: ['spa.book'] }, user: undefined });
+      assert.equal(scoped.body.results[0].status, 403);
+      const full = await call({ send_emails: false, appointments: [appt('14:00')] }, { auth_method: 'api_key', api_key: { permissions: null }, user: undefined });
+      const a = full.body.results[0].appointment;
+      assert.ok(a, JSON.stringify(full.body));
+      assert.equal(a.status, 'confirmed'); assert.equal(a.awaiting_email_confirmation, false); assert.equal(a.send_emails, false);
+      const site = await call({ appointments: [appt('11:00', { contact_email: 'h@example.com' })] }, { auth_method: 'api_key', api_key: { permissions: null }, user: undefined });
+      assert.equal(site.body.results[0].appointment.status, 'pending', 'full key with emails on is still the guest rail');
     });
 
     await check('no confirmation or cancellation email when send_emails is false', async () => {
