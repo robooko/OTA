@@ -611,6 +611,28 @@ const apiKeys = require('../src/lib/apiKeys');
       assert.equal((await post(ch.id, inb('res-notif-new.xml'))).status, 404);
       assert.equal((await post('not-a-uuid', inb('res-notif-new.xml'))).status, 404);
     });
+    await check('inbound: right password with wrong username is 401', async () => {
+      assert.equal((await post(otCh, inb('res-notif-new.xml').replace('<wsse:Username>partner', '<wsse:Username>other'))).status, 401);
+    });
+    await check('inbound: channel without inbound credentials is 401', async () => {
+      const bare = (await one(`INSERT INTO channel (property_id, adapter, name, horizon_days, config) VALUES ($1, 'opentravel', 'OT bare', 30, '{}') RETURNING id`, [R])).id;
+      const xml = inb('res-notif-new.xml').replace('s3cret', '').replace('>partner<', '><');
+      assert.equal((await post(bare, xml)).status, 401);
+      assert.equal((await post(bare, inb('res-notif-new.xml'))).status, 401);
+    });
+    await check('inbound: empty message is Errors; over 500 is 400 and processes nothing', async () => {
+      const empty = inb('res-notif-new.xml').replace(/<HotelReservation [\s\S]*<\/HotelReservation>/, '');
+      const r = await post(otCh, empty);
+      assert.equal(r.status, 200);
+      assert.match(r.text, /<Errors>.*no reservations/);
+      assert.doesNotMatch(r.text, /<Success\/>/);
+      const one1 = inb('res-notif-new.xml', 'CH-3003').match(/<HotelReservation [\s\S]*<\/HotelReservation>/)[0];
+      const before = await logCount();
+      const big = await post(otCh, inb('res-notif-new.xml', 'CH-3003').replace(one1, one1.repeat(501)));
+      assert.equal(big.status, 400);
+      assert.match(big.text, /Fault/);
+      assert.equal(await logCount(), before);
+    });
     await check('inbound: not xml is 400 Fault', async () => {
       const r = await post(otCh, 'not xml');
       assert.equal(r.status, 400);

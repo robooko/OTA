@@ -98,7 +98,7 @@ function parseResNotifRQ(xml) {
     const tok = env.Header?.Security?.UsernameToken || {};
     return {
       username: text(tok.Username), password: text(tok.Password), echoToken: attr(rq, 'EchoToken'),
-      reservations: arr(rq.HotelReservations && rq.HotelReservations.HotelReservation).map((hr) => reservation(hr, attr(rq, 'ResStatus'))),
+      reservations: arr(rq.HotelReservations && rq.HotelReservations.HotelReservation).filter(Boolean).map((hr) => reservation(hr, attr(rq, 'ResStatus'))),
     };
   } catch (err) {
     return { error: err.message };

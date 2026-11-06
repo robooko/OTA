@@ -32,7 +32,11 @@ async function handleChannelInbound(req, res) {
     // Both compares always run, so a wrong username costs the same as a wrong password.
     const userOk = same(msg.username, cfg.inbound_username);
     const passOk = same(msg.password, cfg.inbound_password);
-    if (!userOk || !passOk || !cfg.inbound_username) return send(res, 401, soapFault('Client', 'authentication failed'));
+    if (!userOk || !passOk || !cfg.inbound_username || !cfg.inbound_password) return send(res, 401, soapFault('Client', 'authentication failed'));
+
+    const n = msg.reservations.length;
+    if (n > 500) return send(res, 400, soapFault('Client', 'too many reservations in one message (max 500)'));
+    if (!n) return send(res, 200, resNotifRS({ echoToken: msg.echoToken, results: [{ channel_ref: '', error: 'no reservations' }] }));
 
     const results = [];
     for (const { _uid, ...r } of msg.reservations) {
@@ -43,6 +47,7 @@ async function handleChannelInbound(req, res) {
     }
     return send(res, 200, resNotifRS({ echoToken: msg.echoToken, results }));
   } catch (err) {
+    // A throw mid-batch after earlier commits is safe: receiveReservation is idempotent on channel_ref, so the partner's retry converges.
     console.error('channel inbound failed', err);
     return send(res, 500, soapFault('Server', 'internal error'));
   }
