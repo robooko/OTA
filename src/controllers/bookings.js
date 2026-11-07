@@ -502,11 +502,24 @@ async function cancelBooking(req, res, next) {
   try {
     await client.query('BEGIN');
 
-    const booking = await roomPayments.lockBooking(client, req.params.id, req.property_id);
+    const members = roomPayments.requestedFirst(await roomPayments.lockMembers(client, req.params.id, req.property_id), req.params.id);
+    const booking = members[0];
     if (!booking || ['cancelled', 'expired', 'walked'].includes(booking.status)) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Booking not found or already cancelled' });
     }
+    // Multi-room: a guest (website) cancels the whole booking; staff cancel
+    // one room, but not while the booking's one payment is still open.
+    const viaApiKey = req.auth_method === 'api_key';
+    const others = members.slice(1).filter((m) => roomNights.HOLDING.includes(m.status));
+    if (!viaApiKey && others.length && booking.status === 'pending_payment') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'This room is part of an unpaid multi-room booking',
+        details: 'Cancel the whole booking from the website or confirm it first',
+      });
+    }
+    const targets = viaApiKey ? [booking, ...others] : [booking];
 
     // A channel booking is cancelled on the channel (which then tells us);
     // cancelling only here would leave the guest holding it there.
@@ -520,7 +533,7 @@ async function cancelBooking(req, res, next) {
     // automatic refund. Stripe goes first, so a failure changes nothing.
     let refundedPaymentIds = [];
     if (booking.rate_plan_terms || booking.stripe_payment_intent_id) {
-      const decision = req.auth_method === 'api_key'
+      const decision = viaApiKey
         ? guestCancelDecision(booking, roomPayments.deadlineOf(booking), new Date())
         : 'staff';
       if (decision === 'refuse') {
@@ -532,30 +545,35 @@ async function cancelBooking(req, res, next) {
         });
       }
       try {
-        ({ refundedPaymentIds } = await roomPayments.stripeForCancel(booking, { refund: decision === 'refund' }));
+        for (const t of targets) {
+          const r = await roomPayments.stripeForCancel(t, { refund: decision === 'refund', keepIntent: !viaApiKey && others.length > 0 });
+          refundedPaymentIds.push(...r.refundedPaymentIds);
+        }
       } catch (err) {
         await client.query('ROLLBACK');
         return res.status(502).json({ error: 'Payment provider error; booking not cancelled', details: err.message });
       }
     }
 
-    const { rows } = await client.query(
-      `UPDATE booking SET status = 'cancelled', payment_due_at = NULL WHERE id = $1 RETURNING *`, [booking.id]
+    await client.query(
+      `UPDATE booking SET status = 'cancelled', payment_due_at = NULL WHERE id = ANY($1)`, [targets.map((t) => t.id)]
     );
     if (refundedPaymentIds.length) {
       await client.query(`UPDATE payment SET status = 'refunded' WHERE id = ANY($1)`, [refundedPaymentIds]);
     }
-    await roomPayments.releaseAvailability(client, booking);
+    for (const t of targets) await roomPayments.releaseAvailability(client, t);
 
     await client.query('COMMIT');
 
     await roomPayments.refreshAvailabilityView();
 
-    // Full joined row -- see the matching note in updateBooking.
-    const bookedFull = (await fetchJoinedBooking(rows[0].id)) ?? rows[0];
-    publishBookingStatusChanged(req.property_id, bookedFull).catch((err) => console.error('Ably publish failed:', err.message));
+    // Full joined rows -- see the matching note in updateBooking. The
+    // response is the booking asked for; every cancelled room is published.
+    const joined = [];
+    for (const t of targets) joined.push(await fetchJoinedBooking(t.id));
+    for (const j of joined) publishBookingStatusChanged(req.property_id, j).catch((err) => console.error('Ably publish failed:', err.message));
 
-    res.json(bookedFull);
+    res.json(joined[0]);
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);

@@ -328,9 +328,9 @@ async function settleByHand(bookingId, propertyId) {
 // released, and a card that went through on a never-confirmed booking is
 // refunded. refund: also refund every completed card payment. Throws on any
 // Stripe failure so the caller can leave the booking untouched.
-async function stripeForCancel(b, { refund }) {
+async function stripeForCancel(b, { refund, keepIntent = false }) {
   const { rows: payments } = await pool.query(
-    `SELECT id, stripe_payment_intent_id FROM payment
+    `SELECT id, amount, stripe_payment_intent_id FROM payment
      WHERE booking_id = $1 AND status = 'completed' AND method = 'card' AND stripe_payment_intent_id IS NOT NULL`,
     [b.id]
   );
@@ -340,7 +340,9 @@ async function stripeForCancel(b, { refund }) {
   const stripe = stripeOf(b.stripe_secret_key);
 
   const recorded = new Set(payments.map((p) => p.stripe_payment_intent_id));
-  if (b.stripe_payment_intent_id && !recorded.has(b.stripe_payment_intent_id)) {
+  // keepIntent: other rooms of the booking still need this payment (a hold
+  // captures less later); this room's share simply isn't taken.
+  if (b.stripe_payment_intent_id && !recorded.has(b.stripe_payment_intent_id) && !keepIntent) {
     const pi = await stripe.paymentIntents.retrieve(b.stripe_payment_intent_id);
     if (OPEN.includes(pi.status) || pi.status === 'requires_capture') {
       await stripe.paymentIntents.cancel(pi.id);
@@ -351,7 +353,9 @@ async function stripeForCancel(b, { refund }) {
   const refundedPaymentIds = [];
   if (refund) {
     for (const p of payments) {
-      await stripe.refunds.create({ payment_intent: p.stripe_payment_intent_id }, { idempotencyKey: `room-refund-${p.id}` });
+      // A multi-room booking's one payment is shared: refund this room's part.
+      const amount = b.group_id ? { amount: toStripeAmount(toCents(p.amount), b.currency) } : {};
+      await stripe.refunds.create({ payment_intent: p.stripe_payment_intent_id, ...amount }, { idempotencyKey: `room-refund-${p.id}` });
       refundedPaymentIds.push(p.id);
     }
   }
@@ -513,7 +517,7 @@ function startRoomPaymentJobs() {
 }
 
 module.exports = {
-  CANCEL_SCORE_SQL, NIGHTS_SQL, fetchJoinedBooking, releaseAvailability, refreshAvailabilityView, lockBooking, lockMembers, splitCents, deadlineOf,
+  CANCEL_SCORE_SQL, NIGHTS_SQL, fetchJoinedBooking, releaseAvailability, refreshAvailabilityView, lockBooking, lockMembers, requestedFirst, splitCents, deadlineOf,
   confirmPaidLocked, afterConfirmed, paymentIntentFor, confirmPaid, settleByHand, stripeForCancel,
   expireOnce, captureHoldsOnce, startRoomPaymentJobs,
 };

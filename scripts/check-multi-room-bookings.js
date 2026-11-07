@@ -254,7 +254,7 @@ const ratePlans = require('../src/lib/ratePlans');
       assert.equal(r.status, 201, JSON.stringify(r.body));
       return r.body.bookings;
     };
-    const rowsOf = async (ids) => (await pool.query('SELECT * FROM booking WHERE id = ANY($1) ORDER BY id', [ids])).rows;
+    const rowsOf = async (ids) => (await pool.query('SELECT * FROM booking WHERE id = ANY($1::uuid[]) ORDER BY array_position($1::uuid[], id)', [ids])).rows;
     const paymentsOf = async (ids) => (await pool.query("SELECT * FROM payment WHERE booking_id = ANY($1) AND status = 'completed'", [ids])).rows;
     const sumAmt = (ps) => ps.reduce((a, p) => a + toCents(p.amount), 0);
 
@@ -331,7 +331,7 @@ const ratePlans = require('../src/lib/ratePlans');
       assert.equal(sumAmt(await paymentsOf([b1.id, b2.id])), 45000);
     });
     await clear();
-    const holdBasket = async () => {
+    const holdBasket = async (due = true) => {
       const ci = await soon(3); const co = await soon(5);
       const [b1, b2] = await webBasket('Flex', ci, co);
       const a = await api('POST', `/api/bookings/${b1.id}/payment-intent`);
@@ -341,7 +341,7 @@ const ratePlans = require('../src/lib/ratePlans');
       pi.status = 'requires_capture';
       assert.equal((await api('POST', `/api/bookings/${b2.id}/confirm-payment`)).status, 200);
       // Free cancellation over: the capture sweep is due.
-      await pool.query(`UPDATE booking SET rate_plan_terms = jsonb_set(rate_plan_terms, '{cancel_cutoff_hours}', '200') WHERE id = ANY($1)`, [[b1.id, b2.id]]);
+      if (due) await pool.query(`UPDATE booking SET rate_plan_terms = jsonb_set(rate_plan_terms, '{cancel_cutoff_hours}', '200') WHERE id = ANY($1)`, [[b1.id, b2.id]]);
       return { b1, b2, pi };
     };
     await check('group: a held basket is captured once, split across rooms', async () => {
@@ -362,6 +362,79 @@ const ratePlans = require('../src/lib/ratePlans');
       assert.equal(r.status, 200, JSON.stringify(r.body));
       const rows = await rowsOf([b1.id, b2.id]);
       assert.ok(rows.every((b) => b.status === 'confirmed' && b.rate_plan_terms.pay_at_hotel === true));
+    });
+    await clear();
+
+    // ---- Task 5: cancel ----
+    const paidBasket = async (rate) => {
+      const [b1, b2] = await webBasket(rate);
+      await api('POST', `/api/bookings/${b1.id}/payment-intent`);
+      const pi = fakeStripe.store.get((await rowsOf([b1.id]))[0].stripe_payment_intent_id);
+      pi.status = 'succeeded'; pi.amount_received = pi.amount;
+      assert.equal((await api('POST', `/api/bookings/${b1.id}/confirm-payment`)).status, 200);
+      return { b1, b2, pi };
+    };
+    const statuses = async (ids) => (await rowsOf(ids)).map((b) => b.status);
+    await check('cancel: guest cancels a refundable paid basket whole, each room refunded its share', async () => {
+      const { b1, b2, pi } = await paidBasket('Flex');
+      const r = await api('DELETE', `/api/bookings/${b2.id}`);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual(await statuses([b1.id, b2.id]), ['cancelled', 'cancelled']);
+      const ps = (await pool.query('SELECT * FROM payment WHERE booking_id = ANY($1)', [[b1.id, b2.id]])).rows;
+      assert.ok(ps.length === 2 && ps.every((p) => p.status === 'refunded'));
+      assert.deepEqual([...pi.refunds].sort(), ps.map((p) => toStripeAmount(toCents(p.amount), 'GBP')).sort());
+      assert.equal(Number((await one('SELECT count(*) AS n FROM booking_night WHERE booking_id = ANY($1)', [[b1.id, b2.id]])).n), 0);
+    });
+    await clear();
+    await check('cancel: guest cancel of a paid non-refundable basket is 409, nothing changes', async () => {
+      const { b1, b2 } = await paidBasket('Saver');
+      assert.equal((await api('DELETE', `/api/bookings/${b1.id}`)).status, 409);
+      assert.deepEqual(await statuses([b1.id, b2.id]), ['confirmed', 'confirmed']);
+    });
+    await clear();
+    await check('cancel: guest cancels an unpaid basket whole; the PI is cancelled', async () => {
+      const [b1, b2] = await webBasket('Saver');
+      await api('POST', `/api/bookings/${b1.id}/payment-intent`);
+      assert.equal((await api('DELETE', `/api/bookings/${b1.id}`)).status, 200);
+      const rows = await rowsOf([b1.id, b2.id]);
+      assert.deepEqual(rows.map((b) => b.status), ['cancelled', 'cancelled']);
+      assert.equal(fakeStripe.store.get(rows[0].stripe_payment_intent_id).status, 'canceled');
+    });
+    await clear();
+    await check('cancel: staff cancelling one room of an unpaid basket is 409', async () => {
+      const [b1, b2] = await webBasket('Saver');
+      const r = await staff(bookingsCtrl.cancelBooking, { params: { id: b1.id } });
+      assert.equal(r.status, 409); assert.match(r.body.error, /unpaid multi-room/);
+      assert.deepEqual(await statuses([b1.id, b2.id]), ['pending_payment', 'pending_payment']);
+    });
+    await clear();
+    await check('cancel: hold: staff drops one room; the hold stays and later captures only the rest', async () => {
+      const { b1, b2, pi } = await holdBasket();
+      const r = await staff(bookingsCtrl.cancelBooking, { params: { id: b1.id } });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual(await statuses([b1.id, b2.id]), ['cancelled', 'confirmed']);
+      assert.equal(pi.status, 'requires_capture');
+      await roomPayments.captureHoldsOnce();
+      const ps = await paymentsOf([b1.id, b2.id]);
+      assert.equal(ps.length, 1); assert.equal(ps[0].booking_id, b2.id);
+      assert.equal(pi.amount_received, toCents((await rowsOf([b2.id]))[0].total_price));
+    });
+    await clear();
+    await check('cancel: hold: staff drops one room, then the guest cancels the rest', async () => {
+      const { b1, b2, pi } = await holdBasket(false);
+      assert.equal((await staff(bookingsCtrl.cancelBooking, { params: { id: b1.id } })).status, 200);
+      const r = await api('DELETE', `/api/bookings/${b2.id}`);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual(await statuses([b1.id, b2.id]), ['cancelled', 'cancelled']);
+      assert.equal(pi.status, 'canceled');
+    });
+    await clear();
+    await check('cancel: staff cancelling one room of a paid basket refunds nothing, leaves the other', async () => {
+      const { b1, b2, pi } = await paidBasket('Flex');
+      assert.equal((await staff(bookingsCtrl.cancelBooking, { params: { id: b1.id } })).status, 200);
+      assert.deepEqual(await statuses([b1.id, b2.id]), ['cancelled', 'confirmed']);
+      assert.equal(pi.refunds, undefined);
+      assert.equal((await paymentsOf([b1.id, b2.id])).length, 2);
     });
     await clear();
   } finally {
