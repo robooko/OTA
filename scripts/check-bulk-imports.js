@@ -264,6 +264,7 @@ const { computeFolio } = require('../src/lib/folio');
       assert.equal((await call(importAppointments, { appointments: [spa('SP1', '2020-01-01')] }, { spa_id: S })).body.results[0].booking_id, null);
 
       const f = await computeFolio(P1, P);
+      assert.deepEqual(f.items.slice(0, 2).map((i) => i.description), ['Villa · 3 nights', 'F&B · Sunset Restaurant']);
       const lines = f.items.map((i) => [i.type, i.amount, i.paid ?? null]);
       assert.deepEqual(lines, [['room', '3000000.00', null], ['room_service', '30000.00', false], ['room_service', '30000.00', true], ['spa', '450000.00', true]], JSON.stringify(f.items));
       assert.equal(f.charges_total, '3030000.00', 'paid at the outlet = listed, not owed; cancelled spa left off');

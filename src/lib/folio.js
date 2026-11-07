@@ -15,10 +15,11 @@ function fromCents(cents) {
 // null when the booking doesn't exist in this property (callers 404).
 async function computeFolio(bookingId, propertyId) {
   const bookingRes = await pool.query(
-    `SELECT b.id, b.total_price, r.room_number, p.currency,
+    `SELECT b.id, b.total_price, r.room_number, rt.name AS room_type_name, p.currency,
             (b.check_out - b.check_in) AS nights
      FROM booking b
      LEFT JOIN room r     ON r.id = b.room_id
+     LEFT JOIN room_type rt ON rt.id = b.room_type_id
      JOIN property p ON p.id = b.property_id
      WHERE b.id = $1 AND b.property_id = $2`,
     [bookingId, propertyId]
@@ -80,7 +81,8 @@ async function computeFolio(bookingId, propertyId) {
   const items = [
     {
       type: 'room',
-      description: `Room ${booking.room_number} · ${booking.nights} night${booking.nights === 1 ? '' : 's'}`,
+      // Imported past stays have no room: fall back to the room type.
+      description: [booking.room_number ? `Room ${booking.room_number}` : booking.room_type_name, `${booking.nights} night${booking.nights === 1 ? '' : 's'}`].filter(Boolean).join(' · '),
       amount: booking.total_price,
     },
     ...extrasRes.rows.map((e) => ({
@@ -92,7 +94,7 @@ async function computeFolio(bookingId, propertyId) {
     ...ordersRes.rows.map((o) => ({
       type: 'room_service',
       source_id: o.id,
-      description: `Room service · ${o.restaurant_name}`,
+      description: `F&B · ${o.restaurant_name}`,
       amount: o.total_price,
       created_at: o.created_at,
       paid: o.payment_status === 'paid',
