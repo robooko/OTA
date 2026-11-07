@@ -50,6 +50,15 @@ const ratePlans = require('../src/lib/ratePlans');
     assert.equal(ratePlans.stayPrice(['2030-01-01'], {}, 100, { '2030-01-01': 80 }, null), 80);
   });
 
+  // ---- Task 4: pure ----
+  const { splitCents } = require('../src/lib/roomPayments');
+  await check('splitCents: proportional, largest remainder, sums exactly', async () => {
+    assert.deepEqual(splitCents(1000, [1, 1, 1]), [334, 333, 333]);
+    assert.equal(splitCents(999, [0, 0]).reduce((a, b) => a + b, 0), 999);
+    assert.deepEqual(splitCents(500, [300, 200]), [300, 200]);
+    assert.deepEqual(splitCents(0, [300, 200]), [0, 0]);
+  });
+
   // ---- HTTP ----
   const app = require('../src/app');
   const server = app.listen(0);
@@ -167,6 +176,7 @@ const ratePlans = require('../src/lib/ratePlans');
     // Deleting bookings directly leaves their rooms' flags closed (= staff blocks): reopen them.
     const clear = async () => {
       await pool.query('DELETE FROM payment WHERE property_id = $1', [P]);
+      await pool.query('DELETE FROM booking_extra WHERE booking_id IN (SELECT id FROM booking WHERE property_id = $1)', [P]);
       await pool.query('DELETE FROM booking WHERE property_id = $1', [P]);
       await pool.query('UPDATE room_availability SET is_available = true WHERE property_id = $1', [P]);
     };
@@ -225,6 +235,133 @@ const ratePlans = require('../src/lib/ratePlans');
       const r = await api('POST', '/api/bookings', { guest_id: G, check_in: IN, check_out: OUT, room_type_id: DLX, rate_plan_id: plans[DLX].Saver });
       assert.equal(r.status, 201); assert.ok(r.body.id); assert.equal(r.body.bookings, undefined); assert.equal(r.body.group_id, null);
       assert.equal(Number(r.body.total_price), 270);
+    });
+    await clear();
+
+    // ---- Task 4: group payment ----
+    const roomPayments = require('../src/lib/roomPayments');
+    const { computeFolio, toCents } = require('../src/lib/folio');
+    const { toStripeAmount } = require('../src/lib/stripeAmount');
+    await pool.query(
+      `INSERT INTO room_availability (property_id, room_id, date)
+       SELECT $1, r, d::date FROM unnest($2::uuid[]) r, generate_series(current_date, current_date + 14, '1 day') d
+       ON CONFLICT DO NOTHING`, [P, roomIds]);
+    const soon = async (days) => (await one(`SELECT (current_date + $1::int)::text AS d`, [days])).d;
+    // A website basket of Std + Dlx on a rate; returns the bookings.
+    const webBasket = async (rate, ci = IN, co = OUT) => {
+      const r = await api('POST', '/api/bookings', { guest_id: G, check_in: ci, check_out: co, rooms: [
+        { room_type_id: STD, rate_plan_id: plans[STD][rate], guests: 2 }, { room_type_id: DLX, rate_plan_id: plans[DLX][rate], guests: 2 }] });
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      return r.body.bookings;
+    };
+    const rowsOf = async (ids) => (await pool.query('SELECT * FROM booking WHERE id = ANY($1) ORDER BY id', [ids])).rows;
+    const paymentsOf = async (ids) => (await pool.query("SELECT * FROM payment WHERE booking_id = ANY($1) AND status = 'completed'", [ids])).rows;
+    const sumAmt = (ps) => ps.reduce((a, p) => a + toCents(p.amount), 0);
+
+    await check('group: one PaymentIntent for the basket total, from any room', async () => {
+      const [b1, b2] = await webBasket('Saver');
+      const a = await api('POST', `/api/bookings/${b2.id}/payment-intent`);
+      assert.equal(a.status, 200, JSON.stringify(a.body)); assert.equal(Number(a.body.amount), 450);
+      const b = await api('POST', `/api/bookings/${b1.id}/payment-intent`);
+      assert.equal(b.body.client_secret, a.body.client_secret);
+      const rows = await rowsOf([b1.id, b2.id]);
+      assert.ok(rows[0].stripe_payment_intent_id && rows[0].stripe_payment_intent_id === rows[1].stripe_payment_intent_id);
+      const pi = fakeStripe.store.get(rows[0].stripe_payment_intent_id);
+      assert.equal(pi.metadata.group_id, b1.group_id); assert.equal(pi.capture_method, 'automatic');
+    });
+    await clear();
+    await check('group: confirm splits the payment so every room folio balances', async () => {
+      const [b1, b2] = await webBasket('Saver');
+      await api('POST', `/api/bookings/${b1.id}/payment-intent`);
+      const ex = (await one("INSERT INTO extra (property_id, name, price) VALUES ($1, 'Wine', 33.33) RETURNING id", [P])).id;
+      await pool.query('INSERT INTO booking_extra (booking_id, extra_id, quantity, unit_price) VALUES ($1, $2, 1, 33.33)', [b1.id, ex]);
+      const again = await api('POST', `/api/bookings/${b2.id}/payment-intent`);
+      assert.equal(Number(again.body.amount), 483.33);
+      const pi = fakeStripe.store.get((await rowsOf([b1.id]))[0].stripe_payment_intent_id);
+      pi.status = 'succeeded'; pi.amount_received = pi.amount;
+      const c = await api('POST', `/api/bookings/${b1.id}/confirm-payment`);
+      assert.equal(c.status, 200, JSON.stringify(c.body));
+      assert.ok((await rowsOf([b1.id, b2.id])).every((b) => b.status === 'confirmed'));
+      const ps = await paymentsOf([b1.id, b2.id]);
+      assert.equal(ps.length, 2); assert.equal(sumAmt(ps), 48333);
+      for (const b of [b1, b2]) assert.equal((await computeFolio(b.id, P)).balance, '0.00');
+      assert.equal((await api('POST', `/api/bookings/${b2.id}/confirm-payment`)).status, 200); // idempotent
+      assert.equal((await paymentsOf([b1.id, b2.id])).length, 2);
+    });
+    await clear();
+    await check('group: IDR basket amount round-trips', async () => {
+      await pool.query("UPDATE property SET currency = 'IDR' WHERE id = $1", [P]);
+      try {
+        const [b1, b2] = await webBasket('Saver');
+        const a = await api('POST', `/api/bookings/${b1.id}/payment-intent`);
+        const pi = fakeStripe.store.get((await rowsOf([b1.id]))[0].stripe_payment_intent_id);
+        assert.equal(pi.amount, toStripeAmount(45000, 'IDR')); assert.equal(Number(a.body.amount), 450);
+        pi.status = 'succeeded'; pi.amount_received = pi.amount;
+        assert.equal((await api('POST', `/api/bookings/${b2.id}/confirm-payment`)).status, 200);
+        assert.equal(sumAmt(await paymentsOf([b1.id, b2.id])), 45000);
+      } finally {
+        await pool.query("UPDATE property SET currency = 'GBP' WHERE id = $1", [P]);
+      }
+    });
+    await clear();
+    await check('group: expiry expires every room once and cancels the PI once', async () => {
+      const [b1, b2] = await webBasket('Saver');
+      await api('POST', `/api/bookings/${b1.id}/payment-intent`);
+      await pool.query("UPDATE booking SET payment_due_at = now() - interval '1 minute' WHERE id = ANY($1)", [[b1.id, b2.id]]);
+      const piId = (await rowsOf([b1.id]))[0].stripe_payment_intent_id;
+      const realCancel = fakeStripe.paymentIntents.cancel; let cancels = 0;
+      fakeStripe.paymentIntents.cancel = async (id) => { if (id === piId) cancels++; return realCancel(id); };
+      try {
+        await roomPayments.expireOnce();
+        await roomPayments.expireOnce();
+      } finally { fakeStripe.paymentIntents.cancel = realCancel; }
+      assert.ok((await rowsOf([b1.id, b2.id])).every((b) => b.status === 'expired'));
+      assert.equal(cancels, 1); assert.equal(fakeStripe.store.get(piId).status, 'canceled');
+      assert.equal(Number((await one('SELECT count(*) AS n FROM booking_night WHERE booking_id = ANY($1)', [[b1.id, b2.id]])).n), 0);
+    });
+    await clear();
+    await check('group: expiry with the card paid confirms every room', async () => {
+      const [b1, b2] = await webBasket('Saver');
+      await api('POST', `/api/bookings/${b1.id}/payment-intent`);
+      const pi = fakeStripe.store.get((await rowsOf([b1.id]))[0].stripe_payment_intent_id);
+      pi.status = 'succeeded'; pi.amount_received = pi.amount;
+      await pool.query("UPDATE booking SET payment_due_at = now() - interval '1 minute' WHERE id = ANY($1)", [[b1.id, b2.id]]);
+      await roomPayments.expireOnce();
+      assert.ok((await rowsOf([b1.id, b2.id])).every((b) => b.status === 'confirmed'));
+      assert.equal(sumAmt(await paymentsOf([b1.id, b2.id])), 45000);
+    });
+    await clear();
+    const holdBasket = async () => {
+      const ci = await soon(3); const co = await soon(5);
+      const [b1, b2] = await webBasket('Flex', ci, co);
+      const a = await api('POST', `/api/bookings/${b1.id}/payment-intent`);
+      assert.equal(a.body.mode, 'hold', JSON.stringify(a.body));
+      const pi = fakeStripe.store.get((await rowsOf([b1.id]))[0].stripe_payment_intent_id);
+      assert.equal(pi.capture_method, 'manual');
+      pi.status = 'requires_capture';
+      assert.equal((await api('POST', `/api/bookings/${b2.id}/confirm-payment`)).status, 200);
+      // Free cancellation over: the capture sweep is due.
+      await pool.query(`UPDATE booking SET rate_plan_terms = jsonb_set(rate_plan_terms, '{cancel_cutoff_hours}', '200') WHERE id = ANY($1)`, [[b1.id, b2.id]]);
+      return { b1, b2, pi };
+    };
+    await check('group: a held basket is captured once, split across rooms', async () => {
+      const { b1, b2, pi } = await holdBasket();
+      assert.equal((await paymentsOf([b1.id, b2.id])).length, 0);
+      const realCapture = fakeStripe.paymentIntents.capture; let captures = 0;
+      fakeStripe.paymentIntents.capture = async (id, params) => { if (id === pi.id) captures++; return realCapture(id, params); };
+      try { await roomPayments.captureHoldsOnce(); await roomPayments.captureHoldsOnce(); } finally { fakeStripe.paymentIntents.capture = realCapture; }
+      assert.equal(captures, 1);
+      const ps = await paymentsOf([b1.id, b2.id]);
+      assert.equal(ps.length, 2); assert.equal(sumAmt(ps), toCents(pi.amount_received / 100));
+      assert.equal(pi.amount_received, 50000);
+    });
+    await clear();
+    await check('group: staff confirming one unpaid room settles the whole basket', async () => {
+      const [b1, b2] = await webBasket('Saver');
+      const r = await staff(bookingsCtrl.updateBooking, { params: { id: b2.id }, body: { status: 'confirmed' } });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      const rows = await rowsOf([b1.id, b2.id]);
+      assert.ok(rows.every((b) => b.status === 'confirmed' && b.rate_plan_terms.pay_at_hotel === true));
     });
     await clear();
   } finally {

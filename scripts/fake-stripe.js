@@ -17,10 +17,10 @@ const fake = {
     },
     async retrieve(id) { const pi = store.get(id); if (!pi) throw new Error('No such payment_intent'); return pi; },
     async update(id, params) { const pi = store.get(id); Object.assign(pi, params); return pi; },
-    async capture(id) {
+    async capture(id, params) {
       if (fake.failNextCapture) { fake.failNextCapture = false; throw new Error('capture failed'); }
       const pi = store.get(id); if (pi.status !== 'requires_capture') throw new Error(`cannot capture ${pi.status}`);
-      pi.status = 'succeeded'; pi.amount_received = pi.amount; return pi;
+      pi.status = 'succeeded'; pi.amount_received = params?.amount_to_capture ?? pi.amount; return pi;
     },
     async cancel(id) {
       const pi = store.get(id); if (pi.status === 'succeeded') throw new Error('cannot cancel succeeded');
@@ -29,9 +29,9 @@ const fake = {
   },
   failNextRefund: false,
   refunds: {
-    async create({ payment_intent }) {
+    async create({ payment_intent, amount }) {
       if (fake.failNextRefund) { fake.failNextRefund = false; throw new Error('refund failed'); }
-      store.get(payment_intent).refunded = true; return { id: 're_fake' };
+      const pi = store.get(payment_intent); pi.refunded = true; (pi.refunds ??= []).push(amount ?? null); return { id: 're_fake' };
     },
   },
 };
