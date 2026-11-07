@@ -466,6 +466,40 @@ function createTools(apiRequest) {
     run: (body) => apiRequest('PUT', '/api/overbooking/settings', { body }),
   },
   {
+    name: 'report_competitor_alerts',
+    description: "Report competitor alerts from a price scraper, up to 500: a competitor sold out (sold_out) or changed price (price_change, with old_price and new_price) for a night, matched to one of our room types (room_type_confirmed false = a guess). OTA stores alerts only, not prices. A repeat of an open alert (same night, room type, competitor, type) updates it. Room types outside this property come back in unknown.",
+    inputSchema: {
+      alerts: z.array(z.object({
+        night: z.string().describe('YYYY-MM-DD'),
+        room_type_id: z.string(),
+        room_type_confirmed: z.boolean().optional(),
+        competitor: z.string().max(200),
+        type: z.enum(['sold_out', 'price_change']),
+        old_price: z.number().min(0).optional(),
+        new_price: z.number().min(0).optional(),
+      })).min(1).max(500),
+    },
+    run: ({ alerts }) => apiRequest('POST', '/api/availability/competitor-alerts', { body: { alerts } }),
+  },
+  {
+    name: 'list_competitor_alerts',
+    description: "List competitor sold-out / price-change alerts by night (open ones unless acknowledged is true or all). A main competitor sold out on a night is a cue to raise that room type's rate (upsert_room_availability override_rate).",
+    inputSchema: {
+      from: z.string().optional().describe('YYYY-MM-DD'),
+      to: z.string().optional().describe('YYYY-MM-DD, exclusive'),
+      room_type_id: z.string().optional(),
+      type: z.enum(['sold_out', 'price_change']).optional(),
+      acknowledged: z.enum(['false', 'true', 'all']).optional(),
+    },
+    run: (query) => apiRequest('GET', '/api/availability/competitor-alerts', { query }),
+  },
+  {
+    name: 'acknowledge_competitor_alert',
+    description: 'Mark a competitor alert as dealt with (closes it)',
+    inputSchema: { id: z.string() },
+    run: ({ id }) => apiRequest('PATCH', `/api/availability/competitor-alerts/${id}/acknowledge`),
+  },
+  {
     name: 'set_oversell_allowances',
     description: "Post the model's oversell allowances (extra rooms that may be sold per room type and night). Replaces the model's values for [from, to): nights left out go to 0. Manual overrides are kept. Needs overbooking.manage.",
     inputSchema: {

@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/availability');
+const alerts = require('../controllers/competitorAlerts');
 const { authenticate, authenticateOrApiKey, requireRoleOrApiKey } = require('../middleware/auth');
 
 // Staff, or a FULL api key (MCP, scripts); a scoped key gets 403.
@@ -13,5 +14,9 @@ router.delete('/overrides/:id', staffOrFullKey, ctrl.deleteOverride);
 router.get('/rooms/:room_id', authenticateOrApiKey, ctrl.getRoomAvailability);
 router.put('/rooms/:room_id', authenticateOrApiKey, ctrl.upsertRoomAvailability);
 router.post('/refresh', staffOrFullKey, ctrl.refreshView);
+// Competitor sold-out / price-change alerts from a client-side scraper.
+router.post('/competitor-alerts', staffOrFullKey, alerts.reportAlerts);
+router.get('/competitor-alerts', staffOrFullKey, alerts.listAlerts);
+router.patch('/competitor-alerts/:id/acknowledge', staffOrFullKey, alerts.acknowledgeAlert);
 
 module.exports = router;
