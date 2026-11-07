@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const pool = require('../db');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { publishNewBooking, publishBookingStatusChanged } = require('../lib/ably');
@@ -135,13 +136,99 @@ async function getBooking(req, res, next) {
   }
 }
 
+// Multi-room bookings: up to MAX_ROOMS rooms in one request, booked all or
+// nothing as one group with one rate (see the 2026-11-07 multi-room spec).
+const MAX_ROOMS = 10;
+const httpError = (status, message, details) => Object.assign(new Error(message), { status, ...(details && { details }) });
+
+// One room of a booking request, checked and priced but not yet written.
+async function priceStay(client, req, { stay, check_in, check_out, nights, viaApiKey }) {
+  const { room_id, room_type_id, rate_plan_id } = stay;
+  let type;
+  if (room_id) {
+    const { rows } = await client.query(
+      `SELECT r.status, r.room_type_id AS id, rt.base_rate, rt.max_occupancy
+       FROM room r JOIN room_type rt ON rt.id = r.room_type_id
+       WHERE r.id = $1 AND r.property_id = $2`,
+      [room_id, req.property_id]
+    );
+    if (!rows.length) throw httpError(404, 'Room not found');
+    if (rows[0].status !== 'active') throw httpError(409, 'Room is not active');
+    type = rows[0];
+  } else {
+    const { rows } = await client.query(
+      'SELECT id, base_rate, max_occupancy FROM room_type WHERE id = $1 AND property_id = $2', [room_type_id, req.property_id]
+    );
+    if (!rows.length) throw httpError(404, 'Room type not found');
+    type = rows[0];
+  }
+
+  // Rate plan (Saver/Flex). A website must book a plan-enabled room type on
+  // a plan, so it can't skip payment; no plan = exactly the old behaviour.
+  let plan = null;
+  if (rate_plan_id) {
+    const { rows } = await client.query(
+      `SELECT * FROM rate_plan WHERE id = $1 AND property_id = $2 AND room_type_id = $3 AND status = 'active'`,
+      [rate_plan_id, req.property_id, type.id]
+    );
+    if (!rows.length) throw httpError(400, 'Rate plan not found for this room type');
+    plan = rows[0];
+  } else if (viaApiKey) {
+    const { rows } = await client.query(
+      `SELECT 1 FROM rate_plan WHERE room_type_id = $1 AND property_id = $2 AND status = 'active' LIMIT 1`,
+      [type.id, req.property_id]
+    );
+    if (rows.length) throw httpError(400, 'rate_plan_id is required for this room type');
+  }
+
+  // Nightly rate: a picked room's override, else the type's dated rate, else
+  // base. A type booking has no room yet, so overrides never apply to it.
+  const { rows: typeRateRows } = await client.query(
+    `SELECT date, rate FROM room_type_rate
+     WHERE room_type_id = $1 AND date >= $2 AND date < $3`,
+    [type.id, check_in, check_out]
+  );
+  const typeRates = {};
+  for (const row of typeRateRows) typeRates[row.date] = parseFloat(row.rate);
+  const overrides = {};
+  if (room_id) {
+    const { rows: ov } = await client.query(
+      `SELECT date, override_rate FROM room_availability
+       WHERE room_id = $1 AND date = ANY($2::date[]) AND override_rate IS NOT NULL`, [room_id, nights]);
+    for (const row of ov) overrides[row.date] = parseFloat(row.override_rate);
+  }
+  const total = stayPrice(nights, typeRates, parseFloat(type.base_rate), overrides, plan ? plan.adjustment_pct : null);
+  return { stay, roomId: room_id ?? null, rateTypeId: type.id, maxOccupancy: type.max_occupancy, plan, total };
+}
+
+function roomsError(rooms) {
+  if (!Array.isArray(rooms) || rooms.length < 1 || rooms.length > MAX_ROOMS) return `rooms must be a list of 1 to ${MAX_ROOMS} rooms`;
+  for (const [i, r] of rooms.entries()) {
+    if (!r || typeof r !== 'object' || (!r.room_id && !r.room_type_id) || (r.room_id && r.room_type_id)) {
+      return `rooms[${i}] needs exactly one of room_id or room_type_id`;
+    }
+    if (r.guests !== undefined && (!Number.isInteger(r.guests) || r.guests < 1)) return `rooms[${i}].guests must be a whole number of at least 1`;
+  }
+  return null;
+}
+
 async function createBooking(req, res, next) {
-  const { guest_id, room_id, room_type_id, check_in, check_out, guests, metadata, rate_plan_id, pay_at_hotel, source, send_emails } = req.body;
+  const { guest_id, room_id, room_type_id, check_in, check_out, guests, metadata, rate_plan_id, pay_at_hotel, source, send_emails, rooms } = req.body;
   // The API-key rail is a website acting for a guest; anything else here is
   // signed-in staff (rate plans spec §4).
   const viaApiKey = req.auth_method === 'api_key';
+  const multi = rooms !== undefined;
 
-  if (!guest_id || !check_in || !check_out || (!room_id && !room_type_id) || (room_id && room_type_id)) {
+  if (multi) {
+    if (room_id !== undefined || room_type_id !== undefined || rate_plan_id !== undefined || guests !== undefined) {
+      return res.status(400).json({ error: 'Give rooms, or room_id / room_type_id / rate_plan_id / guests, not both' });
+    }
+    const error = roomsError(rooms);
+    if (error) return res.status(400).json({ error });
+    if (!guest_id || !check_in || !check_out) {
+      return res.status(400).json({ error: 'guest_id, check_in, check_out and rooms are required' });
+    }
+  } else if (!guest_id || !check_in || !check_out || (!room_id && !room_type_id) || (room_id && room_type_id)) {
     return res.status(400).json({ error: 'guest_id, check_in, check_out, and exactly one of room_id or room_type_id are required' });
   }
   if (!isValidDate(check_in) || !isValidDate(check_out)) {
@@ -166,7 +253,8 @@ async function createBooking(req, res, next) {
   if (pay_at_hotel && viaApiKey) {
     return res.status(403).json({ error: 'pay_at_hotel is staff-only' });
   }
-  if (pay_at_hotel && !rate_plan_id) {
+  const stays = multi ? rooms : [{ room_id, room_type_id, rate_plan_id, guests }];
+  if (pay_at_hotel && !stays.every((s) => s.rate_plan_id)) {
     return res.status(400).json({ error: 'pay_at_hotel needs a rate_plan_id' });
   }
 
@@ -179,146 +267,86 @@ async function createBooking(req, res, next) {
     const guestRes = await client.query(
       'SELECT id FROM guest WHERE id = $1 AND property_id = $2', [guest_id, req.property_id]
     );
-    if (!guestRes.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Guest not found' });
-    }
+    if (!guestRes.rows.length) throw httpError(404, 'Guest not found');
 
-    let baseRate;
-    let rateTypeId;
-    if (room_id) {
-      const roomRes = await client.query(
-        `SELECT r.id, r.status, r.room_type_id, rt.base_rate
-         FROM room r JOIN room_type rt ON rt.id = r.room_type_id
-         WHERE r.id = $1 AND r.property_id = $2`,
-        [room_id, req.property_id]
-      );
-      if (!roomRes.rows.length) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Room not found' });
-      }
-      if (roomRes.rows[0].status !== 'active') {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Room is not active' });
-      }
-      baseRate = parseFloat(roomRes.rows[0].base_rate);
-      rateTypeId = roomRes.rows[0].room_type_id;
-    } else {
-      const typeRes = await client.query(
-        'SELECT id, base_rate FROM room_type WHERE id = $1 AND property_id = $2', [room_type_id, req.property_id]
-      );
-      if (!typeRes.rows.length) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Room type not found' });
-      }
-      baseRate = parseFloat(typeRes.rows[0].base_rate);
-      rateTypeId = room_type_id;
-    }
-
-    // Rate plan (Saver/Flex). A website must book a plan-enabled room type on
-    // a plan, so it can't skip payment; no plan = exactly the old behaviour.
-    let plan = null;
-    if (rate_plan_id) {
-      const planRes = await client.query(
-        `SELECT * FROM rate_plan WHERE id = $1 AND property_id = $2 AND room_type_id = $3 AND status = 'active'`,
-        [rate_plan_id, req.property_id, rateTypeId]
-      );
-      if (!planRes.rows.length) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Rate plan not found for this room type' });
-      }
-      plan = planRes.rows[0];
-    } else if (viaApiKey) {
-      const anyPlan = await client.query(
-        `SELECT 1 FROM rate_plan WHERE room_type_id = $1 AND property_id = $2 AND status = 'active' LIMIT 1`,
-        [rateTypeId, req.property_id]
-      );
-      if (anyPlan.rows.length) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'rate_plan_id is required for this room type' });
+    const priced = [];
+    for (const stay of stays) priced.push(await priceStay(client, req, { stay, check_in, check_out, nights, viaApiKey }));
+    if (multi) {
+      const names = new Set(priced.map((p) => p.plan?.name.toLowerCase() ?? null));
+      if (names.size > 1) throw httpError(400, 'All rooms in a booking must be on one rate');
+      for (const [i, p] of priced.entries()) {
+        if ((p.stay.guests ?? 1) > p.maxOccupancy) throw httpError(400, `rooms[${i}] has more guests than the room type takes (${p.maxOccupancy})`);
       }
     }
+    // One rate per booking, so the first room's plan speaks for all.
+    const plan = priced[0].plan;
     const needsCard = !!plan && !pay_at_hotel;
     if (needsCard) {
       const { rows: [prop] } = await client.query(
         'SELECT stripe_secret_key, stripe_publishable_key, room_booking_url FROM property WHERE id = $1', [req.property_id]
       );
       if (!prop.stripe_secret_key || !prop.stripe_publishable_key) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Online payment is not set up for this property', details: 'Staff can book it as pay at hotel' });
+        throw httpError(409, 'Online payment is not set up for this property', 'Staff can book it as pay at hotel');
       }
       if (!viaApiKey && !prop.room_booking_url) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Set the room booking page link in Settings → Branding, or use pay at hotel' });
+        throw httpError(409, 'Set the room booking page link in Settings → Branding, or use pay at hotel');
       }
     }
 
-    // Nightly rate: a picked room's override, else the type's dated rate, else
-    // base. A type booking has no room yet, so overrides never apply to it.
-    const { rows: typeRateRows } = await client.query(
-      `SELECT date, rate FROM room_type_rate
-       WHERE room_type_id = $1 AND date >= $2 AND date < $3`,
-      [rateTypeId, check_in, check_out]
-    );
-    const typeRates = {};
-    for (const row of typeRateRows) typeRates[row.date] = parseFloat(row.rate);
-    const overrides = {};
-    if (room_id) {
-      const { rows: ov } = await client.query(
-        `SELECT date, override_rate FROM room_availability
-         WHERE room_id = $1 AND date = ANY($2::date[]) AND override_rate IS NOT NULL`, [room_id, nights]);
-      for (const row of ov) overrides[row.date] = parseFloat(row.override_rate);
-    }
-    const total = stayPrice(nights, typeRates, baseRate, overrides, plan ? plan.adjustment_pct : null);
     // Stripe refuses a zero charge: a free stay on a plan needs no card.
-    const card = needsCard && toCents(total) > 0;
+    const grandTotal = priced.reduce((a, p) => a + p.total, 0);
+    const card = needsCard && toCents(grandTotal) > 0;
     const status = card ? 'pending_payment' : 'confirmed';
     const payWindow = card ? PAY_WINDOW_MINUTES[viaApiKey ? 'api_key' : 'staff'] : null;
-    const terms = plan ? termsSnapshot(plan, { pay_at_hotel: !card }) : null;
-    const { rows: [inserted] } = await client.query(
-      `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata,
-                            status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout, room_type_id, room_pick, source, send_emails)
-       VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10,
-               CASE WHEN $11::int IS NULL THEN NULL ELSE now() + make_interval(mins => $11::int) END, $12, $13, $14, $15, $16) RETURNING id`,
-      [req.property_id, guest_id, check_in, check_out, guests || 1, total.toFixed(2), metadata ?? {},
-        status, plan?.id ?? null, terms, payWindow, card && viaApiKey, rateTypeId, !!room_id,
-        source ?? (viaApiKey ? 'web' : null), send_emails ?? true]
-    );
-    // Auto-assigns a room, takes the named one (bumping an auto-assigned
-    // holder), or holds the stay with no room against the oversell allowance.
-    try {
+    const groupId = priced.length > 1 ? crypto.randomUUID() : null;
+    // Lock every sold type up front, in a stable order, so two baskets can't
+    // deadlock taking each other's types (holdStay re-takes them: no-op).
+    for (const t of [...new Set(priced.map((p) => p.rateTypeId))].sort()) await roomNights.lockType(client, t);
+
+    const ids = [];
+    for (const p of priced) {
+      const terms = p.plan ? termsSnapshot(p.plan, { pay_at_hotel: !card }) : null;
+      const { rows: [inserted] } = await client.query(
+        `INSERT INTO booking (property_id, guest_id, room_id, check_in, check_out, guests, total_price, metadata,
+                              status, rate_plan_id, rate_plan_terms, payment_due_at, website_checkout, room_type_id, room_pick, source, send_emails, group_id)
+         VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10,
+                 CASE WHEN $11::int IS NULL THEN NULL ELSE now() + make_interval(mins => $11::int) END, $12, $13, $14, $15, $16, $17) RETURNING id`,
+        [req.property_id, guest_id, check_in, check_out, p.stay.guests || 1, p.total.toFixed(2), metadata ?? {},
+          status, p.plan?.id ?? null, terms, payWindow, card && viaApiKey, p.rateTypeId, !!p.roomId,
+          source ?? (viaApiKey ? 'web' : null), send_emails ?? true, groupId]
+      );
+      // Auto-assigns a room, takes the named one (bumping an auto-assigned
+      // holder), or holds the stay with no room against the oversell allowance.
       await roomNights.holdStay(client, {
-        propertyId: req.property_id, bookingId: inserted.id, roomTypeId: rateTypeId, nights,
-        pickRoomId: room_id ?? null, movedBy: req.user?.id ?? null,
+        propertyId: req.property_id, bookingId: inserted.id, roomTypeId: p.rateTypeId, nights,
+        pickRoomId: p.roomId, movedBy: req.user?.id ?? null,
       });
-    } catch (err) {
-      await client.query('ROLLBACK');
-      if (err.status === 409) return res.status(409).json({ error: err.message });
-      throw err;
+      ids.push(inserted.id);
     }
-    const booked = (await client.query('SELECT * FROM booking WHERE id = $1', [inserted.id])).rows[0];
 
     await client.query('COMMIT');
 
     // After COMMIT (see refreshAvailabilityView); also nudges channel sync.
     await roomPayments.refreshAvailabilityView();
 
-    // `booked` is only the raw `booking` row (INSERT ... RETURNING *) -- no
-    // guest/room/room_type fields. Re-fetch the joined shape so both the Ably
-    // payload and the HTTP response carry it, consistent with every other
-    // booking read (see fetchJoinedBooking).
-    const bookedFull = (await fetchJoinedBooking(booked.id)) ?? booked;
-
-    publishNewBooking(req.property_id, bookedFull).catch((err) => console.error('Ably publish failed:', err.message));
+    // The joined shape (guest/room/room_type fields), consistent with every
+    // other booking read (see fetchJoinedBooking), for Ably and the response.
+    const booked = [];
+    for (const id of ids) booked.push(await fetchJoinedBooking(id));
+    for (const b of booked) publishNewBooking(req.property_id, b).catch((err) => console.error('Ably publish failed:', err.message));
 
     // A website takes the card itself (payment-intent); staff bookings email
-    // the guest a pay link. Confirmed plan bookings get a confirmation.
-    if (booked.rate_plan_id && booked.status === 'confirmed') roomEmails.sendConfirmation(booked.id);
-    else if (booked.rate_plan_id && !viaApiKey) roomEmails.sendPayRequest(booked.id);
+    // the guest a pay link. Confirmed plan bookings get a confirmation. One
+    // email per booking, whatever its number of rooms.
+    if (plan && status === 'confirmed') roomEmails.sendConfirmation(ids[0]);
+    else if (plan && !viaApiKey) roomEmails.sendPayRequest(ids[0]);
 
-    res.status(201).json(bookedFull);
+    if (!multi) return res.status(201).json(booked[0]);
+    res.status(201).json({ group_id: groupId, total_price: grandTotal.toFixed(2), status, bookings: booked });
   } catch (err) {
     await client.query('ROLLBACK');
+    // Request problems answer here, as before (holdStay's 409 included).
+    if (err.status >= 400 && err.status < 500) return res.status(err.status).json({ error: err.message, ...(err.details && { details: err.details }) });
     next(err);
   } finally {
     client.release();

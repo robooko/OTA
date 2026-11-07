@@ -160,6 +160,73 @@ const ratePlans = require('../src/lib/ratePlans');
       assert.equal((await quote({ rooms: [{ adults: 1 }] }, null)).status, 400); // no key, no property_id
       assert.equal((await api('POST', '/api/availability/quote', { property_id: P, check_in: IN, check_out: OUT, rooms: [{ adults: 1 }] }, null)).status, 200);
     });
+
+    // ---- Task 3: multi-room create ----
+    const bookingsCtrl = require('../src/controllers/bookings');
+    const G = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'Ana', 'Guest', $2) RETURNING id`, [P, `ana-${tag}@example.test`])).id;
+    // Deleting bookings directly leaves their rooms' flags closed (= staff blocks): reopen them.
+    const clear = async () => {
+      await pool.query('DELETE FROM payment WHERE property_id = $1', [P]);
+      await pool.query('DELETE FROM booking WHERE property_id = $1', [P]);
+      await pool.query('UPDATE room_availability SET is_available = true WHERE property_id = $1', [P]);
+    };
+    const basket = (rooms, extra = {}) => ({ guest_id: G, check_in: IN, check_out: OUT, rooms, ...extra });
+    const fromQuote = (q) => q.rooms.map((r) => ({ room_type_id: r.room_type_id, rate_plan_id: r.rate_plan_id, guests: r.guests }));
+    await check('create: the quoted basket books as one group, pending one payment', async () => {
+      const r = await api('POST', '/api/bookings', basket(fromQuote(Q1)));
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      const bs = r.body.bookings;
+      assert.equal(bs.length, 2); assert.ok(r.body.group_id);
+      assert.ok(bs.every((b) => b.group_id === r.body.group_id && b.status === 'pending_payment' && b.website_checkout));
+      assert.equal(bs[0].payment_due_at, bs[1].payment_due_at);
+      assert.equal(bs.reduce((a, b) => a + Number(b.total_price), 0), Q1.total);
+      assert.equal(r.body.total_price, Q1.total.toFixed(2)); assert.equal(r.body.status, 'pending_payment');
+      assert.deepEqual(bs.map((b) => b.room_type_id), [STD, DLX]);
+    });
+    await clear();
+    await check('create: rooms on different rates is 400', async () => {
+      const r = await api('POST', '/api/bookings', basket([
+        { room_type_id: STD, rate_plan_id: plans[STD].Saver, guests: 2 }, { room_type_id: DLX, rate_plan_id: plans[DLX].Flex, guests: 2 }]));
+      assert.equal(r.status, 400); assert.match(r.body.error, /one rate/);
+    });
+    await check('create: plan missing on a plan type (website), too many guests, both forms: 400', async () => {
+      assert.equal((await api('POST', '/api/bookings', basket([{ room_type_id: DLX, rate_plan_id: plans[DLX].Saver }, { room_type_id: DLX }]))).status, 400);
+      const big = await api('POST', '/api/bookings', basket([{ room_type_id: STD, rate_plan_id: plans[STD].Saver, guests: 3 }, { room_type_id: DLX, rate_plan_id: plans[DLX].Saver }]));
+      assert.equal(big.status, 400); assert.match(big.body.error, /guests/);
+      assert.equal((await api('POST', '/api/bookings', basket([{ room_type_id: DLX, rate_plan_id: plans[DLX].Saver }], { room_type_id: DLX }))).status, 400);
+      assert.equal((await api('POST', '/api/bookings', basket(Array.from({ length: 11 }, () => ({ room_type_id: DLX }))))).status, 400);
+      assert.equal((await api('POST', '/api/bookings', basket([{ room_type_id: DLX, room_id: roomIds[1] }]))).status, 400);
+    });
+    const countRows = async () => Number((await one(
+      'SELECT (SELECT count(*) FROM booking WHERE property_id = $1) + (SELECT count(*) FROM booking_night WHERE property_id = $1) AS n', [P])).n);
+    await check('create: all or nothing (2 x Std, 1 in stock) is 409 and leaves no rows', async () => {
+      const r = await api('POST', '/api/bookings', basket([
+        { room_type_id: STD, rate_plan_id: plans[STD].Saver }, { room_type_id: STD, rate_plan_id: plans[STD].Saver }]));
+      assert.equal(r.status, 409);
+      assert.equal(await countRows(), 0);
+    });
+    await check('create: two baskets racing for the last Std: one wins, the loser leaves nothing', async () => {
+      const rooms = [{ room_type_id: DLX, rate_plan_id: plans[DLX].Saver }, { room_type_id: STD, rate_plan_id: plans[STD].Saver }];
+      const rs = await Promise.all([api('POST', '/api/bookings', basket(rooms)), api('POST', '/api/bookings', basket(rooms))]);
+      assert.deepEqual(rs.map((r) => r.status).sort(), [201, 409], JSON.stringify(rs.map((r) => r.body)));
+      assert.equal(Number((await one('SELECT count(*) AS n FROM booking WHERE property_id = $1', [P])).n), 2);
+    });
+    await clear();
+    await check('create: staff pay-at-hotel basket is confirmed', async () => {
+      const r = await staff(bookingsCtrl.createBooking, { body: basket([
+        { room_type_id: DLX, rate_plan_id: plans[DLX].Saver, guests: 2 }, { room_type_id: DLX, rate_plan_id: plans[DLX].Saver, guests: 3 }],
+      { pay_at_hotel: true, source: 'phone', send_emails: false }) });
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      assert.ok(r.body.bookings.every((b) => b.status === 'confirmed' && b.rate_plan_terms.pay_at_hotel));
+      assert.deepEqual(r.body.bookings.map((b) => b.guests), [2, 3]);
+    });
+    await clear();
+    await check('create: single-room request and response are unchanged', async () => {
+      const r = await api('POST', '/api/bookings', { guest_id: G, check_in: IN, check_out: OUT, room_type_id: DLX, rate_plan_id: plans[DLX].Saver });
+      assert.equal(r.status, 201); assert.ok(r.body.id); assert.equal(r.body.bookings, undefined); assert.equal(r.body.group_id, null);
+      assert.equal(Number(r.body.total_price), 270);
+    });
+    await clear();
   } finally {
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);
     await pool.query('DELETE FROM booking_extra WHERE booking_id IN (SELECT id FROM booking WHERE property_id = ANY($1))', [props]);
