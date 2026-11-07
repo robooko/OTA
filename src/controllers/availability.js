@@ -5,6 +5,20 @@ const { resolveSiteProperty, siteSelectors } = require('../lib/propertyResolver'
 const { applyAdjustment, cancelDeadline, effectiveMode } = require('../lib/ratePlans');
 const { refreshAvailabilityView } = require('../lib/roomPayments');
 const { requestSync } = require('../lib/channels/sync');
+const roomQuote = require('../lib/roomQuote');
+
+// The hotel a public site call is for: a key picks it (a per-property key, or
+// an org key + X-Property-Id / X-Property-Slug / X-Site-Host); a key that
+// matches nothing falls back to the public property_id. { error, status } on
+// a key that resolves to an error.
+async function resolvePublicProperty(req, propertyId) {
+  if (req.headers['x-api-key']) {
+    const site = await resolveSiteProperty(pool, siteSelectors(req));
+    if (site?.error) return { status: site.status, error: site.error };
+    if (site) return { propertyId: site.propertyId };
+  }
+  return { propertyId };
+}
 
 async function getRoomAvailability(req, res, next) {
   try {
@@ -68,16 +82,9 @@ async function getRoomTypeAvailability(req, res, next) {
 async function searchAvailability(req, res, next) {
   try {
     const { check_in, check_out, guests } = req.query;
-    let { property_id } = req.query;
-
-    // A key picks the hotel (a per-property key, or an org key +
-    // X-Property-Id / X-Property-Slug / X-Site-Host); a key that matches
-    // nothing falls back to the public ?property_id= as before.
-    if (req.headers['x-api-key']) {
-      const site = await resolveSiteProperty(pool, siteSelectors(req));
-      if (site?.error) return res.status(site.status).json({ error: site.error });
-      if (site) property_id = site.propertyId;
-    }
+    const site = await resolvePublicProperty(req, req.query.property_id);
+    if (site.error) return res.status(site.status).json({ error: site.error });
+    const property_id = site.propertyId;
 
     if (!check_in || !check_out || !guests || !property_id) {
       return res.status(400).json({ error: 'check_in, check_out, guests, and property_id are required (or supply a valid X-Api-Key)' });
@@ -257,7 +264,22 @@ async function refreshView(req, res, next) {
   }
 }
 
+// Multi-room basket quote (POST: rooms is a list). Public like search.
+async function quoteBasket(req, res, next) {
+  try {
+    const site = await resolvePublicProperty(req, req.body?.property_id);
+    if (site.error) return res.status(site.status).json({ error: site.error });
+    if (!site.propertyId || !isValidUuid(site.propertyId)) {
+      return res.status(400).json({ error: 'property_id is required (or supply a valid X-Api-Key)' });
+    }
+    res.json(await roomQuote.quote(pool, site.propertyId, req.body ?? {}));
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
+  quoteBasket,
   getRoomAvailability,
   getRoomTypeAvailability,
   searchAvailability,

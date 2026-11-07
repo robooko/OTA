@@ -88,6 +88,18 @@ function validatePlan(p) {
   return null;
 }
 
+// A stay's price: per night a room's override, else the type's dated rate,
+// else base; a plan's adjustment per night (null = no plan). Shared by
+// createBooking and the multi-room quote so both price alike.
+function stayPrice(nights, typeRates, baseRate, overrides, adjustmentPct) {
+  let total = 0;
+  for (const date of nights) {
+    const night = overrides[date] ?? typeRates[date] ?? baseRate;
+    total += adjustmentPct == null ? night : applyAdjustment(night, adjustmentPct);
+  }
+  return Math.round(total * 100) / 100;
+}
+
 // A multi-room booking has one rate (plan name), so every active plan with
 // that name at a property must share these terms; adjustment_pct may differ.
 const TERM_FIELDS = ['payment_mode', 'refundable', 'cancel_cutoff_hours', 'deposit_kind', 'deposit_value'];
@@ -113,5 +125,5 @@ function termsSnapshot(plan, { pay_at_hotel }) {
 module.exports = {
   PAY_WINDOW_MINUTES, HOLD_MAX_DAYS,
   applyAdjustment, cancelDeadline, effectiveMode, chargeAmountCents, guestCancelDecision, validatePlan, termsSnapshot,
-  TERM_FIELDS, sameTerms,
+  TERM_FIELDS, sameTerms, stayPrice,
 };

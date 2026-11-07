@@ -33,6 +33,23 @@ const ratePlans = require('../src/lib/ratePlans');
     assert.equal(ratePlans.sameTerms(a, { ...a, payment_mode: 'full', deposit_kind: null, deposit_value: null }), false);
   });
 
+  // ---- Task 2: pure ----
+  const { pickBasket } = require('../src/lib/roomQuote');
+  await check('pickBasket: lowest total under stock, picks forced', async () => {
+    const two = { A: { price: 100, max_occupancy: 2 }, B: { price: 150, max_occupancy: 4 } };
+    assert.deepEqual(pickBasket([{ guests: 2 }, { guests: 2 }], two, { A: 1, B: 5 }), { types: ['A', 'B'], total: 250 });
+    assert.deepEqual(pickBasket([{ guests: 3 }], two, { A: 1, B: 5 }), { types: ['B'], total: 150 });
+    assert.equal(pickBasket([{ guests: 2 }], two, { A: 0, B: 0 }), null);
+    // Greedy room-by-room would give room 0 the cheap A and room 1 the 300 C.
+    const g = { A: { price: 100, max_occupancy: 4 }, B: { price: 120, max_occupancy: 2 }, C: { price: 300, max_occupancy: 4 } };
+    assert.deepEqual(pickBasket([{ guests: 2 }, { guests: 4 }], g, { A: 1, B: 5, C: 5 }), { types: ['B', 'A'], total: 220 });
+    assert.deepEqual(pickBasket([{ guests: 2, pick: 'B' }, { guests: 2 }], two, { A: 1, B: 5 }), { types: ['B', 'A'], total: 250 });
+  });
+  await check('stayPrice: type rate, else base; adjustment per night', async () => {
+    assert.equal(ratePlans.stayPrice(['2030-01-01', '2030-01-02'], { '2030-01-01': 120 }, 100, {}, -10), 198);
+    assert.equal(ratePlans.stayPrice(['2030-01-01'], {}, 100, { '2030-01-01': 80 }, null), 80);
+  });
+
   // ---- HTTP ----
   const app = require('../src/app');
   const server = app.listen(0);
@@ -82,6 +99,67 @@ const ratePlans = require('../src/lib/ratePlans');
       assert.equal(arch.status, 200);
     });
     await pool.query('DELETE FROM rate_plan WHERE property_id = $1', [P]);
+
+    // ---- Task 2: quote ----
+    // Std: 2 guests, 100, 1 room. Dlx: 3 guests, 150, 3 rooms. Saver -10% full; Flex hold 48h.
+    const IN = '2031-03-10'; const OUT = '2031-03-12'; const N = 2;
+    const STD = await roomType('Std', 2, 100);
+    const DLX = await roomType('Dlx', 3, 150);
+    const roomIds = [];
+    for (const [t, nums] of [[STD, ['S1']], [DLX, ['D1', 'D2', 'D3']]]) {
+      for (const n of nums) roomIds.push((await one('INSERT INTO room (property_id, room_type_id, room_number) VALUES ($1, $2, $3) RETURNING id', [P, t, n])).id);
+    }
+    await pool.query(
+      `INSERT INTO room_availability (property_id, room_id, date)
+       SELECT $1, r, d::date FROM unnest($2::uuid[]) r, generate_series('2031-03-01'::date, '2031-03-31'::date, '1 day') d
+       ON CONFLICT DO NOTHING`, [P, roomIds]);
+    const plans = {};
+    for (const t of [STD, DLX]) {
+      plans[t] = {
+        Saver: (await staff(rp.createRatePlan, { params: { id: t }, body: { name: 'Saver', adjustment_pct: -10, refundable: false, payment_mode: 'full' } })).body.id,
+        Flex: (await staff(rp.createRatePlan, { params: { id: t }, body: { name: 'Flex', refundable: true, cancel_cutoff_hours: 48, payment_mode: 'hold' } })).body.id,
+      };
+    }
+    const quote = (body, key) => api('POST', '/api/availability/quote', { check_in: IN, check_out: OUT, ...body }, key);
+    let Q1;
+    await check('quote: cheapest types at the cheapest rate, options priced as deltas', async () => {
+      const r = await quote({ rooms: [{ adults: 2 }, { adults: 1, children: 1 }] });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      Q1 = r.body;
+      assert.equal(Q1.available, true); assert.equal(Q1.rate, 'Saver'); assert.equal(Q1.nights, N); assert.equal(Q1.currency, 'GBP');
+      assert.deepEqual(Q1.rooms.map((x) => x.room_type_id), [STD, DLX]);
+      assert.deepEqual(Q1.rooms.map((x) => x.rate_plan_id), [plans[STD].Saver, plans[DLX].Saver]);
+      assert.equal(Q1.rooms[1].guests, 2); assert.equal(Q1.rooms[1].children, 1);
+      assert.equal(Q1.total, (90 + 135) * N);
+      assert.equal(Q1.terms.payment_mode, 'full'); assert.equal(Q1.terms.name, 'Saver');
+      const opt = Q1.rooms[0].options.find((o) => o.room_type_id === DLX);
+      assert.equal(opt.price, 135 * N); assert.equal(opt.delta, 45 * N); assert.equal(opt.rate_plan_id, plans[DLX].Saver);
+      assert.equal(Q1.rooms[1].options.length, 0); // the only Std is in room 1
+      assert.deepEqual(Q1.rates.map((x) => [x.rate, x.total]), [['Saver', 450], ['Flex', 500]]);
+    });
+    await check('quote: a chosen rate and a picked type are honoured', async () => {
+      const r = await quote({ rate: 'Flex', rooms: [{ adults: 2, room_type_id: DLX }, { adults: 2 }] });
+      assert.equal(r.body.rate, 'Flex');
+      assert.deepEqual(r.body.rooms.map((x) => x.room_type_id), [DLX, STD]);
+      assert.deepEqual(r.body.rooms.map((x) => x.rate_plan_id), [plans[DLX].Flex, plans[STD].Flex]);
+      assert.equal(r.body.total, 500);
+    });
+    await check('quote: too many guests / not enough rooms come back unavailable', async () => {
+      const big = await quote({ rooms: [{ adults: 2 }, { adults: 5 }] });
+      assert.equal(big.status, 200); assert.equal(big.body.available, false);
+      assert.deepEqual(big.body.unavailable, [{ room: 1, reason: 'too_many_guests' }]);
+      const many = await quote({ rooms: Array.from({ length: 5 }, () => ({ adults: 1 })) });
+      assert.equal(many.body.available, false);
+      assert.deepEqual(many.body.unavailable, [{ room: null, reason: 'not_enough_rooms' }]);
+    });
+    await check('quote: bad input is 400', async () => {
+      assert.equal((await quote({ rooms: Array.from({ length: 11 }, () => ({ adults: 1 })) })).status, 400);
+      assert.equal((await quote({ rooms: [] })).status, 400);
+      assert.equal((await quote({ rooms: [{ adults: 0 }] })).status, 400);
+      assert.equal((await api('POST', '/api/availability/quote', { check_in: OUT, check_out: IN, rooms: [{ adults: 1 }] })).status, 400);
+      assert.equal((await quote({ rooms: [{ adults: 1 }] }, null)).status, 400); // no key, no property_id
+      assert.equal((await api('POST', '/api/availability/quote', { property_id: P, check_in: IN, check_out: OUT, rooms: [{ adults: 1 }] }, null)).status, 200);
+    });
   } finally {
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);
     await pool.query('DELETE FROM booking_extra WHERE booking_id IN (SELECT id FROM booking WHERE property_id = ANY($1))', [props]);

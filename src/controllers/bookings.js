@@ -3,7 +3,7 @@ const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { publishNewBooking, publishBookingStatusChanged } = require('../lib/ably');
 const { listOpenRoomBaskets } = require('../lib/roomBaskets');
 const { computeFolio, toCents } = require('../lib/folio');
-const { applyAdjustment, termsSnapshot, guestCancelDecision, PAY_WINDOW_MINUTES } = require('../lib/ratePlans');
+const { stayPrice, termsSnapshot, guestCancelDecision, PAY_WINDOW_MINUTES } = require('../lib/ratePlans');
 const roomEmails = require('../lib/roomBookingEmails');
 const roomPayments = require('../lib/roomPayments');
 const housekeeping = require('../lib/housekeeping');
@@ -269,11 +269,7 @@ async function createBooking(req, res, next) {
          WHERE room_id = $1 AND date = ANY($2::date[]) AND override_rate IS NOT NULL`, [room_id, nights]);
       for (const row of ov) overrides[row.date] = parseFloat(row.override_rate);
     }
-    let total = 0;
-    for (const date of nights) {
-      const night = overrides[date] ?? typeRates[date] ?? baseRate;
-      total += plan ? applyAdjustment(night, plan.adjustment_pct) : night;
-    }
+    const total = stayPrice(nights, typeRates, baseRate, overrides, plan ? plan.adjustment_pct : null);
     // Stripe refuses a zero charge: a free stay on a plan needs no card.
     const card = needsCard && toCents(total) > 0;
     const status = card ? 'pending_payment' : 'confirmed';

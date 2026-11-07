@@ -6,6 +6,7 @@ const { authenticate, authenticateOrApiKey, requireRoleOrApiKey } = require('../
 const staffOrFullKey = [authenticateOrApiKey, requireRoleOrApiKey('admin', 'staff')];
 
 router.get('/search', ctrl.searchAvailability);
+router.post('/quote', ctrl.quoteBasket);
 router.get('/types', authenticateOrApiKey, ctrl.getRoomTypeAvailability);
 router.get('/overrides', staffOrFullKey, ctrl.listOverrides);
 router.delete('/overrides/:id', staffOrFullKey, ctrl.deleteOverride);
