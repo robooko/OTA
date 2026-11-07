@@ -638,12 +638,12 @@ function roomEmailHtml({ branding, propertyName, greeting, lines, cta }) {
     </div>`;
 }
 
-async function sendRoomPayRequest({ to, name, propertyName, branding, stay, planName, amountDue, currency, payBy, payUrl, idempotencyKey }) {
+async function sendRoomPayRequest({ to, name, propertyName, branding, stay, stays, planName, amountDue, currency, payBy, payUrl, idempotencyKey }) {
   if (!client) throw new Error('Resend not configured');
   const greeting = name ? `Hi ${name},` : 'Hi there,';
   const lines = [
     `Your booking at ${propertyName} is waiting for payment.`,
-    roomStayLine(stay),
+    ...(stays ?? [stay]).map(roomStayLine),
     `Rate: ${planName}`,
     `Due now: ${formatMoney(Number(amountDue), currency)}`,
     `Please pay by ${payBy}, or the booking will be released.`,
@@ -659,12 +659,12 @@ async function sendRoomPayRequest({ to, name, propertyName, branding, stay, plan
   return data.id;
 }
 
-async function sendRoomConfirmation({ to, name, propertyName, branding, stay, planName, amountPaid, balanceDue, currency, cancelLine, manageUrl, idempotencyKey }) {
+async function sendRoomConfirmation({ to, name, propertyName, branding, stay, stays, planName, amountPaid, balanceDue, currency, cancelLine, manageUrl, idempotencyKey }) {
   if (!client) throw new Error('Resend not configured');
   const greeting = name ? `Hi ${name},` : 'Hi there,';
   const lines = [
     `Your stay at ${propertyName} is confirmed.`,
-    roomStayLine(stay),
+    ...(stays ?? [stay]).map(roomStayLine),
     `Rate: ${planName}`,
     `Paid: ${formatMoney(Number(amountPaid), currency)}`,
     ...(Number(balanceDue) > 0 ? [`Due at the hotel: ${formatMoney(Number(balanceDue), currency)}`] : []),

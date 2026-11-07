@@ -437,6 +437,77 @@ const ratePlans = require('../src/lib/ratePlans');
       assert.equal((await paymentsOf([b1.id, b2.id])).length, 2);
     });
     await clear();
+
+    // ---- Task 6: one basket, one reminder, one email ----
+    const resend = require('../src/lib/resend');
+    const roomBaskets = require('../src/lib/roomBaskets');
+    const tick = () => new Promise((r) => setTimeout(r, 300));
+    const stub = async (name, fn) => {
+      const real = resend[name]; const calls = [];
+      resend[name] = async (args) => { calls.push(args); return 'em_fake'; };
+      try { await fn(); await tick(); } finally { resend[name] = real; }
+      return calls.filter((c) => c.to === `ana-${tag}@example.test`);
+    };
+    await check('baskets: an abandoned 2-room checkout is one basket with both rooms', async () => {
+      const [b1, b2] = await webBasket('Saver');
+      await pool.query("UPDATE booking SET status = 'expired', payment_due_at = NULL WHERE id = ANY($1)", [[b1.id, b2.id]]);
+      const mine = (rows) => rows.filter((x) => [b1.id, b2.id].includes(x.id));
+      const r = await api('GET', '/api/bookings/baskets?limit=50');
+      assert.equal(r.status, 200);
+      const rows = mine(r.body);
+      assert.equal(rows.length, 1, JSON.stringify(r.body));
+      assert.equal(rows[0].items.length, 2); assert.equal(Number(rows[0].items_subtotal), 450);
+      assert.equal(rows[0].status, 'open');
+      // A later booking by the guest closes it.
+      await api('POST', '/api/bookings', { guest_id: G, check_in: IN, check_out: OUT, room_type_id: DLX, rate_plan_id: plans[DLX].Saver });
+      assert.equal(mine((await api('GET', '/api/bookings/baskets?limit=50')).body).length, 0);
+    });
+    await clear();
+    await check('baskets: one reminder lists every room', async () => {
+      const [b1, b2] = await webBasket('Saver');
+      await pool.query(
+        "UPDATE booking SET status = 'expired', payment_due_at = NULL, created_at = now() - interval '3 hours' WHERE id = ANY($1)", [[b1.id, b2.id]]);
+      await pool.query('UPDATE property SET basket_reminder_enabled = true, basket_reminder_delay_mins = 60 WHERE id = $1', [P]);
+      try {
+        const calls = await stub('sendBasketReminder', () => roomBaskets.sweep());
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].items.length, 2); assert.equal(Number(calls[0].subtotal), 450);
+        assert.equal(calls[0].idempotencyKey, `room-basket-reminder-${[b1.id, b2.id].sort()[0]}`);
+      } finally {
+        await pool.query('UPDATE property SET basket_reminder_enabled = false WHERE id = $1', [P]);
+      }
+    });
+    await clear();
+    await check('emails: a staff 2-room booking sends one pay request, then one confirmation', async () => {
+      let created;
+      const pay = await stub('sendRoomPayRequest', async () => {
+        created = await staff(bookingsCtrl.createBooking, { body: basket([
+          { room_type_id: STD, rate_plan_id: plans[STD].Saver, guests: 2 }, { room_type_id: DLX, rate_plan_id: plans[DLX].Saver, guests: 2 }],
+        { source: 'phone' }) });
+      });
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      assert.equal(pay.length, 1);
+      assert.equal(pay[0].stays.length, 2); assert.equal(Number(pay[0].amountDue), 450);
+      assert.equal(pay[0].idempotencyKey, `room-pay-request-${created.body.group_id}`);
+      const conf = await stub('sendRoomConfirmation', async () => {
+        assert.equal((await staff(bookingsCtrl.updateBooking, { params: { id: created.body.bookings[1].id }, body: { status: 'confirmed' } })).status, 200);
+      });
+      assert.equal(conf.length, 1);
+      assert.equal(conf[0].stays.length, 2); assert.equal(Number(conf[0].balanceDue), 450);
+      assert.equal(conf[0].idempotencyKey, `room-confirmation-${created.body.group_id}`);
+    });
+    await clear();
+    await check('emails: a single-room booking is emailed as before', async () => {
+      let created;
+      const pay = await stub('sendRoomPayRequest', async () => {
+        created = await staff(bookingsCtrl.createBooking, { body: {
+          guest_id: G, check_in: IN, check_out: OUT, room_type_id: DLX, rate_plan_id: plans[DLX].Saver, source: 'phone' } });
+      });
+      assert.equal(pay.length, 1); assert.equal(pay[0].stays, undefined);
+      assert.equal(pay[0].stay.room_type_name, 'Dlx');
+      assert.equal(pay[0].idempotencyKey, `room-pay-request-${created.body.id}`);
+    });
+    await clear();
   } finally {
     await pool.query('DELETE FROM payment WHERE property_id = ANY($1)', [props]);
     await pool.query('DELETE FROM booking_extra WHERE booking_id IN (SELECT id FROM booking WHERE property_id = ANY($1))', [props]);
