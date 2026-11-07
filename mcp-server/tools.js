@@ -119,6 +119,21 @@ function createTools(apiRequest) {
     run: (args) => apiRequest('GET', '/api/availability/search', { query: args }),
   },
   {
+    name: 'quote_room_basket',
+    description: 'Price a multi-room stay: each room (adults, children) is put on the cheapest room type that fits, at the cheapest rate for the whole basket (a rate = a rate plan name such as Saver or Flex; it applies to every room; null = room types with no plan). Returns rooms with room_type_id, rate_plan_id, price and options (other types, priced as delta), plus rates (every rate that fits, with total and terms). To change a room, pass its room_type_id; to change the rate, pass rate. Nothing is held: book it with create_booking rooms[] using each room\'s room_type_id, rate_plan_id and guests.',
+    inputSchema: {
+      check_in: z.string().describe('YYYY-MM-DD'),
+      check_out: z.string().describe('YYYY-MM-DD, exclusive'),
+      rooms: z.array(z.object({
+        adults: z.number().int().min(1),
+        children: z.number().int().min(0).optional(),
+        room_type_id: z.string().optional().describe('Keep this room on this type'),
+      })).min(1).max(10),
+      rate: z.string().nullable().optional().describe('Omit for the cheapest; a rate name; null = no online payment'),
+    },
+    run: (args) => apiRequest('POST', '/api/availability/quote', { body: args }),
+  },
+  {
     name: 'lookup_guest',
     description: 'Look up a guest by email',
     inputSchema: { email: z.string() },
@@ -157,7 +172,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'cancel_booking',
-    description: 'Cancel a booking and restore its room availability. A booking from a sales channel must be cancelled on the channel; force: true cancels it in OTA only.',
+    description: 'Cancel a booking and restore its room availability. A booking from a sales channel must be cancelled on the channel; force: true cancels it in OTA only. A multi-room booking (group_id) is cancelled whole, on its rate terms.',
     inputSchema: { id: z.string(), force: z.boolean().optional() },
     run: ({ id, force }) => apiRequest('DELETE', `/api/bookings/${id}`, force ? { query: { force: 'true' } } : undefined),
   },
@@ -380,7 +395,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'create_booking',
-    description: 'Book a room for a guest. Give exactly one of room_id (that room, kept for the guest; it may move an auto-assigned booking to another room of its type) or room_type_id (a free room of the type is auto-assigned; when the type is full but the property oversells, the booking waits without a room). On a rate plan the booking starts pending_payment until the guest pays by card.',
+    description: 'Book a room for a guest. Give exactly one of room_id (that room, kept for the guest; it may move an auto-assigned booking to another room of its type) or room_type_id (a free room of the type is auto-assigned; when the type is full but the property oversells, the booking waits without a room). On a rate plan the booking starts pending_payment until the guest pays by card. Several rooms: pass rooms[] instead of room_id/room_type_id/rate_plan_id/guests (use quote_room_basket first); they book as one booking, all or nothing, all on one rate.',
     inputSchema: {
       guest_id: z.string(),
       room_id: z.string().optional(),
@@ -389,6 +404,12 @@ function createTools(apiRequest) {
       check_out: z.string().describe('YYYY-MM-DD, exclusive'),
       guests: z.number().int().min(1).optional(),
       rate_plan_id: z.string().optional(),
+      rooms: z.array(z.object({
+        room_id: z.string().optional(),
+        room_type_id: z.string().optional(),
+        rate_plan_id: z.string().optional(),
+        guests: z.number().int().min(1).optional(),
+      })).min(1).max(10).optional().describe('Multi-room booking: one entry per room, each with exactly one of room_id or room_type_id'),
       source: z.enum(['web', 'phone', 'email', 'walk_in', 'agent', 'ota', 'corporate']).optional().describe('How the booking came in: web, phone, email, walk_in, agent (travel agent). Set it when booking for a guest who called, emailed or walked in.'),
       send_emails: z.boolean().optional().describe('Default true. false = the guest gets no emails for this booking: no pay link (send it yourself or it expires), confirmation, review request or cleanliness rating'),
       metadata: z.record(z.any()).optional().describe('Free-form JSON object kept on the booking'),
