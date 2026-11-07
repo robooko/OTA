@@ -81,6 +81,12 @@ app.post(
 // express.json() below then skips these requests (body already parsed).
 app.use('/api/marina', express.json({ limit: '2mb' }));
 app.use('/api/channels', express.json({ limit: '2mb' })); // bulk reservation imports
+// 500-item imports/bulks, and MCP tool calls carrying them (/api/mcp forwards
+// the same body to the route), are several hundred kB.
+app.use([
+  '/api/mcp', '/api/bookings/import', '/api/restaurant-orders/import', '/api/event-inquiries/bulk',
+  /^\/api\/spa\/[^/]+\/appointments\/(import|bulk)$/,
+], express.json({ limit: '5mb' }));
 app.use(express.json());
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
