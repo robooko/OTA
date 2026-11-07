@@ -755,10 +755,11 @@ async function purgeBookings(req, res, next) {
 // (property, external_ref). Nothing is emailed at creation; send_emails
 // (default false here) is stored for the later ones (review request,
 // cleanliness rating).
-// ponytail: confirmed/cancelled only -- an in-house or checked-out import
-// needs room assignment history; add when a past-dated load needs it.
+// Only confirmed holds nights (and so needs a free room). checked_out and
+// no_show are past stays: no nights, no availability check, any dates.
+// ponytail: no checked_in -- an in-house import needs a room; add when asked.
 const IMPORT_MAX = 500;
-const IMPORT_STATUSES = ['confirmed', 'cancelled'];
+const IMPORT_STATUSES = ['confirmed', 'cancelled', 'checked_out', 'no_show'];
 const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
 
 function invalidImportField(b) {

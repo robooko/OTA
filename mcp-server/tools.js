@@ -163,7 +163,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'import_bookings',
-    description: "Import up to 500 room bookings made elsewhere (another system, a dataset), each in its own transaction, in order. Takes each booking's own total_price, status (confirmed or cancelled), source and booked_at; the guest is matched by email or added. A confirmed booking holds its nights like any booking (rejected 'no room available' if the type is full). Re-importing an external_ref returns duplicate. Nothing is emailed at creation; send_emails (default false) only decides the later review request and cleanliness rating. Returns counts and a per-booking outcome (created | duplicate | rejected with reason). Undo with purge_bookings.",
+    description: "Import up to 500 room bookings made elsewhere (another system, a dataset), each in its own transaction, in order. Takes each booking's own total_price, status, source and booked_at; the guest is matched by email or added. A confirmed booking holds its nights like any booking (rejected 'no room available' if the type is full); checked_out and no_show are past stays with no availability check and no nights held. Re-importing an external_ref returns duplicate. Nothing is emailed at creation; send_emails (default false) only decides the later review request and cleanliness rating. Returns counts and a per-booking outcome (created | duplicate | rejected with reason). Undo with purge_bookings.",
     inputSchema: {
       send_emails: z.boolean().optional().describe("Default false for every booking; a booking's own send_emails wins"),
       bookings: z.array(z.object({
@@ -173,7 +173,7 @@ function createTools(apiRequest) {
         check_out: z.string().describe('YYYY-MM-DD, exclusive'),
         guests: z.number().int().positive().optional(),
         total_price: z.number().nonnegative().describe('Whole stay, property currency'),
-        status: z.enum(['confirmed', 'cancelled']).optional().describe('Default confirmed'),
+        status: z.enum(['confirmed', 'cancelled', 'checked_out', 'no_show']).optional().describe('Default confirmed; checked_out / no_show for past stays'),
         source: z.enum(['web', 'phone', 'email', 'walk_in', 'agent', 'ota', 'corporate']).optional().describe('ota = an online travel agency (put which one in metadata)'),
         booked_at: z.string().optional().describe('ISO timestamp the booking was made; default now'),
         metadata: z.record(z.any()).optional(),
@@ -353,7 +353,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'get_guest_summary',
-    description: "A guest's lifetime room stats: stays, nights, spend, last stay, cancellations, plus a guest score with its reasons",
+    description: "A guest's lifetime stats: room stays, nights, spend, first (guest since) and last stay, cancellations, spa and F&B spend, lifetime_spent across all of them, plus a guest score with its reasons",
     inputSchema: { id: z.string() },
     run: ({ id }) => apiRequest('GET', `/api/guests/${id}/summary`),
   },

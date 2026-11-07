@@ -20,6 +20,7 @@ const { importBookings } = require('../src/controllers/bookings');
 const { bulkCreateInquiries } = require('../src/controllers/eventInquiries');
 const { importOrders } = require('../src/controllers/restaurantOrders');
 const { importAppointments } = require('../src/controllers/spa');
+const { getGuestSummary } = require('../src/controllers/guests');
 
 (async () => {
   const one = async (sql, params) => (await pool.query(sql, params)).rows[0];
@@ -81,6 +82,20 @@ const { importAppointments } = require('../src/controllers/spa');
       const [c1, c2] = await Promise.all(r.body.results.map((x) => one('SELECT b.send_emails, g.email FROM booking b JOIN guest g ON g.id = b.guest_id WHERE b.id = $1', [x.booking_id])));
       assert.equal(c1.send_emails, true); assert.equal(c2.send_emails, false);
       assert.equal(c2.email, 'c2@import.invalid');
+    });
+
+    await check('bookings: checked_out / no_show are past stays with no availability check and no nights', async () => {
+      // 2024 has no room_availability rows, so a confirmed import there would be 'no room available'.
+      const r = await call(importBookings, { bookings: [
+        bk('P1', { status: 'checked_out', check_in: '2024-01-10', check_out: '2024-01-13', total_price: 3000000 }),
+        bk('P2', { status: 'no_show', check_in: '2024-01-10', check_out: '2024-01-12' }),
+        bk('P3', { status: 'checked_in', check_in: '2024-01-10', check_out: '2024-01-12' }),
+      ] });
+      assert.deepEqual(r.body.results.map((x) => x.outcome), ['created', 'created', 'rejected'], JSON.stringify(r.body));
+      for (const x of r.body.results.slice(0, 2)) {
+        assert.equal((await one('SELECT count(*)::int AS n FROM booking_night WHERE booking_id = $1', [x.booking_id])).n, 0);
+      }
+      assert.equal((await one('SELECT status FROM booking WHERE id = $1', [r.body.results[0].booking_id])).status, 'checked_out');
     });
 
     await check('bookings: bad bodies are 400', async () => {
@@ -182,6 +197,15 @@ const { importAppointments } = require('../src/controllers/spa');
       const t0 = Date.now();
       assert.deepEqual((await imp(big)).body.counts, { created: 500 });
       assert.ok(Date.now() - t0 < 3000, `500 appointments took ${Date.now() - t0}ms`);
+    });
+
+    await check('guest summary: first_stay + spa/F&B spend in lifetime_spent; cancelled/no_show left out', async () => {
+      const g = (await one(`SELECT id FROM guest WHERE property_id = $1 AND email = 'ayu@example.com'`, [P])).id;
+      const s = (await call(getGuestSummary, undefined, { id: g })).body;
+      // Rooms B1 + C1 (11.25M each) + P1 3M; B3 cancelled, P2 no_show out. Spa SP1, F&B TX1.
+      assert.equal(s.first_stay, '2024-01-10');
+      assert.equal(Number(s.spa_spent), 450000); assert.equal(Number(s.restaurant_spent), 205000);
+      assert.equal(s.lifetime_spent, '26155000.00');
     });
   } finally {
     await pool.query('DELETE FROM spa_appointment WHERE property_id = $1', [P]);

@@ -144,6 +144,21 @@ async function getGuestSummary(req, res, next) {
          COALESCE(AVG(b.check_out - b.check_in), 0)         AS avg_nights,
          COALESCE(SUM(b.check_out - b.check_in), 0)         AS total_nights,
          MAX(b.check_in)                                    AS last_stay,
+         (MIN(b.check_in) FILTER (WHERE b.status NOT IN ('cancelled', 'no_show', 'expired', 'pending_payment')))::text AS first_stay,
+         COALESCE(SUM(b.total_price) FILTER (WHERE b.status NOT IN ('cancelled', 'no_show', 'expired', 'pending_payment')), 0) AS rooms_spent,
+         COALESCE((
+           SELECT SUM(be.quantity * be.unit_price)
+           FROM booking_extra be JOIN booking sb ON sb.id = be.booking_id
+           WHERE sb.guest_id = $1 AND sb.property_id = $2 AND sb.status NOT IN ('cancelled', 'no_show', 'expired', 'pending_payment')
+         ), 0)                                              AS extras_spent,
+         COALESCE((
+           SELECT SUM(sa.price) FROM spa_appointment sa
+           WHERE sa.guest_id = $1 AND sa.property_id = $2 AND sa.status NOT IN ('cancelled', 'no_show')
+         ), 0)                                              AS spa_spent,
+         COALESCE((
+           SELECT SUM(ro.total_price) FROM restaurant_order ro
+           WHERE ro.guest_id = $1 AND ro.property_id = $2 AND ro.status <> 'cancelled'
+         ), 0)                                              AS restaurant_spent,
          COUNT(*) FILTER (WHERE b.status = 'confirmed')     AS confirmed,
          COUNT(*) FILTER (WHERE b.status = 'cancelled')     AS cancelled,
          COUNT(*) FILTER (WHERE b.status = 'expired')       AS expired,
@@ -176,7 +191,10 @@ async function getGuestSummary(req, res, next) {
       past_stays, past_spend, past_extras, last_stay: last_checkout,
       cancellations: summary.cancelled, check_in: new Date().toISOString().slice(0, 10),
     });
-    res.json({ ...summary, score: upgrade_score, score_reasons: upgrade_reasons });
+    const { rooms_spent, extras_spent, ...rest } = summary;
+    const lifetime_spent = [rooms_spent, extras_spent, rest.spa_spent, rest.restaurant_spent]
+      .reduce((sum, v) => sum + Number(v), 0).toFixed(2);
+    res.json({ ...rest, lifetime_spent, score: upgrade_score, score_reasons: upgrade_reasons });
   } catch (err) {
     next(err);
   }
