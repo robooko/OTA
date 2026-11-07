@@ -88,7 +88,7 @@ multi-room stay as one checkout.
 - **Same name = same terms (Robert: "a booking should have one rate").** Creating or updating a
   rate plan is refused with a 409 if another active plan with the same name at the property has
   different terms: `payment_mode`, `refundable`, `cancel_cutoff_hours`, `deposit_kind` or
-  `deposit_value`. `adjustment_pct` may differ per type. On live, all 6 properties already
+  `deposit_value`. `adjustment_pct` may differ per type. On live, the one property with rate plans (6 room types) already
   comply (checked 2026-11-07), so no data needs fixing.
   *(Claude's call)*
 - **When a room doesn't fit,** the quote still returns 200:
