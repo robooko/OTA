@@ -338,6 +338,7 @@ CREATE TABLE IF NOT EXISTS booking (
   website_checkout         BOOLEAN NOT NULL DEFAULT false, -- API-key card checkout: a room basket until paid
   basket_reminder_sent_at  TIMESTAMPTZ,
   basket_reminder_resend_email_id VARCHAR(255),
+  group_id    UUID,         -- rooms booked together (multi-room basket); null = booked alone
   created_at  TIMESTAMPTZ   DEFAULT now()
 );
 
@@ -382,6 +383,8 @@ CREATE TABLE IF NOT EXISTS booking_room_move (
   moved_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   moved_by     VARCHAR(255)
 );
+CREATE INDEX IF NOT EXISTS idx_booking_group ON booking(group_id) WHERE group_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_booking_room_move_booking ON booking_room_move(booking_id, moved_at);
 
 -- Oversell allowance per room type and night: the model's, and a manager's

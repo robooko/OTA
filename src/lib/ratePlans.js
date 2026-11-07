@@ -88,6 +88,14 @@ function validatePlan(p) {
   return null;
 }
 
+// A multi-room booking has one rate (plan name), so every active plan with
+// that name at a property must share these terms; adjustment_pct may differ.
+const TERM_FIELDS = ['payment_mode', 'refundable', 'cancel_cutoff_hours', 'deposit_kind', 'deposit_value'];
+const norm = (v) => (v == null ? null : typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)) ? Number(v) : v);
+function sameTerms(a, b) {
+  return TERM_FIELDS.every((k) => norm(a[k]) === norm(b[k]));
+}
+
 // What a booking keeps of its plan: enforcement reads this, never the live plan.
 function termsSnapshot(plan, { pay_at_hotel }) {
   return {
@@ -105,4 +113,5 @@ function termsSnapshot(plan, { pay_at_hotel }) {
 module.exports = {
   PAY_WINDOW_MINUTES, HOLD_MAX_DAYS,
   applyAdjustment, cancelDeadline, effectiveMode, chargeAmountCents, guestCancelDecision, validatePlan, termsSnapshot,
+  TERM_FIELDS, sameTerms,
 };

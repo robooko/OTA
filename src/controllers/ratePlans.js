@@ -1,5 +1,5 @@
 const pool = require('../db');
-const { validatePlan } = require('../lib/ratePlans');
+const { validatePlan, sameTerms } = require('../lib/ratePlans');
 
 // Rate plans (Saver/Flex) per room type -- see
 // docs/superpowers/specs/2026-10-30-room-rate-plans-design.md. No delete:
@@ -15,6 +15,22 @@ const DEFAULTS = {
 async function roomTypeExists(id, propertyId) {
   const { rows } = await pool.query('SELECT 1 FROM room_type WHERE id = $1 AND property_id = $2', [id, propertyId]);
   return rows.length > 0;
+}
+
+// Same name = same terms (multi-room spec): a booking has one rate, so its
+// rooms' plans must pay and cancel alike. Returns a 409 body or null.
+async function nameClash(propertyId, plan, selfId = null) {
+  if (plan.status !== 'active') return null;
+  const { rows } = await pool.query(
+    `SELECT * FROM rate_plan
+     WHERE property_id = $1 AND status = 'active' AND lower(name) = lower($2) AND ($3::uuid IS NULL OR id <> $3)`,
+    [propertyId, plan.name, selfId]
+  );
+  if (rows.every((r) => sameTerms(r, plan))) return null;
+  return {
+    error: `A rate plan named "${plan.name}" already exists with different payment or cancellation terms`,
+    details: 'Plans with the same name must share payment_mode, refundable, cancel_cutoff_hours and deposit',
+  };
 }
 
 function pick(body) {
@@ -44,6 +60,8 @@ async function createRatePlan(req, res, next) {
     const plan = { ...DEFAULTS, ...pick(req.body) };
     const error = validatePlan(plan);
     if (error) return res.status(400).json({ error });
+    const clash = await nameClash(req.property_id, plan);
+    if (clash) return res.status(409).json(clash);
     const { rows } = await pool.query(
       `INSERT INTO rate_plan (property_id, room_type_id, ${FIELDS.join(', ')})
        VALUES ($1, $2, ${FIELDS.map((_, i) => `$${i + 3}`).join(', ')}) RETURNING *`,
@@ -69,6 +87,8 @@ async function updateRatePlan(req, res, next) {
     if (plan.deposit_value != null) plan.deposit_value = Number(plan.deposit_value);
     const error = validatePlan(plan);
     if (error) return res.status(400).json({ error });
+    const clash = await nameClash(req.property_id, plan, current.id);
+    if (clash) return res.status(409).json(clash);
     const { rows } = await pool.query(
       `UPDATE rate_plan SET ${FIELDS.map((k, i) => `${k} = $${i + 2}`).join(', ')}
        WHERE id = $1 RETURNING *`,
