@@ -1693,7 +1693,7 @@ async function importAppointments(req, res, next) {
     const valid = entries.filter((e) => !e.out);
     const uniq = (xs) => [...new Set(xs)];
     const [existing, treatments, therapists, guests] = await Promise.all([
-      q('SELECT id, external_ref FROM spa_appointment WHERE property_id = $1 AND external_ref = ANY($2::varchar[])',
+      q('SELECT id, external_ref, guest_id FROM spa_appointment WHERE property_id = $1 AND external_ref = ANY($2::varchar[])',
         [propertyId, uniq(valid.map((e) => e.a.external_ref))]),
       q('SELECT id, lower(name) AS lname, duration_mins, COALESCE(price, member_price) AS price FROM spa_treatment WHERE property_id = $1 AND spa_id = $2', [propertyId, spaId]),
       q('SELECT id, lower(name) AS lname FROM spa_therapist WHERE property_id = $1 AND spa_id = $2', [propertyId, spaId]),
@@ -1709,13 +1709,23 @@ async function importAppointments(req, res, next) {
     const findTreatment = finder(treatments);
     const findTherapist = finder(therapists);
     const refIds = new Map(existing.map((r) => [r.external_ref, r.id]));
+    const guestlessIds = new Set(existing.filter((r) => !r.guest_id).map((r) => r.id));
+    const link = [];
     const guestByEmail = new Map(guests.map((g) => [g.email, g]));
 
     const rows = [];
     const seen = new Set();
     for (const e of valid) {
       const { a } = e;
-      if (refIds.has(a.external_ref) || seen.has(a.external_ref)) { e.out = { outcome: 'duplicate' }; continue; }
+      if (refIds.has(a.external_ref)) {
+        // Re-import relinks: an existing row with no guest gets this guest; nothing else changes.
+        const id = refIds.get(a.external_ref);
+        const guest = guestlessIds.has(id) && a.guest_email ? guestByEmail.get(a.guest_email.trim().toLowerCase()) : undefined;
+        if (guest) link.push({ id, guest_id: guest.id, e });
+        e.out = { outcome: 'duplicate' };
+        continue;
+      }
+      if (seen.has(a.external_ref)) { e.out = { outcome: 'duplicate' }; continue; }
       const treatment = findTreatment(a.treatment_id, a.treatment_name);
       if (!treatment) { e.out = { outcome: 'rejected', reason: 'treatment not found' }; continue; }
       const therapist = findTherapist(a.therapist_id, a.therapist_name);
@@ -1760,6 +1770,17 @@ async function importAppointments(req, res, next) {
         }
       }
       for (const e of valid) if (!e.out) e.out = { outcome: created.has(e.a.external_ref) ? 'created' : 'duplicate' };
+    }
+    if (link.length) {
+      // One row per id (first email wins); guest_id IS NULL so a concurrent link isn't overwritten.
+      const byId = new Map();
+      for (const l of link) if (!byId.has(l.id)) byId.set(l.id, l);
+      const linked = new Set((await q(
+        `UPDATE spa_appointment t SET guest_id = l.guest_id
+           FROM jsonb_to_recordset($2::jsonb) AS l(id uuid, guest_id uuid)
+          WHERE t.id = l.id AND t.property_id = $1 AND t.guest_id IS NULL RETURNING t.id`,
+        [propertyId, JSON.stringify([...byId.values()].map(({ id, guest_id }) => ({ id, guest_id })))])).map((r) => r.id));
+      for (const l of byId.values()) if (linked.has(l.id)) l.e.out = { outcome: 'linked' };
     }
     for (const e of valid) if (e.out.outcome !== 'rejected') e.out.appointment_id = refIds.get(e.a.external_ref) ?? null;
 

@@ -199,6 +199,32 @@ const { getGuestSummary } = require('../src/controllers/guests');
       assert.ok(Date.now() - t0 < 3000, `500 appointments took ${Date.now() - t0}ms`);
     });
 
+    await check('re-import links a guestless order / appointment to guest_email; nothing else changes', async () => {
+      const R = (await one(`SELECT id FROM restaurant WHERE property_id = $1`, [P])).id;
+      const S = (await one(`SELECT id FROM spa WHERE property_id = $1`, [P])).id;
+      const before = await one(`SELECT * FROM restaurant_order WHERE property_id = $1 AND external_ref = 'TX2'`, [P]);
+      const o = await call(importOrders, { orders: [
+        { external_ref: 'TX2', restaurant_id: R, ordered_at: '2020-01-01T00:00:00Z', guest_email: ' AYU@example.com', items: [{ item_name: 'X', unit_price: 1 }] },
+        { external_ref: 'TX2', restaurant_id: R, ordered_at: '2020-01-01T00:00:00Z', guest_email: 'ayu@example.com', items: [{ item_name: 'X', unit_price: 1 }] },
+        { external_ref: 'TX1', restaurant_id: R, ordered_at: '2020-01-01T00:00:00Z', guest_email: 'ayu@example.com', items: [{ item_name: 'X', unit_price: 1 }] },
+        { external_ref: 'B1', restaurant_id: R, ordered_at: '2020-01-01T00:00:00Z', guest_email: 'nobody@example.com', items: [{ item_name: 'X', unit_price: 1 }] },
+        { external_ref: 'B2', restaurant_id: R, ordered_at: '2020-01-01T00:00:00Z', items: [{ item_name: 'X', unit_price: 1 }] },
+      ] });
+      assert.deepEqual(o.body.results.map((x) => x.outcome), ['linked', 'duplicate', 'duplicate', 'duplicate', 'duplicate'], JSON.stringify(o.body));
+      assert.equal(o.body.results[0].order_id, before.id);
+      const after = await one('SELECT * FROM restaurant_order WHERE id = $1', [before.id]);
+      assert.ok(after.guest_id);
+      assert.deepEqual({ ...after, guest_id: null, updated_at: null }, { ...before, guest_id: null, updated_at: null });
+      assert.equal((await call(importOrders, { orders: [{ external_ref: 'TX2', restaurant_id: R, ordered_at: '2020-01-01T00:00:00Z', guest_email: 'ayu@example.com', items: [{ item_name: 'X', unit_price: 1 }] }] })).body.results[0].outcome, 'duplicate', 'already linked');
+      const a = await call(importAppointments, { appointments: [
+        { external_ref: 'SP2', treatment_name: 'Nope', therapist_name: 'Nope', date: '2020-01-01', start_time: '09:00', guest_email: 'ayu@example.com' },
+        { external_ref: 'SP1', treatment_name: 'Nope', therapist_name: 'Nope', date: '2020-01-01', start_time: '09:00', guest_email: 'ayu@example.com' },
+      ] }, { spa_id: S });
+      assert.deepEqual(a.body.results.map((x) => x.outcome), ['linked', 'duplicate'], JSON.stringify(a.body));
+      const a2 = await one(`SELECT guest_id, contact_name, status, price FROM spa_appointment WHERE property_id = $1 AND external_ref = 'SP2'`, [P]);
+      assert.ok(a2.guest_id); assert.equal(a2.contact_name, 'Walk-in'); assert.equal(a2.status, 'cancelled'); assert.equal(a2.price, '300000.00');
+    });
+
     await check('guest summary: first_stay + spa/F&B spend in lifetime_spent; cancelled/no_show left out', async () => {
       const g = (await one(`SELECT id FROM guest WHERE property_id = $1 AND email = 'ayu@example.com'`, [P])).id;
       const s = (await call(getGuestSummary, undefined, { id: g })).body;

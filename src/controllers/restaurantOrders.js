@@ -883,7 +883,7 @@ async function importOrders(req, res, next) {
     const q = async (sql, params) => (await pool.query(sql, params)).rows;
 
     const [existing, restaurants, guests] = await Promise.all([
-      q('SELECT id, external_ref FROM restaurant_order WHERE property_id = $1 AND external_ref = ANY($2::varchar[])',
+      q('SELECT id, external_ref, guest_id FROM restaurant_order WHERE property_id = $1 AND external_ref = ANY($2::varchar[])',
         [propertyId, uniq(valid.map((e) => e.o.external_ref))]),
       q('SELECT id FROM restaurant WHERE property_id = $1 AND id = ANY($2::uuid[])',
         [propertyId, uniq(valid.map((e) => e.o.restaurant_id))]),
@@ -894,6 +894,8 @@ async function importOrders(req, res, next) {
     const menu = await q('SELECT id, restaurant_id, lower(name) AS lname FROM restaurant_menu_item WHERE property_id = $1 AND restaurant_id = ANY($2::uuid[])',
       [propertyId, [...restaurantIds]]);
     const refIds = new Map(existing.map((r) => [r.external_ref, r.id]));
+    const guestlessIds = new Set(existing.filter((r) => !r.guest_id).map((r) => r.id));
+    const link = [];
     const guestByEmail = new Map(guests.map((g) => [g.email, g]));
     const menuById = new Map(menu.map((m) => [m.id, m]));
     const menuByName = new Map();
@@ -904,7 +906,15 @@ async function importOrders(req, res, next) {
     const seen = new Set();
     for (const e of valid) {
       const { o } = e;
-      if (refIds.has(o.external_ref) || seen.has(o.external_ref)) { e.out = { outcome: 'duplicate' }; continue; }
+      if (refIds.has(o.external_ref)) {
+        // Re-import relinks: an existing row with no guest gets this guest; nothing else changes.
+        const id = refIds.get(o.external_ref);
+        const guest = guestlessIds.has(id) && o.guest_email ? guestByEmail.get(o.guest_email.trim().toLowerCase()) : undefined;
+        if (guest) link.push({ id, guest_id: guest.id, e });
+        e.out = { outcome: 'duplicate' };
+        continue;
+      }
+      if (seen.has(o.external_ref)) { e.out = { outcome: 'duplicate' }; continue; }
       if (!restaurantIds.has(o.restaurant_id)) { e.out = { outcome: 'rejected', reason: 'restaurant not found' }; continue; }
       const lines = o.items.map((it) => {
         const name = it.item_name.trim();
@@ -957,6 +967,17 @@ async function importOrders(req, res, next) {
       for (const e of valid) {
         if (!e.out) e.out = created.has(e.o.external_ref) ? { outcome: 'created' } : { outcome: 'duplicate' };
       }
+    }
+    if (link.length) {
+      // One row per id (first email wins); guest_id IS NULL so a concurrent link isn't overwritten.
+      const byId = new Map();
+      for (const l of link) if (!byId.has(l.id)) byId.set(l.id, l);
+      const linked = new Set((await q(
+        `UPDATE restaurant_order t SET guest_id = l.guest_id
+           FROM jsonb_to_recordset($2::jsonb) AS l(id uuid, guest_id uuid)
+          WHERE t.id = l.id AND t.property_id = $1 AND t.guest_id IS NULL RETURNING t.id`,
+        [propertyId, JSON.stringify([...byId.values()].map(({ id, guest_id }) => ({ id, guest_id })))])).map((r) => r.id));
+      for (const l of byId.values()) if (linked.has(l.id)) l.e.out = { outcome: 'linked' };
     }
     for (const e of valid) if (e.out.outcome !== 'rejected') e.out.order_id = refIds.get(e.o.external_ref) ?? null;
 
