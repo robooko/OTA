@@ -18,6 +18,9 @@ async function createPayment(req, res, next) {
     if (!booking_id || amount == null) {
       return res.status(400).json({ error: 'booking_id and amount are required' });
     }
+    if (!(Number(amount) > 0)) {
+      return res.status(400).json({ error: 'amount must be a positive number' });
+    }
 
     // Verify booking exists and belongs to the caller's property
     const bookingCheck = await pool.query(
