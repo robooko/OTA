@@ -13,6 +13,7 @@ const { sendAppointmentConfirmation, sendAppointmentCancellation, sendAppointmen
 const { optOut } = require('./reviews');
 const { memberRateUntil, resolveRate } = require('../lib/spaMemberRate');
 const guard = require('../lib/spaBookingGuard');
+const { attachStays } = require('../lib/stayLink');
 
 // Public base for links in emails that land back on this API -- same
 // hard-coded host reminders.js/reviewRequester.js use for their opt-outs.
@@ -1693,7 +1694,7 @@ async function importAppointments(req, res, next) {
     const valid = entries.filter((e) => !e.out);
     const uniq = (xs) => [...new Set(xs)];
     const [existing, treatments, therapists, guests] = await Promise.all([
-      q('SELECT id, external_ref, guest_id FROM spa_appointment WHERE property_id = $1 AND external_ref = ANY($2::varchar[])',
+      q('SELECT id, external_ref, guest_id, booking_id FROM spa_appointment WHERE property_id = $1 AND external_ref = ANY($2::varchar[])',
         [propertyId, uniq(valid.map((e) => e.a.external_ref))]),
       q('SELECT id, lower(name) AS lname, duration_mins, COALESCE(price, member_price) AS price FROM spa_treatment WHERE property_id = $1 AND spa_id = $2', [propertyId, spaId]),
       q('SELECT id, lower(name) AS lname FROM spa_therapist WHERE property_id = $1 AND spa_id = $2', [propertyId, spaId]),
@@ -1782,7 +1783,16 @@ async function importAppointments(req, res, next) {
         [propertyId, JSON.stringify([...byId.values()].map(({ id, guest_id }) => ({ id, guest_id })))])).map((r) => r.id));
       for (const l of byId.values()) if (linked.has(l.id)) l.e.out = { outcome: 'linked' };
     }
-    for (const e of valid) if (e.out.outcome !== 'rejected') e.out.appointment_id = refIds.get(e.a.external_ref) ?? null;
+    // Every row in the batch with a guest but no stay gets the guest's stay covering its day.
+    const priorBooking = new Map(existing.map((r) => [r.id, r.booking_id]));
+    const kept = valid.filter((e) => e.out.outcome !== 'rejected');
+    const attached = await attachStays('spa_appointment', propertyId, uniq(kept.map((e) => refIds.get(e.a.external_ref)).filter(Boolean)));
+    for (const e of kept) {
+      const id = refIds.get(e.a.external_ref) ?? null;
+      e.out.appointment_id = id;
+      e.out.booking_id = attached.get(id) ?? priorBooking.get(id) ?? null;
+      if (e.out.outcome === 'duplicate' && attached.has(id)) e.out.outcome = 'linked';
+    }
 
     const results = entries.map((e) => ({ index: e.index, external_ref: e.a.external_ref ?? null, ...e.out }));
     const counts = {};

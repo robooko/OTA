@@ -1176,6 +1176,9 @@ CREATE INDEX IF NOT EXISTS idx_spa_appointment_property  ON spa_appointment(prop
 -- migrate-2026-11-06-spa-appointment-import.sql); re-imports skip it.
 ALTER TABLE spa_appointment ADD COLUMN IF NOT EXISTS external_ref VARCHAR(100);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_spa_appointment_external_ref ON spa_appointment (property_id, external_ref) WHERE external_ref IS NOT NULL;
+-- The stay whose folio carries it (set by the import) -- see migrate-2026-11-07-spa-appointment-booking.sql.
+ALTER TABLE spa_appointment ADD COLUMN IF NOT EXISTS booking_id UUID REFERENCES booking(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_spa_appointment_booking ON spa_appointment(booking_id);
 
 -- ── Beach Club ────────────────────────────────────────────────────────────────
 

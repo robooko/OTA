@@ -21,6 +21,7 @@ const { bulkCreateInquiries } = require('../src/controllers/eventInquiries');
 const { importOrders } = require('../src/controllers/restaurantOrders');
 const { importAppointments } = require('../src/controllers/spa');
 const { getGuestSummary } = require('../src/controllers/guests');
+const { computeFolio } = require('../src/lib/folio');
 
 (async () => {
   const one = async (sql, params) => (await pool.query(sql, params)).rows[0];
@@ -232,6 +233,41 @@ const { getGuestSummary } = require('../src/controllers/guests');
       assert.equal(s.first_stay, '2024-01-10');
       assert.equal(Number(s.spa_spent), 450000); assert.equal(Number(s.restaurant_spent), 205000);
       assert.equal(s.lifetime_spent, '26155000.00');
+    });
+
+    await check("imports attach the guest's stay covering the day (check-out day, local time); folio lists them, paid ones not owed", async () => {
+      const R = (await one(`SELECT id FROM restaurant WHERE property_id = $1`, [P])).id;
+      const S = (await one(`SELECT id FROM spa WHERE property_id = $1`, [P])).id;
+      const ref = async (r) => (await one(`SELECT id FROM booking WHERE property_id = $1 AND external_ref = $2`, [P, r])).id;
+      const [P1, B1] = [await ref('P1'), await ref('B1')];
+      const ord = (external_ref, ordered_at, extra) => ({ external_ref, restaurant_id: R, ordered_at, guest_email: 'ayu@example.com', items: [{ item_name: 'Kopi', unit_price: 30000 }], ...extra });
+      const o = await call(importOrders, { orders: [
+        ord('ST1', '2024-01-12T23:30:00Z'),               // 07:30 WITA on 2024-01-13, P1's check-out day
+        ord('ST2', '2024-01-11T04:00:00Z', { paid: false }), // P1 and no-show P2 both cover: P1
+        ord('ST3', `${day(31)}T04:00:00Z`),                // cancelled B3 and confirmed B1 cover: B1
+        ord('ST4', '2025-06-01T04:00:00Z'),                // no stay
+        ord('ST5', '2024-01-11T04:00:00Z', { guest_email: undefined }), // no guest
+        ord('ST6', '2024-03-05T04:00:00Z'),
+      ] });
+      assert.deepEqual(o.body.results.map((x) => [x.outcome, x.booking_id]),
+        [['created', P1], ['created', P1], ['created', B1], ['created', null], ['created', null], ['created', null]], JSON.stringify(o.body));
+      // A stay imported later: the re-run attaches it, then is a duplicate.
+      const P4 = (await call(importBookings, { bookings: [bk('P4', { status: 'checked_out', check_in: '2024-03-04', check_out: '2024-03-06', total_price: 1000000 })] })).body.results[0].booking_id;
+      const again = await call(importOrders, { orders: [ord('ST6', '2020-01-01T00:00:00Z'), ord('ST1', '2020-01-01T00:00:00Z')] });
+      assert.deepEqual(again.body.results.map((x) => [x.outcome, x.booking_id]), [['linked', P4], ['duplicate', P1]]);
+      assert.equal((await call(importOrders, { orders: [ord('ST6', '2020-01-01T00:00:00Z')] })).body.results[0].outcome, 'duplicate');
+
+      const spa = (external_ref, date, extra) => ({ external_ref, treatment_name: 'Balinese Massage', therapist_name: 'Wayan', date, start_time: '09:00', guest_email: 'ayu@example.com', ...extra });
+      const a = await call(importAppointments, { appointments: [spa('SS1', '2024-01-13'), spa('SS2', '2024-01-12', { status: 'cancelled' }), spa('SS3', '2024-02-01')] }, { spa_id: S });
+      assert.deepEqual(a.body.results.map((x) => [x.outcome, x.booking_id]), [['created', P1], ['created', P1], ['created', null]], JSON.stringify(a.body));
+      // SP1 (2026-09-01) predates this; re-run leaves it with no stay.
+      assert.equal((await call(importAppointments, { appointments: [spa('SP1', '2020-01-01')] }, { spa_id: S })).body.results[0].booking_id, null);
+
+      const f = await computeFolio(P1, P);
+      const lines = f.items.map((i) => [i.type, i.amount, i.paid ?? null]);
+      assert.deepEqual(lines, [['room', '3000000.00', null], ['room_service', '30000.00', false], ['room_service', '30000.00', true], ['spa', '450000.00', true]], JSON.stringify(f.items));
+      assert.equal(f.charges_total, '3030000.00', 'paid at the outlet = listed, not owed; cancelled spa left off');
+      assert.equal(f.balance, '3030000.00');
     });
   } finally {
     await pool.query('DELETE FROM spa_appointment WHERE property_id = $1', [P]);

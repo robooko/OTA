@@ -502,7 +502,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'get_booking_folio',
-    description: "A booking's folio: room, extras, room service and adjustment lines, payments, and balance",
+    description: "A booking's folio: room, extras, room service, spa, adjustment and minibar lines, payments, and balance. Lines with paid: true were settled at the outlet and are not in the balance",
     inputSchema: { id: z.string().describe('Booking id') },
     run: ({ id }) => apiRequest('GET', `/api/bookings/${id}/folio`),
   },
@@ -1049,7 +1049,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'import_restaurant_orders',
-    description: "Import up to 500 past restaurant/bar orders (POS receipts, a dataset), all in one statement: status delivered (or cancelled), paid at ordered_at unless paid: false, items at their own prices (each linked to this restaurant's menu item of that name when one exists; total = sum of items). guest_email links an existing guest. No contact email is stored, so nothing is ever emailed for an imported order. Re-importing an external_ref returns duplicate, or linked when that order had no guest and guest_email matches one (only the guest is set; nothing is emailed), so a rerun after the bookings import relinks guests. Returns counts and a per-order outcome (created | duplicate | linked | rejected with reason).",
+    description: "Import up to 500 past restaurant/bar orders (POS receipts, a dataset), all in one statement: status delivered (or cancelled), paid at ordered_at unless paid: false, items at their own prices (each linked to this restaurant's menu item of that name when one exists; total = sum of items). guest_email links an existing guest. No contact email is stored, so nothing is ever emailed for an imported order. Re-importing an external_ref returns duplicate, or linked when that order had no guest and guest_email matches one (only the guest is set; nothing is emailed), so a rerun after the bookings import relinks guests. A row with a guest and no stay gets that guest's non-cancelled stay covering its day (check-out day counts) as booking_id, so it lands on that stay's folio; a rerun after the bookings import attaches them (outcome linked). Returns counts and a per-order outcome (created | duplicate | linked | rejected with reason) with order_id and booking_id.",
     inputSchema: {
       orders: z.array(z.object({
         external_ref: z.string().max(100).describe('Id in the source system; unique per property'),
@@ -2101,7 +2101,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'import_spa_appointments',
-    description: "Import up to 500 past spa appointments at one spa (history from another system). No availability, working-hours or past-time checks. Status completed (or cancelled), paid at the start time unless paid: false. Treatment and therapist by id or by name (case-insensitive); end_time defaults to start + the treatment's duration, price to the treatment's price. guest_email links an existing guest. No contact email is stored and guest emails are off, so nothing is ever emailed or texted. Re-importing an external_ref returns duplicate, or linked when that appointment had no guest and guest_email matches one (only the guest is set; nothing is emailed), so a rerun after the bookings import relinks guests. Returns counts and a per-appointment outcome (created | duplicate | linked | rejected with reason).",
+    description: "Import up to 500 past spa appointments at one spa (history from another system). No availability, working-hours or past-time checks. Status completed (or cancelled), paid at the start time unless paid: false. Treatment and therapist by id or by name (case-insensitive); end_time defaults to start + the treatment's duration, price to the treatment's price. guest_email links an existing guest. No contact email is stored and guest emails are off, so nothing is ever emailed or texted. Re-importing an external_ref returns duplicate, or linked when that appointment had no guest and guest_email matches one (only the guest is set; nothing is emailed), so a rerun after the bookings import relinks guests. A row with a guest and no stay gets that guest's non-cancelled stay covering its day (check-out day counts) as booking_id, so it lands on that stay's folio; a rerun after the bookings import attaches them (outcome linked). Returns counts and a per-appointment outcome (created | duplicate | linked | rejected with reason) with appointment_id and booking_id.",
     inputSchema: {
       spa_id: z.string(),
       appointments: z.array(z.object({

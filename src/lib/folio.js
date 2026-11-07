@@ -26,7 +26,7 @@ async function computeFolio(bookingId, propertyId) {
   if (!bookingRes.rows.length) return null;
   const booking = bookingRes.rows[0];
 
-  const [extrasRes, ordersRes, adjustmentsRes, paymentsRes, minibarRes] = await Promise.all([
+  const [extrasRes, ordersRes, adjustmentsRes, paymentsRes, minibarRes, spaRes] = await Promise.all([
     pool.query(
       `SELECT be.id, be.quantity, be.unit_price, e.name
        FROM booking_extra be
@@ -36,7 +36,7 @@ async function computeFolio(bookingId, propertyId) {
       [bookingId]
     ),
     pool.query(
-      `SELECT o.id, o.total_price, o.created_at, r.name AS restaurant_name
+      `SELECT o.id, o.total_price, o.created_at, o.payment_status, r.name AS restaurant_name
        FROM restaurant_order o
        JOIN restaurant r ON r.id = o.restaurant_id
        WHERE o.booking_id = $1 AND o.status <> 'cancelled'
@@ -65,6 +65,16 @@ async function computeFolio(bookingId, propertyId) {
        ORDER BY created_at, item_name`,
       [bookingId]
     ),
+    pool.query(
+      `SELECT sa.id, COALESCE(sa.price, st.price, 0) AS price, sa.payment_status, st.name,
+              (sa.appointment_date + sa.start_time) AT TIME ZONE p.timezone AS created_at
+       FROM spa_appointment sa
+       JOIN spa_treatment st ON st.id = sa.treatment_id
+       JOIN property p ON p.id = sa.property_id
+       WHERE sa.booking_id = $1 AND sa.status NOT IN ('cancelled', 'pending')
+       ORDER BY sa.appointment_date, sa.start_time`,
+      [bookingId]
+    ),
   ]);
 
   const items = [
@@ -85,6 +95,15 @@ async function computeFolio(bookingId, propertyId) {
       description: `Room service · ${o.restaurant_name}`,
       amount: o.total_price,
       created_at: o.created_at,
+      paid: o.payment_status === 'paid',
+    })),
+    ...spaRes.rows.map((a) => ({
+      type: 'spa',
+      source_id: a.id,
+      description: `Spa · ${a.name}`,
+      amount: a.price,
+      created_at: a.created_at,
+      paid: a.payment_status === 'paid',
     })),
     ...adjustmentsRes.rows.map((a) => ({
       type: 'adjustment',
@@ -102,7 +121,9 @@ async function computeFolio(bookingId, propertyId) {
     })),
   ];
 
-  const chargesCents = items.reduce((sum, i) => sum + toCents(i.amount), 0);
+  // paid: settled at the outlet (card at the restaurant, imported as paid) --
+  // listed on the folio but not owed on it.
+  const chargesCents = items.filter((i) => !i.paid).reduce((sum, i) => sum + toCents(i.amount), 0);
   const paymentsCents = paymentsRes.rows
     .filter((p) => p.status === 'completed')
     .reduce((sum, p) => sum + toCents(p.amount), 0);

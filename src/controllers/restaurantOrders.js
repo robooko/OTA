@@ -14,6 +14,7 @@ const {
 const { generateJoinCode, verifyJoinCode } = require('../lib/joinCode');
 const { computeOrderTax } = require('../lib/tax');
 const { isValidUuid } = require('../middleware/validate');
+const { attachStays } = require('../lib/stayLink');
 
 function isValidTranslations(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -883,7 +884,7 @@ async function importOrders(req, res, next) {
     const q = async (sql, params) => (await pool.query(sql, params)).rows;
 
     const [existing, restaurants, guests] = await Promise.all([
-      q('SELECT id, external_ref, guest_id FROM restaurant_order WHERE property_id = $1 AND external_ref = ANY($2::varchar[])',
+      q('SELECT id, external_ref, guest_id, booking_id FROM restaurant_order WHERE property_id = $1 AND external_ref = ANY($2::varchar[])',
         [propertyId, uniq(valid.map((e) => e.o.external_ref))]),
       q('SELECT id FROM restaurant WHERE property_id = $1 AND id = ANY($2::uuid[])',
         [propertyId, uniq(valid.map((e) => e.o.restaurant_id))]),
@@ -979,7 +980,16 @@ async function importOrders(req, res, next) {
         [propertyId, JSON.stringify([...byId.values()].map(({ id, guest_id }) => ({ id, guest_id })))])).map((r) => r.id));
       for (const l of byId.values()) if (linked.has(l.id)) l.e.out = { outcome: 'linked' };
     }
-    for (const e of valid) if (e.out.outcome !== 'rejected') e.out.order_id = refIds.get(e.o.external_ref) ?? null;
+    // Every row in the batch with a guest but no stay gets the guest's stay covering its day.
+    const priorBooking = new Map(existing.map((r) => [r.id, r.booking_id]));
+    const kept = valid.filter((e) => e.out.outcome !== 'rejected');
+    const attached = await attachStays('restaurant_order', propertyId, uniq(kept.map((e) => refIds.get(e.o.external_ref)).filter(Boolean)));
+    for (const e of kept) {
+      const id = refIds.get(e.o.external_ref) ?? null;
+      e.out.order_id = id;
+      e.out.booking_id = attached.get(id) ?? priorBooking.get(id) ?? null;
+      if (e.out.outcome === 'duplicate' && attached.has(id)) e.out.outcome = 'linked';
+    }
 
     const results = entries.map((e) => ({ index: e.index, external_ref: e.o.external_ref ?? null, ...e.out }));
     const counts = {};
