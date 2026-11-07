@@ -58,6 +58,21 @@ async function releaseAvailability(client, booking) {
   await require('./roomNights').releaseNights(client, booking);
 }
 
+// Several rooms of one booking stop holding their nights; waiting bookings
+// are refilled once, type by type in sorted order (as createBooking locks),
+// so a cancel and a booking can't deadlock on each other's room types.
+async function releaseMembers(client, members) {
+  const roomNights = require('./roomNights');
+  if (members.length === 1) return releaseAvailability(client, members[0]);
+  const freed = new Map();
+  for (const m of members) {
+    for (const [roomId, ns] of await roomNights.releaseNights(client, m, null, { refillNow: false })) {
+      freed.set(roomId, [...(freed.get(roomId) ?? []), ...ns]);
+    }
+  }
+  await roomNights.refill(client, members[0].property_id, freed);
+}
+
 // After COMMIT: older Postgres rejects CONCURRENTLY inside a transaction
 // block, and a failed refresh must not fail a committed change -- the
 // exclusion constraint guards double-booking, not the view. Every
@@ -138,15 +153,17 @@ async function memberDues(members) {
   return out;
 }
 
-// Writes one completed card payment per member for the money pi took
-// (received cents), split by what each member owed.
-async function recordPayments(client, members, pi, receivedCents) {
-  const shares = members.length === 1 ? [receivedCents] : splitCents(receivedCents, (await memberDues(members)).map((d) => Math.max(0, d.balance)));
+// Writes one completed card payment per member for the money pi took,
+// split by what each member owed. Split in Stripe's units, so a zero-decimal
+// currency (XPF) never gets fractional shares that refund to more than taken.
+async function recordPayments(client, members, pi) {
+  const received = pi.amount_received ?? pi.amount;
+  const shares = members.length === 1 ? [received] : splitCents(received, (await memberDues(members)).map((d) => Math.max(0, d.balance)));
   for (const [i, m] of members.entries()) {
     await client.query(
       `INSERT INTO payment (property_id, booking_id, amount, method, status, paid_at, stripe_payment_intent_id)
        VALUES ($1, $2, $3, 'card', 'completed', now(), $4)`,
-      [m.property_id, m.id, fromCents(shares[i]), pi.id]
+      [m.property_id, m.id, fromCents(fromStripeAmount(shares[i], pi.currency)), pi.id]
     );
   }
 }
@@ -154,7 +171,7 @@ async function recordPayments(client, members, pi, receivedCents) {
 // Inside the caller's transaction, rows locked. pi null = nothing to charge.
 // A hold (requires_capture) writes no payment row until captured.
 async function confirmMembersLocked(client, members, pi) {
-  if (pi?.status === 'succeeded') await recordPayments(client, members, pi, fromStripeAmount(pi.amount_received ?? pi.amount, pi.currency));
+  if (pi?.status === 'succeeded') await recordPayments(client, members, pi);
   await client.query(`UPDATE booking SET status = 'confirmed', payment_due_at = NULL WHERE id = ANY($1)`, [members.map((m) => m.id)]);
 }
 const confirmPaidLocked = (client, b, pi) => confirmMembersLocked(client, [b], pi);
@@ -405,7 +422,7 @@ async function expireOnce() {
           return { status: 200, outcome: 'confirmed', n: live.length, after: () => afterConfirmed(idsOf(live), b.property_id) };
         }
         await client.query(`UPDATE booking SET status = 'expired', payment_due_at = NULL WHERE id = ANY($1)`, [idsOf(live)]);
-        for (const m of live) await releaseAvailability(client, m);
+        await releaseMembers(client, live);
         return {
           status: 200,
           outcome: 'expired',
@@ -489,7 +506,7 @@ async function captureHoldsOnce() {
           return markFailed(err.message);
         }
         if (pi.status !== 'succeeded') return markFailed(`payment is ${pi.status}`);
-        await recordPayments(client, live, pi, fromStripeAmount(pi.amount_received ?? pi.amount, pi.currency));
+        await recordPayments(client, live, pi);
         return { status: 200, outcome: 'captured' };
       });
       if (r.outcome === 'captured') captured++;
@@ -517,7 +534,7 @@ function startRoomPaymentJobs() {
 }
 
 module.exports = {
-  CANCEL_SCORE_SQL, NIGHTS_SQL, fetchJoinedBooking, releaseAvailability, refreshAvailabilityView, lockBooking, lockMembers, requestedFirst, splitCents, deadlineOf,
+  CANCEL_SCORE_SQL, NIGHTS_SQL, fetchJoinedBooking, releaseAvailability, releaseMembers, refreshAvailabilityView, lockBooking, lockMembers, requestedFirst, splitCents, deadlineOf,
   confirmPaidLocked, afterConfirmed, paymentIntentFor, confirmPaid, settleByHand, stripeForCancel,
   expireOnce, captureHoldsOnce, startRoomPaymentJobs,
 };

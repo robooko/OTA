@@ -438,6 +438,52 @@ const ratePlans = require('../src/lib/ratePlans');
     });
     await clear();
 
+    // ---- Final review fixes ----
+    await check('fix: guest cancel takes room-type locks in sorted order (no deadlock with a create)', async () => {
+      const { b1, b2 } = await paidBasket('Flex');
+      const [hi] = [b1, b2].sort((x, y) => (x.room_type_id < y.room_type_id ? 1 : -1)); // the larger type first
+      const realConnect = pool.connect.bind(pool); const locked = [];
+      // Only the promise form (the controllers' own transactions); pool.query passes a callback.
+      pool.connect = async (...args) => {
+        if (args.length) return realConnect(...args);
+        const c = await realConnect(); const q = c.query.bind(c);
+        c.query = (sql, params, ...rest) => {
+          if (typeof sql === 'string' && sql.includes("hashtext('rt:'")) locked.push(params[0]);
+          return q(sql, params, ...rest);
+        };
+        c.release = ((rel) => (...a) => { c.query = q; return rel(...a); })(c.release.bind(c));
+        return c;
+      };
+      try {
+        assert.equal((await api('DELETE', `/api/bookings/${hi.id}`)).status, 200);
+      } finally { pool.connect = realConnect; }
+      const firsts = locked.filter((t, i) => locked.indexOf(t) === i);
+      assert.deepEqual(firsts, [...firsts].sort(), JSON.stringify(locked));
+      assert.equal(firsts.length, 2);
+    });
+    await clear();
+    await check('fix: zero-decimal (XPF) shares are whole units and refunds add up to what was taken', async () => {
+      await pool.query("UPDATE property SET currency = 'XPF' WHERE id = $1", [P]);
+      try {
+        const [b1, b2] = await webBasket('Flex');
+        await api('POST', `/api/bookings/${b1.id}/payment-intent`);
+        // An extra lands after the card form opened: the split is uneven.
+        const ex = (await one("INSERT INTO extra (property_id, name, price) VALUES ($1, 'Towel', 1) RETURNING id", [P])).id;
+        await pool.query('INSERT INTO booking_extra (booking_id, extra_id, quantity, unit_price) VALUES ($1, $2, 1, 1)', [b1.id, ex]);
+        const pi = fakeStripe.store.get((await rowsOf([b1.id]))[0].stripe_payment_intent_id);
+        pi.status = 'succeeded'; pi.amount_received = pi.amount;
+        assert.equal((await api('POST', `/api/bookings/${b1.id}/confirm-payment`)).status, 200);
+        const ps = await paymentsOf([b1.id, b2.id]);
+        assert.ok(ps.every((p) => toCents(p.amount) % 100 === 0), JSON.stringify(ps.map((p) => p.amount)));
+        assert.equal(sumAmt(ps), pi.amount_received * 100);
+        assert.equal((await api('DELETE', `/api/bookings/${b2.id}`)).status, 200);
+        assert.equal(pi.refunds.reduce((a, x) => a + x, 0), pi.amount_received);
+      } finally {
+        await pool.query("UPDATE property SET currency = 'GBP' WHERE id = $1", [P]);
+      }
+    });
+    await clear();
+
     // ---- Task 6: one basket, one reminder, one email ----
     const resend = require('../src/lib/resend');
     const roomBaskets = require('../src/lib/roomBaskets');

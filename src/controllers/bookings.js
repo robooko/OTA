@@ -561,7 +561,7 @@ async function cancelBooking(req, res, next) {
     if (refundedPaymentIds.length) {
       await client.query(`UPDATE payment SET status = 'refunded' WHERE id = ANY($1)`, [refundedPaymentIds]);
     }
-    for (const t of targets) await roomPayments.releaseAvailability(client, t);
+    await roomPayments.releaseMembers(client, targets);
 
     await client.query('COMMIT');
 
