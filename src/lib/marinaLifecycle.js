@@ -213,7 +213,7 @@ function afterChange(before, after) {
     publishMarinaGuestUpdate(after.id, after.status).catch((err) => console.error('Ably publish failed:', err.message));
   }
   if (!before && after.status === 'hold' && after._confirmToken) {
-    const confirmUrl = `${process.env.OTA_API_BASE_URL}/api/marina/confirm-booking/${after.id}/${after._confirmToken}`;
+    const confirmUrl = `${process.env.OTA_API_BASE_URL || 'https://ota-u6ii.onrender.com'}/api/marina/confirm-booking/${after.id}/${after._confirmToken}`;
     sendGuestEmail(after, 'received', { confirmUrl });
     return;
   }
