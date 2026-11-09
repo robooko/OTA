@@ -40,9 +40,14 @@ async function listBookings(req, res, next) {
     if (term) {
       params.push(`%${term.replace(/[\\%_]/g, '\\$&')}%`);
       const n = `$${params.length}`;
-      params.push(term);
-      // ...or the booking's exact id, so ?q=<id> deep-links one booking.
-      where.push(`(b.label ILIKE ${n} OR mb.contact_name ILIKE ${n} OR mb.contact_email ILIKE ${n} OR mb.boat_name ILIKE ${n} OR mb.notes ILIKE ${n} OR mb.id::text = $${params.length})`);
+      where.push(`(b.label ILIKE ${n} OR mb.contact_name ILIKE ${n} OR mb.contact_email ILIKE ${n} OR mb.boat_name ILIKE ${n} OR mb.notes ILIKE ${n})`);
+    }
+    // An exact set (comma-separated): one booking, or "Monday's and Friday's"
+    // picked by an agent from earlier lists.
+    if (req.query.ids) {
+      const ids = String(req.query.ids).split(',').filter(Boolean);
+      if (ids.length > 500 || !ids.every(isValidUuid)) return res.status(400).json({ error: 'Invalid ids' });
+      add('mb.id = ANY(?)', ids);
     }
     const w = where.join(' AND ');
     const [{ rows: [{ total }] }, { rows }] = await Promise.all([

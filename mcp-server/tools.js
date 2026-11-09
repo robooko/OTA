@@ -1574,15 +1574,16 @@ function createTools(apiRequest) {
   },
   {
     name: 'list_marina_bookings',
-    description: 'Berth bookings across this property\'s marinas, paged ({ total, data }), newest first. from = bookings departing after this date (open-ended always included), to = arriving before it. Guest checkouts in progress (holds) are never listed. The Hotal dashboard shows the same list at /marina?<these params>#bookings (q, status, marina_id, berth_id, from, to), so a filtered view can be linked or opened.',
+    description: 'Berth bookings across this property\'s marinas, paged ({ total, data }), newest first. from = bookings departing after this date (open-ended always included), to = arriving before it. Guest checkouts in progress (holds) are never listed. The Hotal dashboard shows the same list at /marina?<these params>#bookings (q, status, marina_id, berth_id, from, to; ids comma-separated), so a filtered view can be linked or opened.',
     inputSchema: {
       from: z.string().optional().describe('YYYY-MM-DD'), to: z.string().optional().describe('YYYY-MM-DD'),
       status: z.enum(['pending', 'confirmed', 'declined', 'cancelled']).optional(),
       marina_id: z.string().optional(), berth_id: z.string().optional(),
-      q: z.string().max(100).optional().describe('Text search: berth label, guest name, email, boat name, notes -- or an exact booking id'),
+      q: z.string().max(100).optional().describe('Text search: berth label, guest name, email, boat name, notes'),
+      ids: z.array(z.string()).max(500).optional().describe('Exactly these bookings'),
       limit: z.number().int().min(1).max(500).optional(), offset: z.number().int().min(0).optional(),
     },
-    run: (query) => apiRequest('GET', '/api/marina/bookings', { query }),
+    run: ({ ids, ...query }) => apiRequest('GET', '/api/marina/bookings', { query: ids?.length ? { ...query, ids: ids.join(',') } : query }),
   },
   {
     name: 'list_marinas',
