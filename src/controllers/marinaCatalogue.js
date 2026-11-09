@@ -54,7 +54,7 @@ const TABLES = {
   'doc-requirements': { table: 'marina_doc_requirement', order: 'sort_order, name', cols: {
     type: v.oneOf(...TYPE_NAMES), name: v.required(100), description: v.longText, fields: v.json, mandatory: v.bool, sort_order: v.int, status: STATUS }, required: ['type', 'name'] },
   'contract-templates': { table: 'marina_contract_template', order: 'min_nights, name', cols: {
-    name: v.required(100), body_markdown: v.required(200000), min_nights: v.int, status: STATUS }, required: ['name', 'body_markdown'] },
+    name: v.required(100), body_markdown: v.required(200000), min_nights: v.int, return_notice_days: v.int, status: STATUS }, required: ['name', 'body_markdown'] },
   pois: { table: 'marina_poi', order: 'label', cols: {
     label: v.required(100), type: v.text(30), lat: v.num, lng: v.num, status: STATUS }, required: ['label', 'lat', 'lng'] },
   images: { table: 'marina_image', order: 'sort_order', cols: {

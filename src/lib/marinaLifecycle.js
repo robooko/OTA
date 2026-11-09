@@ -3,8 +3,7 @@ const marinaStripe = require('./marinaStripe');
 const q = require('./marinaQueries');
 const { toCents } = require('./folio');
 const { toStripeAmount } = require('./stripeAmount');
-const { pickTemplate } = require('./marinaContracts');
-const { nightsBetween } = require('./marinaPricing');
+const { templateFor } = require('./marinaContracts');
 const { publishMarinaBooking, publishMarinaGuestUpdate } = require('./ably');
 const { sendGuestEmail } = require('./marinaEmails');
 const sd = require('./sailorDocuments');
@@ -182,6 +181,40 @@ async function endBooking(id, departure) {
   });
 }
 
+// A long-term holder back from sailing: a new open-ended booking on the same
+// berth from `arrival`, linked to the checked-out one, with its contract
+// (the signature row is copied, so no re-signing). The exclusion constraint
+// 409s an arrival that clashes with the berth's resold stays. OTA doesn't
+// check arrival against return_notice_days.
+async function returnBooking(id, arrival) {
+  const r = await withLockedBooking(id, async (client, row) => {
+    if (row.term !== 'long') return fail(409, 'Only long-term bookings can return');
+    if (row.status !== 'confirmed') return fail(409, `Booking is ${row.status}`);
+    if (!row.departure) return fail(409, 'Booking has not checked out');
+    if (arrival < row.departure) return fail(400, 'arrival must be on or after the checkout date');
+    const { rowCount } = await client.query(
+      "SELECT 1 FROM marina_booking WHERE previous_booking_id = $1 AND status IN ('pending', 'confirmed')", [id]);
+    if (rowCount) return fail(409, 'This booking has already returned');
+    const { rows: [nb] } = await client.query(
+      `INSERT INTO marina_booking (property_id, marina_id, berth_id, guest_id, contact_name, contact_email, contact_email_key, contact_phone,
+         boat_name, boat_length_m, boat_beam_m, arrival, departure, status, source, locale, currency, notes, email_verified,
+         term, contract_until, return_notice_days, previous_booking_id)
+       SELECT property_id, marina_id, berth_id, guest_id, contact_name, contact_email, contact_email_key, contact_phone,
+         boat_name, boat_length_m, boat_beam_m, $2, NULL, 'confirmed', 'staff', locale, currency, notes, email_verified,
+         term, contract_until, return_notice_days, id
+       FROM marina_booking WHERE id = $1 RETURNING id`, [id, arrival]);
+    await client.query(
+      `INSERT INTO marina_contract_signature (property_id, booking_id, template_id, rendered_body, signer_email, agreed_at, ip_address, user_agent)
+       SELECT property_id, $2, template_id, rendered_body, signer_email, agreed_at, ip_address, user_agent
+       FROM marina_contract_signature WHERE booking_id = $1`, [id, nb.id]);
+    return { ok: true, newId: nb.id };
+  });
+  if (!r.ok) return r;
+  const booking = await q.joinedBooking(pool, r.newId);
+  module.exports.afterChange(null, booking);
+  return { ok: true, booking };
+}
+
 // Which guest email a transition sends, by source (spec "Emails"):
 // guest rows get every one; staff rows with an email get the outcomes;
 // imports get none.
@@ -307,7 +340,7 @@ async function retryReleases() {
 // held. Extracted document data plays no part.
 async function maybeAutoConfirm(id) {
   const { rows: [b] } = await pool.query(
-    `SELECT mb.id, mb.status, mb.arrival, mb.departure, mb.marina_id, mb.stripe_payment_intent_id, mb.payment_status, m.auto_confirm
+    `SELECT mb.id, mb.status, mb.arrival, mb.departure, mb.term, mb.marina_id, mb.stripe_payment_intent_id, mb.payment_status, m.auto_confirm
      FROM marina_booking mb JOIN marina m ON m.id = mb.marina_id WHERE mb.id = $1`, [id]);
   if (!b || !b.auto_confirm || b.status !== 'pending') return null;
   if (b.stripe_payment_intent_id && b.payment_status !== 'held') return null;
@@ -318,10 +351,9 @@ async function maybeAutoConfirm(id) {
        AND NOT ${sd.SAILOR_APPROVED_SQL}`,
     [b.marina_id, id]);
   if (missing) return null;
-  if (b.departure) {
+  if (b.departure || b.term === 'long') {
     const { rows: templates } = await pool.query("SELECT id, min_nights FROM marina_contract_template WHERE marina_id = $1 AND status = 'active'", [b.marina_id]);
-    const t = pickTemplate(templates, nightsBetween(b.arrival, b.departure));
-    if (t) {
+    if (templateFor(templates, b)) {
       const { rowCount } = await pool.query('SELECT 1 FROM marina_contract_signature WHERE booking_id = $1', [id]);
       if (!rowCount) return null;
     }
@@ -340,4 +372,4 @@ function startMarinaHoldExpiryJob() {
 }
 
 module.exports = {
-  promoteHeldBooking, piMatches, maybeAutoConfirm, sweepOnce, startMarinaHoldExpiryJob, withLockedBooking, setRow, toPending, confirmBooking, declineBooking, cancelBooking, endBooking, afterChange, republish, LIVE, fail };
+  promoteHeldBooking, piMatches, maybeAutoConfirm, sweepOnce, startMarinaHoldExpiryJob, withLockedBooking, setRow, toPending, confirmBooking, declineBooking, cancelBooking, endBooking, returnBooking, afterChange, republish, LIVE, fail };

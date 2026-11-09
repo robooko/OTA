@@ -6,6 +6,7 @@ const life = require('../lib/marinaLifecycle');
 const { priceStay } = require('../lib/marinaPricing');
 const { emailKey } = require('../lib/spaBookingGuard');
 const { sendGuestEmail } = require('../lib/marinaEmails');
+const { templateFor } = require('../lib/marinaContracts');
 
 // Checked here rather than left to the DB: contact_phone is VARCHAR(30) (a
 // longer one was a 500), and a negative boat size would price or fit
@@ -15,6 +16,8 @@ function fieldError(f) {
   for (const k of ['boat_length_m', 'boat_beam_m']) {
     if (f[k] != null && f[k] !== '' && !(Number.isFinite(Number(f[k])) && Number(f[k]) >= 0)) return `${k} must be a number, 0 or more`;
   }
+  if (f.contract_until != null && f.contract_until !== '' && !isValidDate(f.contract_until)) return 'contract_until must be YYYY-MM-DD';
+  if (f.return_notice_days != null && f.return_notice_days !== '' && !(Number.isInteger(Number(f.return_notice_days)) && Number(f.return_notice_days) >= 0)) return 'return_notice_days must be a whole number, 0 or more';
   return null;
 }
 const numOrNull = (x) => (x == null || x === '' ? null : Number(x));
@@ -54,6 +57,7 @@ async function listBookings(req, res, next) {
       pool.query(`SELECT count(*)::int AS total FROM marina_booking mb JOIN marina_berth b ON b.id = mb.berth_id WHERE ${w}`, params),
       pool.query(`SELECT mb.id, mb.marina_id, m.name AS marina_name, mb.berth_id, b.label AS berth_label, mb.contact_name, mb.contact_email,
                          mb.contact_phone, mb.boat_name, mb.boat_length_m, mb.boat_beam_m, mb.notes, mb.arrival, mb.departure, mb.status, mb.source,
+                         mb.term, mb.contract_until, mb.return_notice_days, mb.previous_booking_id,
                          mb.total_price, mb.currency, mb.payment_status, mb.payment_error, mb.hold_expires_at, mb.created_at,
                          ${q.READY_COLS}
                   FROM marina_booking mb JOIN marina_berth b ON b.id = mb.berth_id JOIN marina m ON m.id = mb.marina_id
@@ -102,20 +106,33 @@ async function createBooking(req, res, next) {
     if (b.total_price != null && !(Number(b.total_price) >= 0)) return res.status(400).json({ error: 'total_price must be a non-negative number' });
     const bad = fieldError(b);
     if (bad) return res.status(400).json({ error: bad });
+    // Long-term holders are open-ended; contract_until is a soft expiry only.
+    const term = b.term ?? 'short';
+    if (!['short', 'long'].includes(term)) return res.status(400).json({ error: 'term must be short or long' });
+    if (term === 'long' && b.departure != null) return res.status(400).json({ error: 'A long-term booking is open-ended: omit departure (checkout sets it)' });
+    if (term === 'short' && (b.contract_until != null || b.return_notice_days != null)) return res.status(400).json({ error: 'contract_until and return_notice_days are for long-term bookings' });
     const { rows: [berth] } = await pool.query("SELECT * FROM marina_berth WHERE id = $1 AND property_id = $2 AND status <> 'inactive'", [b.berth_id, req.property_id]);
     if (!berth) return res.status(404).json({ error: 'Berth not found' });
     const len = numOrNull(b.boat_length_m);
     const beam = numOrNull(b.boat_beam_m);
     const total = b.total_price != null ? Number(b.total_price).toFixed(2)
       : priceStay({ berth, tiers: await q.activeTiers(pool, berth.marina_id), arrival: b.arrival, departure: b.departure ?? null, boatLengthM: len, boatBeamM: beam }).total_price;
+    // Notice period: given, else the long-term contract template's (snapshot).
+    let notice = numOrNull(b.return_notice_days);
+    if (term === 'long' && notice == null) {
+      const { rows: templates } = await pool.query("SELECT min_nights, return_notice_days FROM marina_contract_template WHERE marina_id = $1 AND status = 'active'", [berth.marina_id]);
+      notice = templateFor(templates, { term })?.return_notice_days ?? null;
+    }
     const { rows: [row] } = await pool.query(
       `INSERT INTO marina_booking (property_id, marina_id, berth_id, contact_name, contact_email, contact_email_key, contact_phone,
-         boat_name, boat_length_m, boat_beam_m, arrival, departure, status, source, locale, total_price, currency, notes)
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'staff', $14, $15, upper(p.currency), $16 FROM property p WHERE p.id = $1
+         boat_name, boat_length_m, boat_beam_m, arrival, departure, status, source, locale, total_price, currency, notes,
+         term, contract_until, return_notice_days)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'staff', $14, $15, upper(p.currency), $16, $17, $18, $19 FROM property p WHERE p.id = $1
        RETURNING id`,
       [req.property_id, berth.marina_id, berth.id, b.contact_name.trim().slice(0, 100), b.contact_email || null, b.contact_email ? emailKey(b.contact_email) : null,
         b.contact_phone || null, b.boat_name || null, len, beam, b.arrival, b.departure ?? null, status,
-        ['en', 'it', 'fr', 'es'].includes(b.locale) ? b.locale : 'en', total, b.notes || null]);
+        ['en', 'it', 'fr', 'es'].includes(b.locale) ? b.locale : 'en', total, b.notes || null,
+        term, b.contract_until || null, notice]);
     const booking = await q.joinedBooking(pool, row.id);
     life.afterChange(null, booking);
     res.status(201).json(booking);
@@ -125,8 +142,10 @@ async function createBooking(req, res, next) {
   }
 }
 
-// action: confirm | decline | cancel (refund: boolean) | end (departure);
-// without action, edits contact/boat/notes fields.
+// action: confirm | decline | cancel (refund: boolean) | end (departure; on
+// a long-term booking this is checkout: the berth is resellable from then) |
+// return (arrival: a new linked long-term booking, 201);
+// without action, edits contact/boat/notes and long-term contract fields.
 async function updateBooking(req, res, next) {
   try {
     const b = await bookingOr404(req, res);
@@ -139,19 +158,24 @@ async function updateBooking(req, res, next) {
     else if (action === 'end') {
       if (!isValidDate(req.body.departure)) return res.status(400).json({ error: 'departure must be YYYY-MM-DD' });
       r = await life.endBooking(b.id, req.body.departure);
+    } else if (action === 'return') {
+      if (!isValidDate(req.body.arrival)) return res.status(400).json({ error: 'arrival must be YYYY-MM-DD' });
+      r = await life.returnBooking(b.id, req.body.arrival);
+      if (r.ok) return res.status(201).json(r.booking);
     } else if (action === undefined) {
-      const EDITABLE = ['contact_name', 'contact_email', 'contact_phone', 'boat_name', 'boat_length_m', 'boat_beam_m', 'notes'];
+      const EDITABLE = ['contact_name', 'contact_email', 'contact_phone', 'boat_name', 'boat_length_m', 'boat_beam_m', 'notes', 'contract_until', 'return_notice_days'];
       const fields = Object.fromEntries(EDITABLE.filter((k) => req.body[k] !== undefined).map((k) => [k, req.body[k] === '' ? null : req.body[k]]));
       if (!Object.keys(fields).length) return res.status(400).json({ error: 'Nothing to update' });
       if ('contact_name' in fields && !fields.contact_name) return res.status(400).json({ error: 'contact_name cannot be empty' });
       const bad = fieldError(fields);
       if (bad) return res.status(400).json({ error: bad });
+      if (b.term !== 'long' && (fields.contract_until != null || fields.return_notice_days != null)) return res.status(400).json({ error: 'contract_until and return_notice_days are for long-term bookings' });
       if ('contact_email' in fields) fields.contact_email_key = fields.contact_email ? emailKey(fields.contact_email) : null;
       // A changed email is no longer the one the sailor proved: it must not
       // open another sailor's shared documents.
       if ('contact_email' in fields && normalEmail(fields.contact_email) !== normalEmail(b.contact_email)) fields.email_verified = false;
       r = await life.withLockedBooking(b.id, async (client) => ({ ok: true, booking: await life.setRow(client, b.id, fields) }));
-    } else return res.status(400).json({ error: 'action must be confirm, decline, cancel or end' });
+    } else return res.status(400).json({ error: 'action must be confirm, decline, cancel, end or return' });
     if (!r.ok) return res.status(r.status).json({ error: r.error, ...(r.booking ? { booking: r.booking } : {}) });
     // Stripe refused (capture/refund): the booking is unchanged apart from
     // payment_error, which staff see on the row.
@@ -159,7 +183,7 @@ async function updateBooking(req, res, next) {
     if (r.expired) return res.status(409).json({ error: 'This request expired before it was confirmed', booking: r.booking });
     res.json(r.booking);
   } catch (err) {
-    if (err.code === '23P01') return res.status(409).json({ error: 'That change overlaps another booking' });
+    if (err.code === '23P01') return res.status(409).json({ error: 'That change overlaps another booking (for a return: a stay sold while the holder was away)' });
     next(err);
   }
 }

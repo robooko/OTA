@@ -4,11 +4,18 @@ const { nightsBetween } = require('./marinaPricing');
 // Document-field placeholders ({{acord25.*}}, {{insurance.*}}) are not
 // supported in phase 1 and render blank; the template editor warns.
 const FIELDS = ['sailor_name', 'sailor_email', 'boat_name', 'boat_loa', 'boat_beam', 'berth_id', 'arrival_date', 'departure_date',
-  'nights', 'amount', 'notes', 'marina_name', 'marina_email', 'marina_phone', 'marina_website', 'today'];
+  'nights', 'amount', 'notes', 'marina_name', 'marina_email', 'marina_phone', 'marina_website', 'today',
+  'return_notice_days', 'contract_until'];
 const PLACEHOLDER = /\{\{\s*([\w.]+)\s*\}\}/g;
 
 const pickTemplate = (templates, nights) =>
   templates.filter((t) => t.min_nights <= nights).sort((a, b) => b.min_nights - a.min_nights)[0] ?? null;
+
+// The template a booking signs: long-term holders take the longest one (an
+// open-ended contract outlasts every min_nights); other open-ended stays none.
+const templateFor = (templates, b) =>
+  b.term === 'long' ? pickTemplate(templates, Infinity)
+    : b.departure ? pickTemplate(templates, nightsBetween(b.arrival, b.departure)) : null;
 
 const renderContract = (body, ctx) => body.replace(PLACEHOLDER, (_, k) => (ctx[k] == null ? '' : String(ctx[k])));
 
@@ -22,8 +29,8 @@ function contractContext(b, today) {
     nights: b.departure ? nightsBetween(b.arrival, b.departure) : null,
     amount: b.total_price != null ? `${b.total_price} ${b.currency}` : null, notes: b.notes,
     marina_name: b.marina_name, marina_email: b.marina_email, marina_phone: b.marina_phone, marina_website: b.marina_website,
-    today,
+    today, return_notice_days: b.return_notice_days, contract_until: b.contract_until,
   };
 }
 
-module.exports = { FIELDS, pickTemplate, renderContract, unknownPlaceholders, contractContext };
+module.exports = { FIELDS, pickTemplate, templateFor, renderContract, unknownPlaceholders, contractContext };

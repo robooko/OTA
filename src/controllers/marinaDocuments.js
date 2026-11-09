@@ -4,7 +4,6 @@ const docs = require('../lib/marinaDocuments');
 const life = require('../lib/marinaLifecycle');
 const q = require('../lib/marinaQueries');
 const kc = require('../lib/marinaContracts');
-const { nightsBetween } = require('../lib/marinaPricing');
 const sd = require('../lib/sailorDocuments');
 const { streamVersion } = require('./sailorDocuments');
 const storage = require('../lib/marinaStorage');
@@ -92,13 +91,13 @@ async function getBookingVerification(req, res, next) {
       pool.query(
         `SELECT s.agreed_at, s.signer_email, s.rendered_body, t.name FROM marina_contract_signature s
          LEFT JOIN marina_contract_template t ON t.id = s.template_id WHERE s.booking_id = $1`, [b.id]),
-      b.departure ? pool.query("SELECT id, name, body_markdown, min_nights FROM marina_contract_template WHERE marina_id = $1 AND status = 'active'", [b.marina_id]) : { rows: [] },
+      b.departure || b.term === 'long' ? pool.query("SELECT id, name, body_markdown, min_nights FROM marina_contract_template WHERE marina_id = $1 AND status = 'active'", [b.marina_id]) : { rows: [] },
     ]);
     let contract = null;
     const s = sig.rows[0];
     if (s) contract = { name: s.name ?? 'Contract', signed: true, agreed_at: s.agreed_at, signer_email: s.signer_email, rendered_body: s.rendered_body };
-    else if (b.departure) {
-      const t = kc.pickTemplate(templates.rows, nightsBetween(b.arrival, b.departure));
+    else {
+      const t = kc.templateFor(templates.rows, b);
       if (t) contract = { name: t.name, signed: false, rendered_body: kc.renderContract(t.body_markdown, kc.contractContext(b, await q.propertyToday(pool, b.property_id))) };
     }
     // No fallback store: say so when guests can't upload and something is still owed.

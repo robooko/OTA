@@ -189,6 +189,7 @@ function guestView(b) {
   return {
     id: b.id, status: b.status, berth_label: b.berth_label, marina_name: b.marina_name,
     arrival: b.arrival, departure: b.departure, contact_name: b.contact_name, contact_email: b.contact_email,
+    term: b.term, contract_until: b.contract_until, return_notice_days: b.return_notice_days,
     boat_name: b.boat_name, boat_length_m: b.boat_length_m, boat_beam_m: b.boat_beam_m,
     total_price: b.total_price, currency: b.currency, payment_status: b.payment_status,
     hold_expires_at: b.hold_expires_at, locale: b.locale, doc_count: b.doc_count,
@@ -338,8 +339,8 @@ async function getGuestBooking(req, res, next) {
     let contract = null;
     const { rows: [sig] } = await pool.query('SELECT template_id, rendered_body, agreed_at FROM marina_contract_signature WHERE booking_id = $1', [b.id]);
     if (sig) contract = sig;
-    else if (b.departure) {
-      const t = kc.pickTemplate(await activeTemplates(b.marina_id), nightsBetween(b.arrival, b.departure));
+    else if (b.departure || b.term === 'long') {
+      const t = kc.templateFor(await activeTemplates(b.marina_id), b);
       if (t) contract = { template_id: t.id, rendered_body: kc.renderContract(t.body_markdown, kc.contractContext(b, await q.propertyToday(pool, b.property_id))), agreed_at: null };
     }
     // Metadata only: extracted data and the Drive file never reach the key rail.
@@ -413,7 +414,7 @@ async function listSailorBookings(req, res, next) {
       ...guestView(b),
       marina_id: b.marina_id, marina_image_url: b.marina_image_url,
       marina_lat: b.marina_lat, marina_lng: b.marina_lng, booking_token: bookingToken(b.id),
-      contract_required: !!b.departure && kc.pickTemplate(templates.get(b.marina_id), nightsBetween(b.arrival, b.departure)) != null,
+      contract_required: kc.templateFor(templates.get(b.marina_id), b) != null,
       contract_agreed: b.has_signature,
       missing_documents: reqs.filter((r) => r.booking_id === b.id && !wallet.get(b.id).some((w) => w.id === r.id)).map(({ id, name }) => ({ id, name })),
       wallet_documents: wallet.get(b.id),
@@ -474,8 +475,8 @@ async function agreeContract(req, res, next) {
   try {
     const b = req.booking;
     if (!['pending', 'confirmed'].includes(b.status)) return res.status(409).json({ error: `Booking is ${b.status}` });
-    if (!b.departure) return res.status(409).json({ error: 'No contract for open-ended bookings' });
-    const t = kc.pickTemplate(await activeTemplates(b.marina_id), nightsBetween(b.arrival, b.departure));
+    if (!b.departure && b.term !== 'long') return res.status(409).json({ error: 'No contract for open-ended bookings' });
+    const t = kc.templateFor(await activeTemplates(b.marina_id), b);
     if (!t) return res.status(404).json({ error: 'This marina has no contract to sign' });
     const rendered = kc.renderContract(t.body_markdown, kc.contractContext(b, await q.propertyToday(pool, b.property_id)));
     const { rows: [sig] } = await pool.query(

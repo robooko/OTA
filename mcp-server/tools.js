@@ -72,7 +72,8 @@ const MARINA_CHILDREN = [
     valid_from: z.string().nullable().optional(), valid_to: z.string().nullable().optional(),
     max_length_m: z.number().min(0), max_beam_m: nonNeg, price_per_night: z.number().min(0), price_per_month: nonNeg, price_per_year: nonNeg, status: STATUS } },
   { kind: 'contract-templates', one: 'contract template', about: 'berth contract templates (markdown) sailors agree to, picked by min_nights', required: ['name', 'body_markdown'], fields: {
-    name: z.string().max(100), body_markdown: z.string().max(200000), min_nights: z.number().int().optional(), status: STATUS } },
+    name: z.string().max(100), body_markdown: z.string().max(200000), min_nights: z.number().int().optional(),
+    return_notice_days: z.number().int().min(0).nullable().optional().describe('Long-term contracts: days of notice a holder gives before returning to the berth; merge field {{return_notice_days}}'), status: STATUS } },
   { kind: 'pois', one: 'point of interest', about: 'map points of interest (fuel, showers, office...)', required: ['label', 'lat', 'lng'], fields: {
     label: z.string().max(100), type: z.string().max(30).nullable().optional(), lat: z.number(), lng: z.number(), status: STATUS } },
   { kind: 'images', one: 'image', about: 'gallery images (by URL)', required: ['url'], fields: {
@@ -1701,21 +1702,26 @@ function createTools(apiRequest) {
   },
   {
     name: 'create_marina_booking',
-    description: 'Staff booking on a berth: any dates, open-ended when departure is omitted (seasonal/annual holders), status pending or confirmed (default). Price is computed unless total_price is given. No card is taken.',
+    description: 'Staff booking on a berth: any dates, open-ended when departure is omitted, status pending or confirmed (default). Price is computed unless total_price is given. No card is taken. term long = a long-term berth holder (open-ended; can check out so the berth is resold, then return); contract_until is a soft expiry, return_notice_days defaults from the contract template.',
     inputSchema: {
       berth_id: z.string(), contact_name: z.string(), contact_email: z.string().email().optional(), contact_phone: z.string().optional(),
       boat_name: z.string().optional(), boat_length_m: z.number().positive().optional(), boat_beam_m: z.number().positive().optional(),
       arrival: z.string().describe('YYYY-MM-DD'), departure: z.string().optional().describe('YYYY-MM-DD, exclusive; omit for open-ended'),
       status: z.enum(['pending', 'confirmed']).optional(), total_price: z.number().min(0).optional(), notes: z.string().optional(),
+      term: z.enum(['short', 'long']).optional().describe('Default short; long must omit departure'),
+      contract_until: z.string().optional().describe('YYYY-MM-DD, long-term only: soft contract expiry, informational'),
+      return_notice_days: z.number().int().min(0).optional().describe('Long-term only: days of notice before returning; defaults from the contract template'),
     },
     run: (body) => apiRequest('POST', '/api/marina/bookings', { body }),
   },
   {
     name: 'update_marina_booking',
-    description: 'Act on a berth booking: confirm (captures a held card), decline (releases it), cancel (refund: true refunds a captured payment), end (sets departure on an open-ended stay). Or omit action to edit contact/boat/notes.',
+    description: 'Act on a berth booking: confirm (captures a held card), decline (releases it), cancel (refund: true refunds a captured payment), end (sets departure on an open-ended stay; on a long-term booking this is checkout, so the berth can be resold from that date), return (long-term holder back after checkout: creates a new linked open-ended booking from arrival with the same contract; 409 if it clashes with a stay sold meanwhile). Or omit action to edit contact/boat/notes and long-term contract_until/return_notice_days.',
     inputSchema: {
-      booking_id: z.string(), action: z.enum(['confirm', 'decline', 'cancel', 'end']).optional(),
+      booking_id: z.string(), action: z.enum(['confirm', 'decline', 'cancel', 'end', 'return']).optional(),
       refund: z.boolean().optional(), departure: z.string().optional(), reason: z.string().optional(),
+      arrival: z.string().optional().describe('return: YYYY-MM-DD, on or after the checkout date'),
+      contract_until: z.string().nullable().optional(), return_notice_days: z.number().int().min(0).nullable().optional(),
       contact_name: z.string().optional(), contact_email: z.string().optional(), contact_phone: z.string().optional(),
       boat_name: z.string().optional(), boat_length_m: z.number().positive().optional(), boat_beam_m: z.number().positive().optional(), notes: z.string().optional(),
     },
