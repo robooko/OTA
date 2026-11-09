@@ -9,8 +9,8 @@ const { isValidSlug, SLUG_TAKEN, isSlugConflict } = require('../middleware/valid
 async function listProperties(req, res, next) {
   try {
     const { rows } = await pool.query(
-      'SELECT id, name, slug, status FROM property WHERE clerk_org_id = $1 ORDER BY name',
-      [req.clerk_org_id]
+      'SELECT id, name, slug, status FROM property WHERE clerk_org_id = ANY($1) ORDER BY name',
+      [req.clerk_org_ids ?? [req.clerk_org_id]] // clerk_org_ids: an OAuth user in several orgs (middleware/auth.js)
     );
     res.json(rows);
   } catch (err) {

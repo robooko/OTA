@@ -55,10 +55,12 @@ async function authenticateOrg(req, res, next) {
 
 // A Clerk OAuth access token (an MCP client such as a claude.ai connector,
 // signed in through Clerk -- see routes/mcp.js). It names a user but no
-// active org, so the org is the user's only membership.
+// active org: the org is the one owning X-Property-Id (MCP's property_id),
+// else the user's only one. In several orgs with no hotel named, only
+// list_properties works (across all of them, as staff) -- authenticate()
+// asks for a property_id.
 // ponytail: 2 Clerk API calls per request (and MCP loops back once per tool
-// call); cache by token if Clerk rate limits bite. A user in several orgs is
-// refused until there's a way to pick one.
+// call); cache by token if Clerk rate limits bite.
 async function authenticateOAuth(token, req, res, next) {
   try {
     const r = await verifyMachineAuthToken(token, { secretKey: process.env.CLERK_SECRET_KEY });
@@ -66,13 +68,24 @@ async function authenticateOAuth(token, req, res, next) {
       return res.status(401).json({ error: 'Invalid or expired token' });
     }
     const userId = r.data.subject;
-    const { data: memberships } = await clerkClient.users.getOrganizationMembershipList({ userId });
-    if (memberships.length !== 1) {
-      return res.status(401).json({ error: 'OAuth sign-in needs an account in exactly one organization' });
+    const { data: memberships } = await clerkClient.users.getOrganizationMembershipList({ userId, limit: 100 });
+    const orgs = memberships.map((m) => ({ id: m.organization.id, role: mapClerkRole(m.role.replace(/^org:/, '')) }));
+    if (!orgs.length) return res.status(401).json({ error: 'This account is not in any organization' });
+
+    let org = orgs.length === 1 ? orgs[0] : null;
+    const wanted = req.headers['x-property-id'];
+    if (wanted) {
+      const { rows } = await pool.query('SELECT clerk_org_id FROM property WHERE id::text = $1', [wanted]);
+      org = orgs.find((o) => o.id === rows[0]?.clerk_org_id) ?? org;
     }
-    req.clerk_org_id = memberships[0].organization.id;
-    req.user = { id: userId, role: mapClerkRole(memberships[0].role.replace(/^org:/, '')) };
     req.auth_method = 'bearer';
+    if (org) {
+      req.clerk_org_id = org.id;
+      req.user = { id: userId, role: org.role };
+    } else {
+      req.clerk_org_ids = orgs.map((o) => o.id);
+      req.user = { id: userId, role: 'staff' };
+    }
     next();
   } catch (err) {
     next(err);
@@ -85,6 +98,7 @@ function authenticate(req, res, next) {
   authenticateOrg(req, res, async () => {
     try {
       const orgId = req.clerk_org_id;
+      if (!orgId) return res.status(400).json({ error: 'This account is in several organizations: pass a property_id (see list_properties)' });
       const r = await resolveStaffProperty(pool, orgId, req.headers['x-property-id'], async () =>
         (await clerkClient.organizations.getOrganization({ organizationId: orgId })).name);
       // Free starter tokens so the metered features work before anyone is
