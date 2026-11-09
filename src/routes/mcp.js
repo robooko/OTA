@@ -4,7 +4,47 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { createApiClient, ApiError } = require('../../mcp-server/apiClient');
 const { createTools, ORG_TOOLS } = require('../../mcp-server/tools');
-const { authenticateCaller } = require('../middleware/auth');
+const { authenticateCaller, clerkClient } = require('../middleware/auth');
+
+// Clerk is the OAuth authorization server for /api/mcp, so an MCP client
+// (a claude.ai custom connector) can sign a user in instead of sending a key:
+// a 401 points at the protected-resource metadata (RFC 9728), which names
+// Clerk's Frontend API. Needs dynamic client registration on in Clerk.
+let fapiUrl;
+function clerkFrontendApi() {
+  fapiUrl ??= clerkClient.domains.list().then((r) => (r.data ?? r).find((d) => !d.isSatellite).frontendApiUrl)
+    .catch((err) => { fapiUrl = undefined; throw err; });
+  return fapiUrl;
+}
+const origin = (req) => `${req.protocol}://${req.get('host')}`;
+
+const wellKnown = require('express').Router();
+wellKnown.get(['/oauth-protected-resource', '/oauth-protected-resource/api/mcp'], async (req, res, next) => {
+  try {
+    res.json({
+      resource: `${origin(req)}/api/mcp`,
+      authorization_servers: [await clerkFrontendApi()],
+      bearer_methods_supported: ['header'],
+      scopes_supported: ['profile', 'email'],
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+// Older MCP clients read the authorization server's metadata from the resource's own origin.
+wellKnown.get('/oauth-authorization-server', async (req, res, next) => {
+  try {
+    const r = await fetch(`${await clerkFrontendApi()}/.well-known/oauth-authorization-server`);
+    res.status(r.status).json(await r.json());
+  } catch (err) {
+    next(err);
+  }
+});
+
+function oauthChallenge(req, res, next) {
+  res.set('WWW-Authenticate', `Bearer resource_metadata="${origin(req)}/.well-known/oauth-protected-resource/api/mcp"`);
+  next();
+}
 
 const PROPERTY_ARG = z.string().optional().describe(
   "Which of the organization's hotels to act on (an id from list_properties). Omit when the key or org has one hotel; a per-property key ignores it.");
@@ -12,8 +52,9 @@ const PROPERTY_ARG = z.string().optional().describe(
 // Credentials only: the hotel is resolved per tool call by the API it loops
 // back to -- property_id, else the selectors the client sent, else the
 // org's only hotel. So one org key can work across all its hotels.
-router.post('/', authenticateCaller, async (req, res, next) => {
+router.post('/', oauthChallenge, authenticateCaller, async (req, res, next) => {
   try {
+    res.removeHeader('WWW-Authenticate');
     const forwardHeaders = {};
     if (req.headers['x-api-key']) forwardHeaders['X-Api-Key'] = req.headers['x-api-key'];
     if (req.headers.authorization) forwardHeaders['Authorization'] = req.headers.authorization;
@@ -68,3 +109,4 @@ router.all('/', (req, res) => {
 });
 
 module.exports = router;
+module.exports.wellKnown = wellKnown;

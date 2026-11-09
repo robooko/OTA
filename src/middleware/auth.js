@@ -1,4 +1,5 @@
 const { createClerkClient, verifyToken } = require('@clerk/backend');
+const { isMachineToken, verifyMachineAuthToken } = require('@clerk/backend/internal');
 const pool = require('../db');
 const { apiKeyRateLimiter } = require('./rateLimiter');
 const { grantStarter } = require('../lib/tokens');
@@ -28,6 +29,8 @@ async function authenticateOrg(req, res, next) {
   }
   const token = header.slice(7);
 
+  if (isMachineToken(token)) return authenticateOAuth(token, req, res, next);
+
   let claims;
   try {
     claims = await verifyToken(token, { secretKey: process.env.CLERK_SECRET_KEY });
@@ -48,6 +51,32 @@ async function authenticateOrg(req, res, next) {
   req.user = { id: claims.sub, role: mapClerkRole(claims.o.rol) };
   req.auth_method = 'bearer'; // staff rail -- bypasses session join codes
   next();
+}
+
+// A Clerk OAuth access token (an MCP client such as a claude.ai connector,
+// signed in through Clerk -- see routes/mcp.js). It names a user but no
+// active org, so the org is the user's only membership.
+// ponytail: 2 Clerk API calls per request (and MCP loops back once per tool
+// call); cache by token if Clerk rate limits bite. A user in several orgs is
+// refused until there's a way to pick one.
+async function authenticateOAuth(token, req, res, next) {
+  try {
+    const r = await verifyMachineAuthToken(token, { secretKey: process.env.CLERK_SECRET_KEY });
+    if (r.errors || r.tokenType !== 'oauth_token') {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+    const userId = r.data.subject;
+    const { data: memberships } = await clerkClient.users.getOrganizationMembershipList({ userId });
+    if (memberships.length !== 1) {
+      return res.status(401).json({ error: 'OAuth sign-in needs an account in exactly one organization' });
+    }
+    req.clerk_org_id = memberships[0].organization.id;
+    req.user = { id: userId, role: mapClerkRole(memberships[0].role.replace(/^org:/, '')) };
+    req.auth_method = 'bearer';
+    next();
+  } catch (err) {
+    next(err);
+  }
 }
 
 // authenticateOrg + the hotel: X-Property-Id when the org has several,

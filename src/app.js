@@ -117,6 +117,7 @@ app.use('/api/organization', organizationRoutes);
 app.use('/api/site', siteRoutes);
 app.use('/api/event-inquiries', eventInquiryRoutes);
 app.use('/api/mcp', mcpRoutes);
+app.use('/.well-known', mcpRoutes.wellKnown);
 app.use('/api/billing', billingRoutes);
 // forge and forge-app, server to server (X-Buxs-Secret); see controllers/buxs.js.
 app.use('/api/buxs', buxsRoutes);
