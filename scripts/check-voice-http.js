@@ -22,6 +22,11 @@ const pool = require('../src/db');
 const apiKeys = require('../src/lib/apiKeys');
 const app = require('../src/app');
 const tokens = require('../src/lib/tokens');
+// Texts are captured, never sent.
+const texts = [];
+const twilioLib = require('../src/lib/twilio');
+twilioLib.isConfigured = () => true;
+twilioLib.sendSms = async (to, body, from) => { texts.push({ to, body, from }); return 'SM_check'; };
 const { sendOutboundReply, loadInquiryWithProperty } = require('../src/lib/inquiryReplies');
 
 const NUMBER = '+447700900123';
@@ -202,16 +207,22 @@ const toolUse = (name, input = {}) => ({ type: 'tool_use', id: `tu_${Math.random
       });
       await check('book_appointment holds the time for the caller', async () => {
         sent.length = 0;
-        script.push({ content: [toolUse('book_appointment', { treatment_name: 'Haircut', date: tomorrow, time: '10:00', name: 'Sam Jones', email: 'sam@example.org' })] }, { content: [{ type: 'text', text: 'Booked.' }] });
-        await call(action, { SpeechResult: 'Ten please, sam at example dot org, yes that is right' });
+        script.push({ content: [toolUse('book_appointment', { treatment_name: 'Haircut', date: tomorrow, time: '10:00', name: 'Sam Jones' })] }, { content: [{ type: 'text', text: 'Booked.' }] });
+        await call(action, { SpeechResult: 'Ten please, Sam Jones' });
         const result = JSON.parse(sent[1].messages.at(-1).content[0].content);
         assert.equal(result.booked, true);
         const appt = await one(`SELECT contact_name, contact_email, contact_phone, status, start_time::text FROM spa_appointment WHERE property_id = $1`, [P]);
-        assert.deepEqual(appt, { contact_name: 'Sam Jones', contact_email: 'sam@example.org', contact_phone: CALLER, status: 'pending', start_time: '10:00:00' });
+        assert.deepEqual(appt, { contact_name: 'Sam Jones', contact_email: null, contact_phone: CALLER, status: 'pending', start_time: '10:00:00' });
+        // No email asked for: the confirm link is texted from the number they called.
+        assert.equal(texts.length, 1);
+        assert.equal(texts[0].to, CALLER);
+        assert.equal(texts[0].from, NUMBER);
+        assert.match(texts[0].body, /confirm your Haircut.*confirm-booking/);
+        assert.doesNotMatch(sent[0].system, /full name and email/);
         const enquiry = await one(`SELECT name, email, event_type, event_time::text, source, message FROM event_inquiry WHERE property_id = $1 AND event_type = 'Haircut'`, [P]);
         assert.equal(enquiry.source, 'phone');
         assert.equal(enquiry.event_time, '10:00:00');
-        assert.match(enquiry.message, /^Booked Haircut on .* at 10:00 by phone\.[\s\S]*Caller: Ten please/);
+        assert.match(enquiry.message, /^Booked Haircut on .* at 10:00 by phone\.[\s\S]*Caller: Ten please, Sam Jones/);
       });
       await check('a taken time is refused in words', async () => {
         sent.length = 0;

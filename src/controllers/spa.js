@@ -13,6 +13,7 @@ const { sendAppointmentConfirmation, sendAppointmentCancellation, sendAppointmen
 const { optOut } = require('./reviews');
 const { memberRateUntil, resolveRate } = require('../lib/spaMemberRate');
 const guard = require('../lib/spaBookingGuard');
+const twilio = require('../lib/twilio');
 const { attachStays } = require('../lib/stayLink');
 
 // Public base for links in emails that land back on this API -- same
@@ -879,18 +880,26 @@ async function publishAndEmailAfterCreate(spaId, propertyId, appointmentId, rawI
 // a guest hold ('pending') instead gets only the "confirm your booking"
 // email -- no live-feed publish, no confirmation email -- and confirmBooking
 // runs publishAndEmailAfterCreate when the link is clicked. Never throws.
-async function afterAppointmentCreated(spaId, propertyId, row, hold, branding, cancelUrl) {
+// hold_sms ({ to, from }) texts the confirm link instead (the phone
+// receptionist: callers can't reliably spell an email out loud).
+async function afterAppointmentCreated(spaId, propertyId, row, hold, branding, cancelUrl, holdSms = null) {
   if (row.status !== 'pending') {
     return publishAndEmailAfterCreate(spaId, propertyId, row.id, row, branding, cancelUrl);
   }
   try {
-    const { branding: resolved } = await resolveEmailBranding(propertyId, branding, null);
-    const full = await getFullAppointmentForEmail(row.id);
     const confirmUrl = `${OTA_API_BASE_URL}/api/spa/confirm-booking/${row.id}/${hold.confirm_token}`;
+    const full = await getFullAppointmentForEmail(row.id);
+    if (holdSms) {
+      const when = `${formatAppointmentDate(full.appointment_date)} at ${full.start_time.slice(0, 5)}`;
+      return await twilio.sendSms(holdSms.to,
+        `${full.property_name}: tap to confirm your ${full.treatment_name}, ${when}. Held for ${guard.HOLD_MINUTES} minutes. ${confirmUrl}`,
+        holdSms.from);
+    }
+    const { branding: resolved } = await resolveEmailBranding(propertyId, branding, null);
     await sendAppointmentHoldRequest(full, full.property_name, resolved, confirmUrl, guard.HOLD_MINUTES);
   } catch (err) {
     // The hold simply lapses and releases the time -- nothing to undo.
-    console.error('Booking hold email failed:', err.message);
+    console.error('Booking hold request failed:', err.message);
   }
 }
 
@@ -1167,7 +1176,9 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // see lib/spaMemberRate.js); when it qualifies for the regulars' rate on
 // `date`, the appointment books at member_price/member_duration_mins. The
 // price is frozen onto the appointment either way.
-async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, payment_verified = false, branding, cancel_url, enforceLeadTime = false, guestRail = false, send_emails = true }) {
+async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, payment_verified = false, branding, cancel_url, enforceLeadTime = false, guestRail = false, send_emails = true, hold_sms = null }) {
+  // A texted hold has no email to cap bookings by, so the caller's number stands in.
+  const railKey = contact_email || (hold_sms && `tel:${hold_sms.to}`);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1193,7 +1204,7 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
     // email lock first and the two can't deadlock.
     let hold = null;
     if (guestRail) {
-      const check = await guard.checkGuestBooking(client, { property_id, contact_email, member_email, payment_verified });
+      const check = await guard.checkGuestBooking(client, { property_id, contact_email: railKey, member_email, payment_verified });
       if (!check.ok) { await client.query('ROLLBACK'); return { ok: false, code: check.code }; }
       hold = check.hold;
     }
@@ -1254,12 +1265,12 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
         property_id, treatment_id, chosenTherapistId, date, time, endTime,
         guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
         rate.price, rate.memberRate,
-        ...holdColumns(hold, contact_email, branding, cancel_url), send_emails,
+        ...holdColumns(hold, railKey, branding, cancel_url), send_emails,
       ]
     );
 
     await client.query('COMMIT');
-    await afterAppointmentCreated(spa_id, property_id, rows[0], hold, branding, cancel_url);
+    await afterAppointmentCreated(spa_id, property_id, rows[0], hold, branding, cancel_url, hold_sms);
     return { ok: true, appointment: rows[0] };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1580,7 +1591,7 @@ async function confirmBooking(req, res, next) {
 
     const opts = appt.pending_email_opts || {};
     await publishAndEmailAfterCreate(appt.spa_id, appt.property_id, confirmed.id, confirmed, opts.branding, opts.cancel_url);
-    res.send(confirmPage('Booking confirmed', `Your booking at ${escapeHtml(appt.property_name)} is confirmed: ${when}. A confirmation email is on its way.`));
+    res.send(confirmPage('Booking confirmed', `Your booking at ${escapeHtml(appt.property_name)} is confirmed: ${when}.${confirmed.contact_email ? ' A confirmation email is on its way.' : ''}`));
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     next(err);

@@ -68,7 +68,7 @@ function listen(res, property, text, { turns, n, inquiryId }) {
   const params = new URLSearchParams({ n: String(n), h: encodeHistory(turns) });
   if (inquiryId) params.set('e', inquiryId);
   twiml(res,
-    `<Gather input="speech" speechTimeout="auto" language="${LANGUAGE}" action="${esc(`/api/voice?${params}`)}" method="POST">${say(text)}</Gather>` +
+    `<Gather input="speech" speechTimeout="auto" speechModel="phone_call" enhanced="true" language="${LANGUAGE}" action="${esc(`/api/voice?${params}`)}" method="POST">${say(text)}</Gather>` +
     `${say(`Thanks for calling ${property.name}. Goodbye.`)}<Hangup/>`);
 }
 
@@ -83,7 +83,7 @@ function handOff(res, property, text) {
 const CHANNELS = {
   phone: {
     role: 'answering the phone',
-    tone: 'Calm, warm and brief, like a good receptionist. One or two short spoken sentences per reply. Everything you write is read aloud by a text-to-speech voice: no lists, markdown or emojis. Never read out a web address. Say prices the way a person would ("forty-five pounds").',
+    tone: 'Calm, warm and brief, like a good receptionist. One or two short spoken sentences per reply, and at most one question. Everything you write is read aloud by a text-to-speech voice: no lists, markdown or emojis. Never read out a web address. Say prices the way a person would ("forty-five pounds").',
     heading: 'What you do on the phone',
     from: 'the call',
     readBack: 'read it back letter by letter and only use it once they confirm',
@@ -103,8 +103,15 @@ const CHANNELS = {
   },
 };
 
-function systemPrompt(property, spa, today, channel = 'phone') {
+// canText: the caller's number is known and texts can be sent, so a booking
+// is held by texting them the confirm link and no email is needed.
+function systemPrompt(property, spa, today, channel = 'phone', canText = false) {
   const c = CHANNELS[channel];
+  const contact = canText
+    ? `get their full name (if they give only one name, ask once for the other, then book with what you have). Don't ask for an email`
+    : `get their full name and email (${c.readBack})`;
+  const confirmBy = canText ? 'tap the link we text them' : 'click the link in the email';
+  const goAhead = canText ? 'Picking the time and giving their name is their go-ahead' : c.confirm;
   return `You are the receptionist ${c.role} for ${property.name}.
 
 Tone
@@ -112,17 +119,17 @@ ${c.tone}
 
 <venue>
 ${buildVenueFacts(property, null, spa)}</venue>
-${property.ai_reply_instructions ? `<instructions>\n${property.ai_reply_instructions}\n</instructions>\n` : ''}
+${property.ai_reply_instructions ? `<instructions>\n${property.ai_reply_instructions}\n</instructions>\nThese instructions were written for email replies: follow their facts and policies, but never sign off, give a name at the end, or mention replying to an email.\n` : ''}
 Only state facts given above. If you don't know something, say the team will get back to them and take their details.
 
 ${c.heading}
 - Answer questions about the venue using only the information above.
 - For a booking, an event or anything the team must follow up, get their name, what they want and, where it applies, the date, time and number of guests, then call "take_enquiry". Their number comes from ${c.from}, so don't ask for it unless it's withheld. An email is optional: ask once if they'd like a reply by email, and don't press if they'd rather not. If they give one, ${c.readBack}.
-${spa ? `- To book an appointment, call "check_availability" and offer two or three of the times it returns, by day and time ("Tuesday at ten"), choosing times on the hour where there are any. Describe a day by its opening hours ("nine till five"), never by the last start time ("until a quarter to five"). Once they pick one, get their full name and email (${c.readBack}). ${c.confirm}: call "book_appointment" in that same reply, without asking again or checking availability again. Then tell them the time is held for ${HOLD_MINUTES} minutes until they click the link in the email. If booking fails, say why in plain words and offer another time, or take an enquiry.
+${spa ? `- To book an appointment, call "check_availability" and offer two or three of the times it returns, by day and time ("Tuesday at ten"), choosing times on the hour where there are any. Describe a day by its opening hours ("nine till five"), never by the last start time ("until a quarter to five"). Once they pick one, ${contact}. ${goAhead}: call "book_appointment" in that same reply, and never say a time is booked or held unless book_appointment returned booked, without asking again or checking availability again. Then tell them the time is held for ${HOLD_MINUTES} minutes until they ${confirmBy}. If booking fails, say why in plain words and offer another time, or take an enquiry.
 ` : `- You cannot confirm bookings yourself; say the team will be in touch to confirm.
 `}- If they ask for a person, or need something you can't help with, ${c.person}.
 
-Lines in square brackets in your earlier replies record what your tools did; they are true, so never redo them, and never say them aloud. You can't see whether someone has clicked an email link; if asked, say the email confirms it once they've clicked.
+Lines in square brackets in your earlier replies record what your tools did; they are true, so never redo them, and never say them aloud. You can't see whether someone has tapped a confirm link; if asked, say the link confirms it once they've tapped it.
 When you use a tool, you may say a brief sentence first. If no tool can do what the caller asked, say so instead of guessing. Do not include internal or system XML tags in your reply.
 
 Who you are
@@ -160,7 +167,7 @@ const TRANSFER_CALL = {
 // only a few upcoming bookings, so a prank call can't fill the diary.
 const BOOK_APPOINTMENT = {
   name: 'book_appointment',
-  description: 'Book a time from check_availability once the caller has picked it and confirmed their name and email.',
+  description: 'Book a time from check_availability once the caller has picked it and given their name.',
   input_schema: {
     type: 'object',
     properties: {
@@ -168,9 +175,9 @@ const BOOK_APPOINTMENT = {
       date: { type: 'string', description: 'YYYY-MM-DD' },
       time: { type: 'string', description: 'HH:MM 24-hour' },
       name: { type: 'string', description: "The caller's full name" },
-      email: { type: 'string', description: 'Confirmed with the caller' },
+      email: { type: 'string', description: 'Only if the caller gave and confirmed one' },
     },
-    required: ['treatment_name', 'date', 'time', 'name', 'email'],
+    required: ['treatment_name', 'date', 'time', 'name'],
   },
 };
 
@@ -183,8 +190,10 @@ const BOOK_FAILURES = {
 };
 
 async function bookAppointment(property, caller, input, channel = 'phone') {
-  const email = clip(input.email, 255);
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { booked: false, reason: 'A valid email is needed to hold the time.' };
+  const given = clip(input.email, 255);
+  const email = given && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(given) ? given : null;
+  const textHold = canText(property, caller);
+  if (!email && !textHold) return { booked: false, reason: 'A valid email is needed to hold the time.' };
   const { rows: [treatment] } = await pool.query(
     "SELECT id FROM spa_treatment WHERE spa_id = $1 AND status = 'active' AND lower(name) = lower($2)",
     [property.spa_id, clip(input.treatment_name, 200) ?? '']
@@ -202,11 +211,13 @@ async function bookAppointment(property, caller, input, channel = 'phone') {
     notes: channel === 'sms' ? 'Booked by the receptionist by text' : 'Booked by the phone receptionist',
     enforceLeadTime: true,
     guestRail: true,
+    hold_sms: textHold ? { to: caller, from: property.voice_number } : null,
   });
   if (!result.ok) return { booked: false, reason: BOOK_FAILURES[result.code] ?? 'That booking could not be made.' };
   return { booked: true, held_minutes: HOLD_MINUTES, awaiting_email_confirmation: result.appointment.status === 'pending' };
 }
 
+const canText = (property, caller) => !!caller && !!property.voice_number && twilio.isConfigured();
 const clip = (value, max) => (typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null);
 
 // Creates the call's enquiry on the first take_enquiry, updates it after.
@@ -247,7 +258,7 @@ async function saveEnquiry(property, caller, input, inquiryId, turns, source = '
 // ponytail: first spa only; a property with several spas gets the first one's facts.
 async function findProperty(number) {
   const { rows: [property] } = await pool.query(
-    `SELECT p.id, p.name, p.currency, p.ai_reply_instructions, p.return_instructions, p.voice_transfer_number,
+    `SELECT p.id, p.name, p.currency, p.ai_reply_instructions, p.return_instructions, p.voice_transfer_number, p.voice_number,
             (SELECT s.id FROM spa s WHERE s.property_id = p.id AND s.status = 'active' ORDER BY s.created_at LIMIT 1) AS spa_id
      FROM property p WHERE p.voice_number = $1 AND p.voice_enabled`,
     [number]
@@ -288,7 +299,7 @@ async function runReceptionist(property, { caller, turns, inquiryId, channel = '
       // Brevity comes from the prompt; the cap is only a backstop.
       max_tokens: 1024,
       thinking: { type: 'disabled' },
-      system: systemPrompt(property, spa, today, channel),
+      system: systemPrompt(property, spa, today, channel, canText(property, caller)),
       tools,
       messages,
     }, { signal });
@@ -321,7 +332,7 @@ async function runReceptionist(property, { caller, turns, inquiryId, channel = '
             event_time: String(b.time).slice(0, 5),
             event_type: b.treatment_name,
           }, inquiryId, turns, channel);
-          done.push(`[Done: booked ${b.treatment_name} on ${b.date} at ${b.time} for ${b.name}, ${b.email}; held ${HOLD_MINUTES} minutes until they click the email link]`);
+          done.push(`[Done: booked ${b.treatment_name} on ${b.date} at ${b.time} for ${b.name}${b.email ? `, ${b.email}` : ''}; held ${HOLD_MINUTES} minutes until they ${canText(property, caller) ? 'tap the link we texted' : 'click the email link'}]`);
         }
       } else if (call.name === 'transfer_call' && tools.includes(TRANSFER_CALL)) {
         transfer = true;

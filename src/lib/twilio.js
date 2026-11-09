@@ -25,9 +25,10 @@ function isConfigured() {
 // responsible for that, same as callers being responsible for a valid email
 // address before calling Resend. Returns the message SID (mirrors
 // sendReply/sendAppointmentEmail returning the Resend email id).
-async function sendSms(to, body) {
+// `from` defaults to TWILIO_FROM_NUMBER; a receptionist number texts from itself.
+async function sendSms(to, body, from = process.env.TWILIO_FROM_NUMBER) {
   if (!client) throw new Error('Twilio not configured');
-  const message = await client.messages.create({ to, from: process.env.TWILIO_FROM_NUMBER, body });
+  const message = await client.messages.create({ to, from, body });
   return message.sid;
 }
 
