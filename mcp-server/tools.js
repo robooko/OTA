@@ -115,6 +115,7 @@ function createTools(apiRequest) {
       check_in: z.string().describe('YYYY-MM-DD'),
       check_out: z.string().describe('YYYY-MM-DD'),
       guests: z.number().int(),
+      hotel: z.string().optional().describe('Only this hotel (room_type.hotel), for properties holding several hotels'),
     },
     run: (args) => apiRequest('GET', '/api/availability/search', { query: args }),
   },
@@ -130,6 +131,7 @@ function createTools(apiRequest) {
         room_type_id: z.string().optional().describe('Keep this room on this type'),
       })).min(1).max(10),
       rate: z.string().nullable().optional().describe('Omit for the cheapest; a rate name; null = no online payment'),
+      hotel: z.string().optional().describe('Only this hotel (room_type.hotel), for properties holding several hotels'),
     },
     run: (args) => apiRequest('POST', '/api/availability/quote', { body: args }),
   },
@@ -609,8 +611,10 @@ function createTools(apiRequest) {
   {
     name: 'list_room_types',
     description: 'List all room types',
-    inputSchema: {},
-    run: () => apiRequest('GET', '/api/room-types'),
+    inputSchema: {
+      hotel: z.string().optional().describe('Only this hotel (room_type.hotel), for properties holding several hotels'),
+    },
+    run: (args) => apiRequest('GET', '/api/room-types', { query: args }),
   },
   {
     name: 'create_room_type',
@@ -618,6 +622,7 @@ function createTools(apiRequest) {
     inputSchema: {
       name: z.string(),
       code: z.string().min(1).max(3).optional().describe("Short code, e.g. 'DBL'; unique per property"),
+      hotel: z.string().max(100).optional().describe("Hotel this room type belongs to, e.g. 'qualia', when one property holds several hotels"),
       description: z.string().optional(),
       max_occupancy: z.number().int(),
       base_rate: z.number(),
@@ -631,6 +636,7 @@ function createTools(apiRequest) {
       id: z.string(),
       name: z.string().optional(),
       code: z.string().min(1).max(3).nullable().optional().describe('Max 3 chars, unique per property; null clears it'),
+      hotel: z.string().max(100).nullable().optional().describe('Hotel label; null clears it'),
       description: z.string().optional(),
       max_occupancy: z.number().int().optional(),
       base_rate: z.number().optional(),

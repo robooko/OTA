@@ -11,6 +11,14 @@ function isValidCode(v) {
   return typeof v === 'string' && v.length >= 1 && v.length <= 3;
 }
 
+// Hotel label grouping room types within one property: trimmed, 1-100 chars.
+function parseHotel(v) {
+  if (v == null) return null;
+  const t = typeof v === 'string' ? v.trim() : '';
+  if (!t || t.length > 100) throw Object.assign(new Error('hotel must be a string of 1 to 100 characters, or null'), { status: 400 });
+  return t;
+}
+
 // Unique index idx_room_type_property_code -> 409 instead of a 500.
 function codeTaken(err) {
   if (err.code === '23505' && err.constraint === 'idx_room_type_property_code') {
@@ -23,8 +31,9 @@ function codeTaken(err) {
 async function listRoomTypes(req, res, next) {
   try {
     const { rows } = await pool.query(
-      "SELECT * FROM room_type WHERE status = 'active' AND property_id = $1 ORDER BY name",
-      [req.property_id]
+      `SELECT * FROM room_type WHERE status = 'active' AND property_id = $1
+       AND ($2::text IS NULL OR hotel = $2) ORDER BY name`,
+      [req.property_id, req.query.hotel || null]
     );
     res.json(rows);
   } catch (err) {
@@ -48,6 +57,7 @@ async function getRoomType(req, res, next) {
 async function createRoomType(req, res, next) {
   try {
     const { name, code, description, max_occupancy, base_rate } = req.body;
+    const hotel = parseHotel(req.body.hotel);
     if (!name || max_occupancy == null || base_rate == null) {
       return res.status(400).json({ error: 'name, max_occupancy, and base_rate are required' });
     }
@@ -55,9 +65,9 @@ async function createRoomType(req, res, next) {
       return res.status(400).json({ error: 'code must be a string of 1 to 3 characters' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO room_type (property_id, name, code, description, max_occupancy, base_rate)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.property_id, name, code ?? null, description || null, max_occupancy, base_rate]
+      `INSERT INTO room_type (property_id, name, code, description, max_occupancy, base_rate, hotel)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.property_id, name, code ?? null, description || null, max_occupancy, base_rate, hotel]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -68,6 +78,7 @@ async function createRoomType(req, res, next) {
 async function updateRoomType(req, res, next) {
   try {
     const { name, code, description, max_occupancy, base_rate, status, floor_plan } = req.body;
+    const hotel = parseHotel(req.body.hotel);
     if (floor_plan !== undefined && !isValidFloorPlan(floor_plan)) {
       return res.status(400).json({ error: 'floor_plan must be a JSON object' });
     }
@@ -82,10 +93,11 @@ async function updateRoomType(req, res, next) {
          base_rate     = COALESCE($4, base_rate),
          status        = COALESCE($5, status),
          floor_plan    = COALESCE($6::jsonb, floor_plan),
-         code          = CASE WHEN $9 THEN $10 ELSE code END
+         code          = CASE WHEN $9 THEN $10 ELSE code END,
+         hotel         = CASE WHEN $11 THEN $12 ELSE hotel END
        WHERE id = $7 AND property_id = $8 RETURNING *`,
       [name, description, max_occupancy, base_rate, status, floor_plan ?? null, req.params.id, req.property_id,
-       code !== undefined, code ?? null]
+       code !== undefined, code ?? null, req.body.hotel !== undefined, hotel]
     );
     if (!rows.length) return res.status(404).json({ error: 'Room type not found' });
 

@@ -103,6 +103,7 @@ async function searchAvailability(req, res, next) {
       `SELECT
          rta.room_type_id,
          rt.name,
+         rt.hotel,
          rt.description,
          rt.max_occupancy,
          MIN(rta.sellable_rooms)  AS min_available,
@@ -115,10 +116,11 @@ async function searchAvailability(req, res, next) {
          AND rta.date <  $3
          AND rt.max_occupancy >= $4
          AND rt.status = 'active'
-       GROUP BY rta.room_type_id, rt.name, rt.description, rt.max_occupancy
+         AND ($5::text IS NULL OR rt.hotel = $5)
+       GROUP BY rta.room_type_id, rt.name, rt.hotel, rt.description, rt.max_occupancy
        HAVING MIN(rta.sellable_rooms) > 0
        ORDER BY from_rate ASC`,
-      [property_id, check_in, check_out, parseInt(guests, 10)]
+      [property_id, check_in, check_out, parseInt(guests, 10), req.query.hotel || null]
     );
 
     // Each room type's active rate plans, priced off its from_rate. Additive:

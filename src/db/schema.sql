@@ -240,6 +240,7 @@ CREATE TABLE IF NOT EXISTS room_type (
   property_id    UUID            NOT NULL REFERENCES property(id),
   name           VARCHAR(100)    NOT NULL,
   code           VARCHAR(3),     -- optional short code, e.g. 'DBL' -- see migrate-2026-11-04-room-type-code.sql
+  hotel          VARCHAR(100),   -- optional hotel label within the property -- see migrate-2026-11-09-room-type-hotel.sql
   description    TEXT,
   max_occupancy  INT             NOT NULL,
   base_rate      NUMERIC(14,2)   NOT NULL,
