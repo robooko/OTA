@@ -40,7 +40,9 @@ async function listBookings(req, res, next) {
     if (term) {
       params.push(`%${term.replace(/[\\%_]/g, '\\$&')}%`);
       const n = `$${params.length}`;
-      where.push(`(b.label ILIKE ${n} OR mb.contact_name ILIKE ${n} OR mb.contact_email ILIKE ${n} OR mb.boat_name ILIKE ${n} OR mb.notes ILIKE ${n})`);
+      params.push(term);
+      // ...or the booking's exact id, so ?q=<id> deep-links one booking.
+      where.push(`(b.label ILIKE ${n} OR mb.contact_name ILIKE ${n} OR mb.contact_email ILIKE ${n} OR mb.boat_name ILIKE ${n} OR mb.notes ILIKE ${n} OR mb.id::text = $${params.length})`);
     }
     const w = where.join(' AND ');
     const [{ rows: [{ total }] }, { rows }] = await Promise.all([

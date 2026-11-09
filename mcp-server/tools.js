@@ -1579,7 +1579,7 @@ function createTools(apiRequest) {
       from: z.string().optional().describe('YYYY-MM-DD'), to: z.string().optional().describe('YYYY-MM-DD'),
       status: z.enum(['pending', 'confirmed', 'declined', 'cancelled']).optional(),
       marina_id: z.string().optional(), berth_id: z.string().optional(),
-      q: z.string().max(100).optional().describe('Text search: berth label, guest name, email, boat name, notes'),
+      q: z.string().max(100).optional().describe('Text search: berth label, guest name, email, boat name, notes -- or an exact booking id'),
       limit: z.number().int().min(1).max(500).optional(), offset: z.number().int().min(0).optional(),
     },
     run: (query) => apiRequest('GET', '/api/marina/bookings', { query }),
