@@ -1574,7 +1574,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'list_marina_bookings',
-    description: 'Berth bookings across this property\'s marinas, paged ({ total, data }), newest first. from = bookings departing after this date (open-ended always included), to = arriving before it. Guest checkouts in progress (holds) are never listed.',
+    description: 'Berth bookings across this property\'s marinas, paged ({ total, data }), newest first. from = bookings departing after this date (open-ended always included), to = arriving before it. Guest checkouts in progress (holds) are never listed. The Hotal dashboard shows the same list at /marina?<these params>#bookings (q, status, marina_id, berth_id, from, to), so a filtered view can be linked or opened.',
     inputSchema: {
       from: z.string().optional().describe('YYYY-MM-DD'), to: z.string().optional().describe('YYYY-MM-DD'),
       status: z.enum(['pending', 'confirmed', 'declined', 'cancelled']).optional(),
