@@ -106,11 +106,20 @@ const call = async (fn, req) => {
       const r = await api('GET', `${search}&property_id=${A1}`, { key: 'nope' });
       assert.equal(r.status, 200, r.text);
     });
-    const mcp = (headers) => fetch(`${base}/api/mcp`, {
+    const mcp = (headers, name = 'get_property', args = {}, key = ORG_KEY, method = 'tools/call') => fetch(`${base}/api/mcp`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'X-Api-Key': ORG_KEY, ...headers },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_property', arguments: {} } }),
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'X-Api-Key': key, ...headers },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: method === 'tools/call' ? { name, arguments: args } : {} }),
     });
+    // The tool's JSON result (or error text) out of the MCP response.
+    const tool = async (...a) => {
+      const r = await mcp(...a);
+      const text = await r.text();
+      assert.equal(r.status, 200, text);
+      const msg = JSON.parse(text.match(/^data: (.*)$/m)?.[1] ?? text);
+      const out = msg.result.content[0].text;
+      return msg.result.isError ? { error: out } : JSON.parse(out);
+    };
     await check('mcp: org key + slug -> tool calls land on that hotel', async () => {
       const r = await mcp({ 'X-Property-Slug': 'harbour' });
       const text = await r.text();
@@ -118,16 +127,40 @@ const call = async (fn, req) => {
       assert.ok(text.includes(A2), text);
       assert.ok(!text.includes('"isError":true'), text);
     });
-    await check('mcp: org key, no selector -> clear 400', async () => {
-      const r = await mcp({});
-      assert.equal(r.status, 400);
-      assert.equal((await r.json()).error, SITE_AMBIGUOUS);
+    await check('mcp: org key, no selector -> connects; a hotel tool without property_id says which is needed', async () => {
+      assert.equal((await tool({})).error, SITE_AMBIGUOUS);
+      assert.equal((await tool({}, 'get_property', { property_id: A1 })).id, A1);
+      assert.equal((await tool({ 'X-Property-Slug': 'harbour' }, 'get_property', { property_id: A1 })).id, A1, 'property_id beats the header');
+      assert.match((await tool({}, 'get_property', { property_id: crypto.randomUUID() })).error, /not found/i);
+    });
+    await check('mcp: bad key -> 401 before any tool runs', async () => {
+      assert.equal((await mcp({}, 'get_property', {}, 'nope')).status, 401);
+    });
+    await check('mcp: tools/list gives hotel tools a property_id, org tools none', async () => {
+      const r = await mcp({}, null, null, ORG_KEY, 'tools/list');
+      const text = await r.text();
+      const { tools } = JSON.parse(text.match(/^data: (.*)$/m)?.[1] ?? text).result;
+      const by = Object.fromEntries(tools.map((t) => [t.name, t]));
+      assert.ok(by.create_room_type.inputSchema.properties.property_id);
+      assert.ok(!by.list_properties.inputSchema.properties?.property_id);
+      assert.ok(!by.create_property.inputSchema.properties?.property_id);
+    });
+    await check('mcp: an agent lists, creates and sets up a hotel with the org key alone', async () => {
+      const before = await tool({}, 'list_properties');
+      assert.deepEqual(before.map((p) => p.slug).sort(), ['harbour', 'seaview']);
+      const made = await tool({}, 'create_property', { name: 'Lagoon', slug: 'lagoon' });
+      assert.equal(made.name, 'Lagoon');
+      const rt = await tool({}, 'create_room_type', { property_id: made.id, name: 'Lagoon Suite', max_occupancy: 2, base_rate: 300 });
+      assert.equal((await one('SELECT property_id FROM room_type WHERE id = $1', [rt.id])).property_id, made.id);
+      assert.deepEqual((await tool({}, 'list_room_types', { property_id: A1 })).map((t) => t.id).filter((id) => id === rt.id), [], 'other hotel untouched');
+      assert.equal((await tool({}, 'list_properties')).length, 3);
+      assert.match((await tool({}, 'list_properties', {}, PROP_KEY)).error, /organization API key/);
     });
 
     await check('site: GET /api/site/properties lists the org\'s hotels, no secrets', async () => {
       const r = await api('GET', '/api/site/properties');
       assert.equal(r.status, 200, r.text);
-      assert.deepEqual(r.body.map((p) => p.slug).sort(), ['harbour', 'seaview']);
+      assert.deepEqual(r.body.map((p) => p.slug).sort(), ['harbour', 'lagoon', 'seaview'], 'Lagoon from the MCP check');
       const seaview = r.body.find((p) => p.id === A1);
       assert.deepEqual(seaview.websites, [`https://www.${HOST}/`]);
       assert.deepEqual(Object.keys(seaview).sort(), ['currency', 'id', 'name', 'slug', 'timezone', 'websites']);
@@ -151,12 +184,21 @@ const call = async (fn, req) => {
       assert.equal((await api('PUT', '/api/property/me', { ...as1, body: { currency: 'EUR' } })).body.slug, 'seaview-2'); // omitted = unchanged
       assert.equal((await api('PUT', '/api/property/me', { ...as1, body: { slug: null } })).body.slug, null);
     });
-    await check('organization routes require a bearer', async () => {
-      assert.equal((await api('GET', '/api/organization/properties', { key: ORG_KEY })).status, 401);
+    await check('organization properties: org key lists; create needs properties.manage; property key 403', async () => {
+      assert.equal((await api('GET', '/api/organization/properties')).status, 200);
+      assert.equal((await api('GET', '/api/organization/properties', { key: PROP_KEY })).status, 403);
+      assert.equal((await api('GET', '/api/organization/properties', { key: null })).status, 401);
+      const SCOPED = `org_scoped_${run}`; const MANAGER = `org_mgr_${run}`;
+      await apiKeys.create(pool, { clerk_org_id: ORG }, { key: SCOPED, name: 'Site', permissions: [] });
+      await apiKeys.create(pool, { clerk_org_id: ORG }, { key: MANAGER, name: 'Agent', permissions: ['properties.manage'] });
+      assert.equal((await api('POST', '/api/organization/properties', { key: SCOPED, body: { name: 'No' } })).status, 403);
+      assert.equal((await api('POST', '/api/organization/properties', { key: PROP_KEY, body: { name: 'No' } })).status, 403);
+      assert.equal((await api('POST', '/api/organization/properties', { key: MANAGER, body: { name: 'Reef' } })).status, 201);
+      assert.equal((await api('GET', '/api/organization/api-keys')).status, 401, 'key management stays bearer-only');
     });
     await check('org controller: list and create properties', async () => {
       const list = await call(orgCtrl.listProperties, { clerk_org_id: ORG });
-      assert.equal(list.body.length, 2);
+      assert.equal(list.body.length, 4, 'Seaview, Harbour + Lagoon, Reef from the checks above');
       assert.deepEqual(Object.keys(list.body[0]).sort(), ['id', 'name', 'slug', 'status']);
       assert.equal((await call(orgCtrl.createProperty, { clerk_org_id: ORG, body: { name: '  ' } })).statusCode, 400);
       assert.equal((await call(orgCtrl.createProperty, { clerk_org_id: ORG, body: { name: 'x'.repeat(101) } })).statusCode, 400);
@@ -183,6 +225,7 @@ const call = async (fn, req) => {
     });
   } finally {
     await pool.query('DELETE FROM property_website WHERE property_id IN (SELECT id FROM property WHERE clerk_org_id = ANY($1))', [cleanupOrgs]);
+    await pool.query('DELETE FROM room_type WHERE property_id IN (SELECT id FROM property WHERE clerk_org_id = ANY($1))', [cleanupOrgs]);
     await pool.query('DELETE FROM property_token_ledger WHERE property_id IN (SELECT id FROM property WHERE clerk_org_id = ANY($1))', [cleanupOrgs]);
     await pool.query('DELETE FROM property WHERE clerk_org_id = ANY($1)', [cleanupOrgs]);
     await pool.query('DELETE FROM organization WHERE clerk_org_id = ANY($1)', [cleanupOrgs]);

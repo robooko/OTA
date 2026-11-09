@@ -9,6 +9,7 @@ const PERMISSIONS = [
   'housekeeping.inspect', // record an inspection (pass / fail a clean)
   'housekeeping.manage',  // checklist items, stayover rule, minibar catalogue and lists
   'overbooking.manage',   // overbooking switch + cap, model allowances, manual overrides
+  'properties.manage',    // create hotels in the organization (org-level; staff need admin)
 ];
 
 // null when `list` isn't an array of strings; otherwise the names not in

@@ -1456,6 +1456,21 @@ function createTools(apiRequest) {
     run: ({ id, draft_id, reason }) => apiRequest('POST', `/api/event-inquiries/${id}/ai-drafts/${draft_id}/reject`, { body: reason ? { reason } : {} }),
   },
   {
+    name: 'list_properties',
+    description: "List the organization's hotels: id, name, slug, status. Pass a hotel's id as property_id on any other tool to act on that hotel. Needs an organization API key (a per-property key gets 403).",
+    inputSchema: {},
+    run: () => apiRequest('GET', '/api/organization/properties'),
+  },
+  {
+    name: 'create_property',
+    description: "Create another hotel in the organization (gets the starter tokens). Returns { id, name, slug, status, currency, timezone }; then set it up by passing property_id: <id> to update_property, create_room_type, create_room and the rest. Needs an organization key with the properties.manage permission (full keys have it).",
+    inputSchema: {
+      name: z.string().min(1).max(100),
+      slug: z.string().optional().describe('1-60 lowercase letters, digits or hyphens; unique in the organization. Routes a group website (X-Property-Slug)'),
+    },
+    run: (args) => apiRequest('POST', '/api/organization/properties', { body: args }),
+  },
+  {
     name: 'get_property',
     description: 'The property (venue/org) this API key operates for: id, clerk_org_id (the Clerk organization, null if none is linked), name, currency, timezone, tax settings, enabled modules, sidon_marina_id (linked Sidon marina, null if none)',
     inputSchema: {},
@@ -2754,4 +2769,7 @@ function createTools(apiRequest) {
   ];
 }
 
-module.exports = { createTools };
+// Org-level tools: no property_id argument (routes/mcp.js adds it to the rest).
+const ORG_TOOLS = new Set(['list_properties', 'create_property']);
+
+module.exports = { createTools, ORG_TOOLS };

@@ -124,6 +124,33 @@ async function authenticateOrgKey(req, res, next) {
   });
 }
 
+// Org-level, no property: a Clerk bearer (authenticateOrg) or an org API key
+// (authenticateOrgKey). /api/organization/properties, so an agent holding the
+// org key can list and create the org's hotels.
+function authenticateOrgOrKey(req, res, next) {
+  const header = req.headers.authorization;
+  if (header && header.startsWith('Bearer ')) return authenticateOrg(req, res, next);
+  return authenticateOrgKey(req, res, next);
+}
+
+// Credentials only, no hotel: a valid Clerk bearer or any enabled API key.
+// /api/mcp, where each tool call picks its hotel (property_id) and the API
+// it loops back to resolves and authorises it.
+function authenticateCaller(req, res, next) {
+  const header = req.headers.authorization;
+  if (header && header.startsWith('Bearer ')) return authenticateOrg(req, res, next);
+  const key = req.headers['x-api-key'];
+  if (!key) return res.status(401).json({ error: BAD_KEY });
+  return apiKeyRateLimiter(req, res, async () => {
+    try {
+      if (!(await findByKey(pool, key))) return res.status(401).json({ error: BAD_KEY });
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+}
+
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user || !roles.includes(req.user.role)) {
@@ -175,4 +202,4 @@ function requirePermission(name) {
   };
 }
 
-module.exports = { clerkClient, authenticate, authenticateOrg, authenticateOrApiKey, authenticateOrgKey, requireRole, requireRoleOrApiKey, hasPermission, requirePermission };
+module.exports = { clerkClient, authenticate, authenticateOrg, authenticateOrApiKey, authenticateOrgKey, authenticateOrgOrKey, authenticateCaller, requireRole, requireRoleOrApiKey, hasPermission, requirePermission };

@@ -1,11 +1,12 @@
 const router = require('express').Router();
 const ctrl = require('../controllers/organization');
 const apiKeys = require('../controllers/apiKeys').organization;
-const { authenticateOrg, requireRole } = require('../middleware/auth');
+const { authenticateOrg, authenticateOrgOrKey, requireRole, requirePermission } = require('../middleware/auth');
 
-// Staff routes spanning the org's hotels -- no X-Property-Id needed.
-router.get('/properties', authenticateOrg, ctrl.listProperties);
-router.post('/properties', authenticateOrg, requireRole('admin'), ctrl.createProperty);
+// Routes spanning the org's hotels -- no X-Property-Id needed. Staff or an org
+// key; creating needs properties.manage (admins and full keys have it).
+router.get('/properties', authenticateOrgOrKey, ctrl.listProperties);
+router.post('/properties', authenticateOrgOrKey, requirePermission('properties.manage'), ctrl.createProperty);
 
 // The org's main ('Default') website key, old shapes kept for the dashboard.
 router.get('/api-key', authenticateOrg, requireRole('admin'), apiKeys.getLegacy);
