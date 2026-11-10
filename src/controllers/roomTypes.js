@@ -2,6 +2,7 @@ const pool = require('../db');
 const { isValidDate } = require('../middleware/validate');
 const { HORIZON_DAYS } = require('../lib/availabilitySeeder');
 const { refreshAvailabilityView } = require('../lib/roomPayments');
+const { parseFeatures, parseFeatureFilter } = require('../lib/roomFeatures');
 
 function isValidFloorPlan(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -32,8 +33,8 @@ async function listRoomTypes(req, res, next) {
   try {
     const { rows } = await pool.query(
       `SELECT * FROM room_type WHERE status = 'active' AND property_id = $1
-       AND ($2::text IS NULL OR hotel = $2) ORDER BY name`,
-      [req.property_id, req.query.hotel || null]
+       AND ($2::text IS NULL OR hotel = $2) AND ($3::text[] IS NULL OR features @> $3) ORDER BY name`,
+      [req.property_id, req.query.hotel || null, parseFeatureFilter(req.query.features)]
     );
     res.json(rows);
   } catch (err) {
@@ -58,6 +59,7 @@ async function createRoomType(req, res, next) {
   try {
     const { name, code, description, max_occupancy, base_rate } = req.body;
     const hotel = parseHotel(req.body.hotel);
+    const features = parseFeatures(req.body.features);
     if (!name || max_occupancy == null || base_rate == null) {
       return res.status(400).json({ error: 'name, max_occupancy, and base_rate are required' });
     }
@@ -65,9 +67,9 @@ async function createRoomType(req, res, next) {
       return res.status(400).json({ error: 'code must be a string of 1 to 3 characters' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO room_type (property_id, name, code, description, max_occupancy, base_rate, hotel)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.property_id, name, code ?? null, description || null, max_occupancy, base_rate, hotel]
+      `INSERT INTO room_type (property_id, name, code, description, max_occupancy, base_rate, hotel, features)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.property_id, name, code ?? null, description || null, max_occupancy, base_rate, hotel, features]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -79,6 +81,7 @@ async function updateRoomType(req, res, next) {
   try {
     const { name, code, description, max_occupancy, base_rate, status, floor_plan } = req.body;
     const hotel = parseHotel(req.body.hotel);
+    const features = parseFeatures(req.body.features);
     if (floor_plan !== undefined && !isValidFloorPlan(floor_plan)) {
       return res.status(400).json({ error: 'floor_plan must be a JSON object' });
     }
@@ -94,10 +97,12 @@ async function updateRoomType(req, res, next) {
          status        = COALESCE($5, status),
          floor_plan    = COALESCE($6::jsonb, floor_plan),
          code          = CASE WHEN $9 THEN $10 ELSE code END,
-         hotel         = CASE WHEN $11 THEN $12 ELSE hotel END
+         hotel         = CASE WHEN $11 THEN $12 ELSE hotel END,
+         features      = CASE WHEN $13 THEN $14 ELSE features END
        WHERE id = $7 AND property_id = $8 RETURNING *`,
       [name, description, max_occupancy, base_rate, status, floor_plan ?? null, req.params.id, req.property_id,
-       code !== undefined, code ?? null, req.body.hotel !== undefined, hotel]
+       code !== undefined, code ?? null, req.body.hotel !== undefined, hotel,
+       req.body.features !== undefined, features]
     );
     if (!rows.length) return res.status(404).json({ error: 'Room type not found' });
 

@@ -6,6 +6,7 @@ const { applyAdjustment, cancelDeadline, effectiveMode } = require('../lib/rateP
 const { refreshAvailabilityView } = require('../lib/roomPayments');
 const { requestSync } = require('../lib/channels/sync');
 const roomQuote = require('../lib/roomQuote');
+const { parseFeatureFilter } = require('../lib/roomFeatures');
 
 // The hotel a public site call is for: a key picks it (a per-property key, or
 // an org key + X-Property-Id / X-Property-Slug / X-Site-Host); a key that
@@ -104,6 +105,7 @@ async function searchAvailability(req, res, next) {
          rta.room_type_id,
          rt.name,
          rt.hotel,
+         rt.features,
          rt.description,
          rt.max_occupancy,
          MIN(rta.sellable_rooms)  AS min_available,
@@ -117,10 +119,11 @@ async function searchAvailability(req, res, next) {
          AND rt.max_occupancy >= $4
          AND rt.status = 'active'
          AND ($5::text IS NULL OR rt.hotel = $5)
-       GROUP BY rta.room_type_id, rt.name, rt.hotel, rt.description, rt.max_occupancy
+         AND ($6::text[] IS NULL OR rt.features @> $6)
+       GROUP BY rta.room_type_id, rt.name, rt.hotel, rt.features, rt.description, rt.max_occupancy
        HAVING MIN(rta.sellable_rooms) > 0
        ORDER BY from_rate ASC`,
-      [property_id, check_in, check_out, parseInt(guests, 10), req.query.hotel || null]
+      [property_id, check_in, check_out, parseInt(guests, 10), req.query.hotel || null, parseFeatureFilter(req.query.features)]
     );
 
     // Each room type's active rate plans, priced off its from_rate. Additive:

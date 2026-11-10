@@ -241,6 +241,7 @@ CREATE TABLE IF NOT EXISTS room_type (
   name           VARCHAR(100)    NOT NULL,
   code           VARCHAR(3),     -- optional short code, e.g. 'DBL' -- see migrate-2026-11-04-room-type-code.sql
   hotel          VARCHAR(100),   -- optional hotel label within the property -- see migrate-2026-11-09-room-type-hotel.sql
+  features       TEXT[]          NOT NULL DEFAULT '{}',  -- search tags, e.g. 'ocean_view' -- see migrate-2026-11-10-room-type-features.sql
   description    TEXT,
   max_occupancy  INT             NOT NULL,
   base_rate      NUMERIC(14,2)   NOT NULL,

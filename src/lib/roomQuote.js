@@ -6,6 +6,7 @@ const { stayNights } = require('./roomPlacement');
 const { typeCounts } = require('./roomNights');
 const { stayPrice, cancelDeadline, effectiveMode } = require('./ratePlans');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
+const { parseFeatureFilter } = require('./roomFeatures');
 
 const MAX_ROOMS = 10;
 const bad = (message) => Object.assign(new Error(message), { status: 400 });
@@ -56,13 +57,15 @@ async function quote(db, propertyId, input) {
   if (check_in >= check_out) throw bad('check_in must be before check_out');
   if (input.rate !== undefined && input.rate !== null && typeof input.rate !== 'string') throw bad('rate must be a rate name or null');
   if (input.hotel != null && typeof input.hotel !== 'string') throw bad('hotel must be a hotel name');
+  const features = parseFeatureFilter(input.features);
   const rooms = parseRooms(input.rooms);
   const nights = stayNights(check_in, check_out);
 
   const { rows: [prop] } = await db.query('SELECT currency, timezone FROM property WHERE id = $1', [propertyId]);
   const { rows: types } = await db.query(
     `SELECT id, name, max_occupancy, base_rate FROM room_type WHERE property_id = $1 AND status = 'active'
-     AND ($2::text IS NULL OR hotel = $2) ORDER BY name`, [propertyId, input.hotel || null]);
+     AND ($2::text IS NULL OR hotel = $2) AND ($3::text[] IS NULL OR features @> $3) ORDER BY name`,
+    [propertyId, input.hotel || null, features]);
   const typeIds = types.map((t) => t.id);
   const { rows: rateRows } = await db.query(
     'SELECT room_type_id, date, rate FROM room_type_rate WHERE room_type_id = ANY($1) AND date >= $2 AND date < $3', [typeIds, check_in, check_out]);

@@ -12,6 +12,7 @@ const EXCLUDE = [
   /\/webhooks\//,                                      // provider callbacks
   /^POST \/api\/channels\/:p\/inbound$/,                // OpenTravel partner SOAP callback; the GET log is list_channel_inbound
   /\/(connect|callback)$/,                             // OAuth redirects
+  /^GET \S*well-known\//,                              // OAuth discovery for MCP clients
   /ably-token$|connection-token$/,                     // realtime / terminal client tokens
   /\/(payment-intent|confirm-payment)(\/confirm)?$/,   // Stripe client-side payment flows
   /^\S+ \/api\/billing\/checkout/,
