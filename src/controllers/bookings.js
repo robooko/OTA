@@ -61,6 +61,12 @@ async function listBookings(req, res, next) {
     if (channel_id === 'direct') { query += ' AND b.channel_id IS NULL'; countQuery += ' AND b.channel_id IS NULL'; }
     else if (channel_id) { params.push(channel_id); query += ` AND b.channel_id = $${params.length}`; countQuery += ` AND b.channel_id = $${params.length}`; }
     if (source) { params.push(source); query += ` AND b.source = $${params.length}`; countQuery += ` AND b.source = $${params.length}`; }
+    // hotel: one hotel label's room types (room_type.hotel) within the property.
+    if (req.query.hotel) {
+      params.push(req.query.hotel);
+      const c = ` AND b.room_type_id IN (SELECT id FROM room_type WHERE property_id = $1 AND hotel = $${params.length})`;
+      query += c; countQuery += c;
+    }
     if (guest_id) { params.push(guest_id); query += ` AND b.guest_id = $${params.length}`; countQuery += ` AND b.guest_id = $${params.length}`; }
     if (from) { params.push(from); query += ` AND b.check_in >= $${params.length}`; countQuery += ` AND b.check_in >= $${params.length}`; }
     if (to) { params.push(to); query += ` AND b.check_out <= $${params.length}`; countQuery += ` AND b.check_out <= $${params.length}`; }
