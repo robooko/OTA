@@ -525,7 +525,8 @@ const { bookingToken } = require('../src/lib/marinaToken');
 
     // ---- Task 12 ----
     await check('marina enquiry lands in the inbox with marina_id; guest sees only id+status', async () => {
-      await pool.query('UPDATE property SET token_balance = 100 WHERE id = $1', [P]); // the enquiry gate needs a reply's worth
+      // The enquiry gate needs a reply's worth in the org's Buxs wallet.
+      await pool.query('INSERT INTO buxs_wallet (owner, balance) VALUES ($1, 100000) ON CONFLICT (owner) DO UPDATE SET balance = 100000', [ORG]);
       const r = await api('POST', `${G}/enquiries`, { body: { name: 'Ann', email: 'ann@example.com', message: 'Space for a 12 m yacht?', arrival: future(60), departure: future(63), boat_length_m: 12 }, headers: { 'X-Client-Ip': '192.0.2.130' } });
       assert.equal(r.status, 201, JSON.stringify(r.body)); assert.deepEqual(Object.keys(r.body).sort(), ['id', 'status']);
       const row = await one('SELECT marina_id, message FROM event_inquiry WHERE id = $1', [r.body.id]);
@@ -842,6 +843,8 @@ const { bookingToken } = require('../src/lib/marinaToken');
     await pool.query('DELETE FROM property_token_ledger WHERE property_id = $1', [P]);
     await pool.query('DELETE FROM marina WHERE property_id = $1', [P]);
     await pool.query('DELETE FROM property WHERE id = $1', [P]);
+    await pool.query('DELETE FROM buxs_ledger WHERE owner = $1', [ORG]);
+    await pool.query('DELETE FROM buxs_wallet WHERE owner = $1', [ORG]);
     await pool.query('DELETE FROM organization WHERE clerk_org_id = $1', [ORG]);
     await pool.end();
   }
