@@ -7,6 +7,7 @@ const { priceStay } = require('../lib/marinaPricing');
 const { emailKey } = require('../lib/spaBookingGuard');
 const { sendGuestEmail } = require('../lib/marinaEmails');
 const { templateFor } = require('../lib/marinaContracts');
+const { berthFitError } = require('../lib/marinaGuard');
 
 // Checked here rather than left to the DB: contact_phone is VARCHAR(30) (a
 // longer one was a 500), and a negative boat size would price or fit
@@ -115,6 +116,10 @@ async function createBooking(req, res, next) {
     if (!berth) return res.status(404).json({ error: 'Berth not found' });
     const len = numOrNull(b.boat_length_m);
     const beam = numOrNull(b.boat_beam_m);
+    // Same fit rule as the guest flow; only when a length is given (staff
+    // can book before they know the boat).
+    const fit = len != null ? berthFitError(berth, len, beam) : null;
+    if (fit) return res.status(400).json({ error: fit });
     const total = b.total_price != null ? Number(b.total_price).toFixed(2)
       : priceStay({ berth, tiers: await q.activeTiers(pool, berth.marina_id), arrival: b.arrival, departure: b.departure ?? null, boatLengthM: len, boatBeamM: beam }).total_price;
     // Notice period: given, else the long-term contract template's (snapshot).
