@@ -70,7 +70,33 @@ const { resolveSiteProperty } = require('../src/lib/propertyResolver');
       assert.equal(r.propertyId, P);
       assert.equal(r.apiKey.website, true);
     });
+
+    // ---- Golf course and equipment rules ----
+    const golf = require('../src/controllers/golf');
+    const equipment = require('../src/controllers/equipment');
+    await check('rules: golf courses and equipment take no payment or full payment at booking', async () => {
+      const c = await call(golf.createCourse, { body: { name: 'Rules Course', holes: 18, price_per_player: 90 } });
+      assert.equal(c.status, 201, JSON.stringify(c.body)); assert.equal(c.body.payment_required, 'none');
+      const cFull = await call(golf.updateCourse, { params: { id: c.body.id }, body: { payment_required: 'full' } });
+      assert.equal(cFull.status, 200); assert.equal(cFull.body.payment_required, 'full');
+      assert.equal((await call(golf.updateCourse, { params: { id: c.body.id }, body: { name: 'Rules Course 2' } })).body.payment_required, 'full');
+      assert.equal((await call(golf.updateCourse, { params: { id: c.body.id }, body: { payment_required: 'deposit' } })).status, 400);
+      assert.equal((await call(golf.updateCourse, { params: { id: c.body.id }, body: { payment_required: 5 } })).status, 400);
+      assert.equal((await call(golf.createCourse, { body: { name: 'Bad', holes: 9, price_per_player: 1, payment_required: 'deposit' } })).status, 400);
+      assert.equal((await call(golf.createCourse, { body: { name: 'Full', holes: 9, price_per_player: 1, payment_required: 'full' } })).body.payment_required, 'full');
+
+      const e = await call(equipment.createEquipment, { body: { name: 'Rules Buggy', type: 'buggy', quantity: 2, price_per_day: 25 } });
+      assert.equal(e.status, 201, JSON.stringify(e.body)); assert.equal(e.body.payment_required, 'none');
+      const eFull = await call(equipment.updateEquipment, { params: { id: e.body.id }, body: { payment_required: 'full' } });
+      assert.equal(eFull.status, 200, JSON.stringify(eFull.body)); assert.equal(eFull.body.payment_required, 'full');
+      assert.equal((await call(equipment.updateEquipment, { params: { id: e.body.id }, body: { name: 'Rules Buggy 2' } })).body.payment_required, 'full');
+      assert.equal((await call(equipment.updateEquipment, { params: { id: e.body.id }, body: { payment_required: 'deposit' } })).status, 400);
+      assert.equal((await call(equipment.createEquipment, { body: { name: 'Bad', type: 'buggy', quantity: 1, payment_required: 5 } })).status, 400);
+    });
   } finally {
+    for (const t of ['payment', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment']) {
+      await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
+    }
     await pool.query('DELETE FROM api_key WHERE property_id = $1 OR clerk_org_id = $2', [P, ORG]);
     await pool.query('DELETE FROM property WHERE id = $1', [P]);
     await pool.query('DELETE FROM organization WHERE clerk_org_id = $1', [ORG]);

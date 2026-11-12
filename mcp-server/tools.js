@@ -2285,6 +2285,7 @@ function createTools(apiRequest) {
     name: 'create_equipment',
     description: 'Create a hireable equipment item',
     inputSchema: {
+      payment_required: z.enum(['none', 'full']).optional().describe('What a booking from a website API key must carry: nothing, or the full price'),
       name: z.string(),
       type: z.string(),
       description: z.string().optional(),
@@ -2301,6 +2302,7 @@ function createTools(apiRequest) {
     name: 'update_equipment',
     description: 'Update an equipment item. Set status to "inactive" to delete it — there is no hard-delete endpoint.',
     inputSchema: {
+      payment_required: z.enum(['none', 'full']).optional().describe('What a booking from a website API key must carry: nothing, or the full price'),
       id: z.string(),
       name: z.string().optional(),
       type: z.string().optional(),
@@ -2374,6 +2376,7 @@ function createTools(apiRequest) {
     name: 'create_golf_course',
     description: 'Create a golf course',
     inputSchema: {
+      payment_required: z.enum(['none', 'full']).optional().describe('What a booking from a website API key must carry: nothing, or the full price'),
       name: z.string(),
       description: z.string().optional(),
       holes: z.number().int(),
@@ -2385,6 +2388,7 @@ function createTools(apiRequest) {
     name: 'update_golf_course',
     description: 'Update a golf course. Set status to "inactive" to delete it — there is no hard-delete endpoint.',
     inputSchema: {
+      payment_required: z.enum(['none', 'full']).optional().describe('What a booking from a website API key must carry: nothing, or the full price'),
       id: z.string(),
       name: z.string().optional(),
       description: z.string().optional(),

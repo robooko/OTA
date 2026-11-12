@@ -1382,7 +1382,11 @@ CREATE TABLE IF NOT EXISTS golf_course (
   first_tee            TIME,
   last_tee             TIME,
   tee_interval_minutes INT,
-  default_max_players  INT NOT NULL DEFAULT 4
+  default_max_players  INT NOT NULL DEFAULT 4,
+  -- What a guest pays at booking: nothing, or the full price. See
+  -- migrate-2026-11-12-golf-equipment-payment-required.sql.
+  payment_required VARCHAR(10) NOT NULL DEFAULT 'none'
+                   CONSTRAINT golf_course_payment_required_valid CHECK (payment_required IN ('none', 'full'))
 );
 
 CREATE TABLE IF NOT EXISTS tee_time (
@@ -1431,7 +1435,11 @@ CREATE TABLE IF NOT EXISTS equipment (
   status         VARCHAR(20)   DEFAULT 'active',
   open_time      TIME,
   close_time     TIME,
-  slot_interval_minutes INT    NOT NULL DEFAULT 60
+  slot_interval_minutes INT    NOT NULL DEFAULT 60,
+  -- What a guest pays at booking: nothing, or the full price. See
+  -- migrate-2026-11-12-golf-equipment-payment-required.sql.
+  payment_required VARCHAR(10) NOT NULL DEFAULT 'none'
+                   CONSTRAINT equipment_payment_required_valid CHECK (payment_required IN ('none', 'full'))
 );
 
 CREATE TABLE IF NOT EXISTS equipment_hire (
