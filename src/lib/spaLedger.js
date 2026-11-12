@@ -15,8 +15,10 @@ async function syncSpaPaymentStatus(db, appointmentId, propertyId) {
   if (!folio) return null;
   const completed = folio.payments.filter((p) => p.status === 'completed');
   const paid = completed.length > 0 && toCents(folio.balance) <= 0;
-  // folio.payments is newest first.
-  const method = paid ? completed[0].method : null;
+  // folio.payments is newest first. spa_appointment.payment_method only takes
+  // card or cash: a website's payment was a card, a desk 'bank_transfer' is neither.
+  const newest = completed[0]?.method;
+  const method = !paid ? null : newest === 'cash' ? 'cash' : ['card', 'website'].includes(newest) ? 'card' : null;
   const { rows } = await db.query(
     `UPDATE spa_appointment SET
        payment_status = CASE WHEN $3 THEN 'paid' ELSE 'unpaid' END,

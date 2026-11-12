@@ -3,6 +3,7 @@ const { isValidUuid, isValidDate } = require('../middleware/validate');
 const { toCents, fromCents } = require('./folio');
 const { memberRateUntil, resolveRate } = require('./spaMemberRate');
 const { ownerColumn } = require('./entityFolio');
+const { syncSpaPaymentStatus } = require('./spaLedger');
 
 // What a prospective booking must have paid at booking, by the venue's rule:
 // golf course and equipment payment_required (none / full), restaurant
@@ -145,6 +146,8 @@ async function recordStatedPayment(client, kind, id, propertyId, payment) {
      VALUES ($1, $2, $3, 'website', 'completed', $4, now())`,
     [propertyId, id, Number(payment.amount).toFixed(2), payment.stripe_payment_intent_id]
   );
+  // A spa appointment's payment_status follows its balance (lib/spaLedger.js).
+  if (kind === 'spa_appointment') await syncSpaPaymentStatus(client, id, propertyId);
 }
 
 // A spa's rule and currency, to price an appointment with spaAnswer.

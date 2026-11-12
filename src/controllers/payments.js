@@ -24,6 +24,11 @@ async function createPayment(req, res, next) {
     if (stripe_payment_intent_id !== undefined && (typeof stripe_payment_intent_id !== 'string' || !stripe_payment_intent_id || stripe_payment_intent_id.length > 255)) {
       return res.status(400).json({ error: 'stripe_payment_intent_id must be a string of 1-255 characters' });
     }
+    // Only on a website payment: a 'card' row with an intent id is one a room
+    // cancel refunds with the property's own Stripe key.
+    if (stripe_payment_intent_id !== undefined && method !== 'website') {
+      return res.status(400).json({ error: "stripe_payment_intent_id is only accepted with method 'website'" });
+    }
     if (!(Number(amount) > 0)) {
       return res.status(400).json({ error: 'amount must be a positive number' });
     }

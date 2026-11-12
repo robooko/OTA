@@ -310,8 +310,28 @@ const folioCtl = require('../src/controllers/entityFolio');
       assert.equal(fakeStripe.store.get('pi_card_cancel').refunded, true);
       assert.equal(fakeStripe.store.get('pi_cart_cancel').refunded, undefined);
     });
+
+    // ---- Review fixes ----
+    await check('spa: a full website payment marks the appointment paid, and staff can still adjust it', async () => {
+      await setRule('spa', spaId, "payment_required = 'full'");
+      try {
+        const ok = await call(spa.createAppointment, { ...websiteKey, params: { spa_id: spaId }, body: spaBody({ payment: { amount: 30, stripe_payment_intent_id: 'pi_spa_full' } }) });
+        assert.equal(ok.status, 201, JSON.stringify(ok.body));
+        assert.deepEqual(await one('SELECT payment_status, payment_method FROM spa_appointment WHERE id = $1', [ok.body.id]), { payment_status: 'paid', payment_method: 'card' });
+        const adj = await call(folioCtl.addEntityAdjustment, { params: { kind: 'spa_appointment', id: ok.body.id }, body: { description: 'Comp', amount: -5 } });
+        assert.equal(adj.status, 201, JSON.stringify(adj.body));
+      } finally {
+        await setRule('spa', spaId, "payment_required = 'deposit'");
+      }
+    });
+    await check('rooms: a Stripe id is accepted only on a website payment', async () => {
+      const a = await roomBooking();
+      const r = await call(payments.createPayment, { ...fullKey, body: { booking_id: a, amount: 600, method: 'card', status: 'completed', stripe_payment_intent_id: 'pi_outside' } });
+      assert.equal(r.status, 400, JSON.stringify(r.body));
+      assert.equal((await call(payments.createPayment, { ...fullKey, body: { booking_id: a, amount: 600, status: 'completed', stripe_payment_intent_id: 'pi_outside' } })).status, 400);
+    });
   } finally {
-    for (const t of ['payment', 'booking', 'guest', 'room_type', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'service_period', 'restaurant', 'spa_appointment', 'spa_slot', 'spa_therapist_hours', 'spa_therapist', 'spa_treatment', 'spa']) {
+    for (const t of ['payment', 'folio_adjustment', 'booking', 'guest', 'room_type', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'service_period', 'restaurant', 'spa_appointment', 'spa_slot', 'spa_therapist_hours', 'spa_therapist', 'spa_treatment', 'spa']) {
       await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
     }
     await pool.query('DELETE FROM api_key WHERE property_id = $1 OR clerk_org_id = $2', [P, ORG]);
