@@ -2235,7 +2235,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'invoice_spa_appointment',
-    description: "Bill a spa appointment by Stripe invoice: emails the appointment's contact_email a payable invoice (due in 7 days) for the booked price and returns hosted_invoice_url. Safe to call again -- it returns the same open invoice rather than sending a second, and once the invoice is paid the call marks the appointment paid (already_paid: true). Call it again to check whether a sent invoice has been paid. 409 if the appointment is cancelled, already paid, has no contact email, or is on the guest's open bill (use invoice_spa_guest_bill then). To bill several appointments on one invoice, use add_spa_appointment_to_bill instead.",
+    description: "Bill a spa appointment by Stripe invoice: emails the appointment's contact_email a payable invoice (due in 7 days) for what the appointment still owes (price plus added charges minus payments, a deposit included) and returns hosted_invoice_url. Safe to call again -- it returns the same open invoice rather than sending a second, and once the invoice is paid the call marks the appointment paid (already_paid: true). Call it again to check whether a sent invoice has been paid. 409 if the appointment is cancelled, already paid, has no contact email, or is on the guest's open bill (use invoice_spa_guest_bill then). To bill several appointments on one invoice, use add_spa_appointment_to_bill instead.",
     inputSchema: { spa_id: z.string(), id: z.string() },
     run: ({ spa_id, id }) => apiRequest('POST', `/api/spa/${spa_id}/appointments/${id}/invoice`),
   },
@@ -2253,7 +2253,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'invoice_spa_guest_bill',
-    description: "Send one Stripe invoice (due in 7 days) for everything on a guest's open bill, by email. Appointments since cancelled or paid by tap are dropped first. Safe to call again: it also marks appointments on paid bills paid (settled_appointment_ids) and lists still-unpaid bills (open_bills); invoice is null when nothing new was pending. 404 if the email has no bill.",
+    description: "Send one Stripe invoice (due in 7 days) for everything on a guest's open bill, by email. Each line is repriced to what its appointment still owes; appointments since cancelled or paid in full are dropped first. Safe to call again: it also marks appointments on paid bills paid (settled_appointment_ids) and lists still-unpaid bills (open_bills); invoice is null when nothing new was pending. 404 if the email has no bill.",
     inputSchema: { spa_id: z.string(), email: z.string().describe("Guest's contact email, as on their appointments") },
     run: ({ spa_id, email }) => apiRequest('POST', `/api/spa/${spa_id}/bills`, { body: { email } }),
   },

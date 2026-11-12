@@ -9,10 +9,13 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
 
 const fakeStripe = require('./fake-stripe');
 // The slice of billing the spa cash path reads; tests fill these in.
-const billing = { customers: [], items: [], invoices: [], deleted: [] };
+const billing = { customers: [], items: [], invoices: [], deleted: [], invoiceLines: [] };
 fakeStripe.customers = { list: async () => ({ data: billing.customers }) };
 fakeStripe.invoiceItems = {
-  list: async () => ({ data: billing.items }),
+  // settlePaidInvoice walks one invoice's lines with for-await.
+  list: (params) => (params?.invoice
+    ? { async *[Symbol.asyncIterator]() { yield* billing.invoiceLines; } }
+    : Promise.resolve({ data: billing.items })),
   del: async (id) => { billing.deleted.push(id); billing.items = billing.items.filter((i) => i.id !== id); return { id, deleted: true }; },
 };
 fakeStripe.invoices = { list: async () => ({ data: billing.invoices }) };
@@ -23,6 +26,7 @@ const ably = require('../src/lib/ably');
 ably.publishTableSessionClosed = async () => {};
 const sessions = require('../src/controllers/restaurantTableSessions');
 const spa = require('../src/controllers/spaPayments');
+const folios = require('../src/controllers/entityFolio');
 
 (async () => {
   const one = async (sql, params) => (await pool.query(sql, params)).rows[0];
@@ -172,8 +176,64 @@ const spa = require('../src/controllers/spaPayments');
       assert.equal((await pay(a, { stripe_payment_intent_id: pi.body.payment_intent_id })).status, 200);
       assert.equal((await appt(a)).payment_method, 'card');
     });
+
+    const paymentsOf = async (id) => (await pool.query('SELECT amount, method FROM payment WHERE spa_appointment_id = $1 ORDER BY amount', [id])).rows;
+    await check('spa: deposit by card, the rest in cash', async () => {
+      const a = await book();
+      const pi = await call(spa.createAppointmentPaymentIntent, { params: { id: a, spa_id: spaId } });
+      assert.equal(pi.body.amount, 8000);
+      const intent = fakeStripe.store.get(pi.body.payment_intent_id);
+      intent.amount = 2000; intent.status = 'succeeded';            // a 20.00 deposit taken
+      const first = await pay(a, { stripe_payment_intent_id: intent.id });
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.equal((await pay(a, { stripe_payment_intent_id: intent.id })).status, 200, 'a retry is fine');
+      assert.equal((await appt(a)).payment_status, 'unpaid');
+      const cash = await pay(a, { paid_with: 'cash' });
+      assert.equal(cash.status, 200, JSON.stringify(cash.body));
+      assert.deepEqual(await paymentsOf(a), [{ amount: '20.00', method: 'card' }, { amount: '60.00', method: 'cash' }]);
+      assert.equal((await appt(a)).payment_status, 'paid');
+    });
+
+    await check('spa: a charge added after payment is what the next tap takes', async () => {
+      const a = await book();
+      assert.equal((await pay(a, { paid_with: 'cash' })).status, 200);
+      const add = await call(folios.addEntityAdjustment, { params: { kind: 'spa_appointment', id: a }, body: { description: 'Oil', amount: 12 } });
+      assert.equal(add.status, 201);
+      assert.equal((await appt(a)).payment_status, 'unpaid');
+      const pi = await call(spa.createAppointmentPaymentIntent, { params: { id: a, spa_id: spaId } });
+      assert.equal(pi.status, 200, JSON.stringify(pi.body));
+      assert.equal(pi.body.amount, 1200);
+    });
+
+    await check('spa: an unpaid tap is repriced to what is owed; a succeeded one is recorded, then the rest charged', async () => {
+      const a = await book();
+      const pi = await call(spa.createAppointmentPaymentIntent, { params: { id: a, spa_id: spaId } });
+      await call(folios.recordEntityPayment, { params: { kind: 'spa_appointment', id: a }, body: { amount: 30, method: 'cash' } });
+      const again = await call(spa.createAppointmentPaymentIntent, { params: { id: a, spa_id: spaId } });
+      assert.equal(again.body.payment_intent_id, pi.body.payment_intent_id);
+      assert.equal(again.body.amount, 5000);
+      const intent = fakeStripe.store.get(pi.body.payment_intent_id);
+      intent.amount = 2000; intent.status = 'succeeded';           // tapped for 20, app died before confirm
+      const after = await call(spa.createAppointmentPaymentIntent, { params: { id: a, spa_id: spaId } });
+      assert.notEqual(after.body.payment_intent_id, intent.id);
+      assert.equal(after.body.amount, 3000);
+      assert.deepEqual(await paymentsOf(a), [{ amount: '20.00', method: 'card' }, { amount: '30.00', method: 'cash' }]);
+    });
+
+    await check('spa: a paid invoice settles once', async () => {
+      const a = await book();
+      const invoice = { id: 'in_paid', currency: 'gbp', metadata: { spa_appointment_id: a } };
+      billing.invoiceLines = [{ amount: 8000, metadata: { spa_appointment_id: a } }];
+      assert.deepEqual((await spa.settlePaidInvoice(fakeStripe, invoice, P)).settled, [a]);
+      assert.deepEqual((await spa.settlePaidInvoice(fakeStripe, invoice, P)).settled, [a]);
+      assert.equal((await paymentsOf(a)).length, 1);
+      assert.equal((await appt(a)).payment_status, 'paid');
+      billing.invoiceLines = [];
+    });
   } finally {
     await pool.query('DELETE FROM restaurant_order WHERE property_id = $1', [P]);
+    await pool.query('DELETE FROM folio_adjustment WHERE property_id = $1', [P]);
+    await pool.query('DELETE FROM payment WHERE property_id = $1', [P]);
     for (const t of ['restaurant_table_session', 'restaurant_table', 'restaurant', 'spa_appointment', 'spa_treatment', 'spa_therapist', 'spa']) {
       await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
     }
