@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { dueNow, checkStatedPayment, recordStatedPayment } = require('../lib/amountDue');
 const { isValidDate, isValidTime, isValidUuid, isValidCurrencyCode, isValidTimezone } = require('../middleware/validate');
 const { publishNewReservation, publishReservationStatusChanged, publishTableSessionOpened } = require('../lib/ably');
 const { generateJoinCode } = require('../lib/joinCode');
@@ -642,6 +643,9 @@ async function createReservation(req, res, next) {
     return res.status(400).json({ error: 'metadata must be a JSON object' });
   }
   if (table_id && !isValidUuid(table_id)) return res.status(400).json({ error: 'table_id must be a UUID' });
+  // Who may state a payment, and its shape (lib/amountDue.js).
+  const early = checkStatedPayment(req, null);
+  if (early) return res.status(early.status).json(early.body);
 
   const client = await pool.connect();
   try {
@@ -656,6 +660,11 @@ async function createReservation(req, res, next) {
       return res.status(404).json({ error: 'Restaurant not found' });
     }
     const restaurant = restaurantRes.rows[0];
+    // A deposit a website key's reservation must carry (a 'hold' is not enforced).
+    const due = await dueNow(client, 'restaurant_reservation', req.property_id, { restaurant_id, party_size });
+    if (due.status) { await client.query('ROLLBACK'); return res.status(due.status).json({ error: due.error }); }
+    const refusal = checkStatedPayment(req, due);
+    if (refusal) { await client.query('ROLLBACK'); return res.status(refusal.status).json(refusal.body); }
 
     if (guest_id) {
       const guestRes = await client.query(
@@ -680,6 +689,7 @@ async function createReservation(req, res, next) {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
       [req.property_id, assignedTableId, reservation_date, start_time, end_time, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null, metadata ?? {}, stripe_payment_intent_id ?? null]
     );
+    await recordStatedPayment(client, 'restaurant_reservation', rows[0].id, req.property_id, req.body.payment);
 
     await client.query('COMMIT');
 

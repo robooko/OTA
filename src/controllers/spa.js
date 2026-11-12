@@ -1,4 +1,6 @@
 const pool = require('../db');
+const { spaAnswer, spaRule, checkStatedPayment, paymentRefusal, recordStatedPayment } = require('../lib/amountDue');
+const { toCents } = require('../lib/folio');
 const { isValidDate, isValidTime, isValidUuid, validateBranding, validateCancelUrl } = require('../middleware/validate');
 const {
   publishNewAppointment,
@@ -1105,9 +1107,16 @@ async function createAppointmentFromSlot(req, res, next) {
       const leadTimeHours = await withinLeadTime(client, spa_id, slot.slot_date_text, slot.slot_time);
       if (leadTimeHours) { await client.query('ROLLBACK'); return res.status(409).json({ error: leadTimeError(leadTimeHours) }); }
     }
+    // What a website key's booking must carry: the spa's rule on the
+    // standard price this flow books at.
+    const due = spaAnswer(await spaRule(client, spa_id), toCents(treatmentRes.rows[0].price ?? 0));
+    const refusal = checkStatedPayment(req, due);
+    if (refusal) { await client.query('ROLLBACK'); return res.status(refusal.status).json(refusal.body); }
+    // A website's stated payment proves the guest as a card would.
+    const paid = payment_verified === true || Number(req.body.payment?.amount) > 0;
     let hold = null;
     if (isGuestRail(req)) {
-      const check = await guard.checkGuestBooking(client, { property_id: req.property_id, contact_email, member_email, payment_verified: payment_verified === true });
+      const check = await guard.checkGuestBooking(client, { property_id: req.property_id, contact_email, member_email, payment_verified: paid });
       if (!check.ok) { await client.query('ROLLBACK'); return res.status(429).json({ error: BOOKING_LIMIT_ERROR }); }
       hold = check.hold;
     }
@@ -1126,6 +1135,7 @@ async function createAppointmentFromSlot(req, res, next) {
         ...holdColumns(hold, contact_email, branding, cancel_url), send_emails ?? true,
       ]
     );
+    await recordStatedPayment(client, 'spa_appointment', rows[0].id, req.property_id, req.body.payment);
 
     await client.query('COMMIT');
     await afterAppointmentCreated(spa_id, req.property_id, rows[0], hold, branding, cancel_url);
@@ -1202,7 +1212,9 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // see lib/spaMemberRate.js); when it qualifies for the regulars' rate on
 // `date`, the appointment books at member_price/member_duration_mins. The
 // price is frozen onto the appointment either way.
-async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, payment_verified = false, branding, cancel_url, enforceLeadTime = false, guestRail = false, send_emails = true, hold_sms = null }) {
+async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, payment_verified = false, branding, cancel_url, enforceLeadTime = false, guestRail = false, send_emails = true, hold_sms = null, statedPayment = undefined, enforcePayment = false }) {
+  // A website's stated payment proves the guest as a card would.
+  if (Number(statedPayment?.amount) > 0) payment_verified = true;
   // A texted hold has no email to cap bookings by, so the caller's number stands in.
   const railKey = contact_email || (hold_sms && `tel:${hold_sms.to}`);
   const client = await pool.connect();
@@ -1237,6 +1249,12 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
     const rate = resolveRate(treatmentRes.rows[0], await memberRateUntil(client, property_id, member_email), date);
     if (!rate.ok) { await client.query('ROLLBACK'); return { ok: false, code: rate.code }; }
     const durationMins = rate.durationMins;
+    // What a website key's booking must carry of the price it freezes.
+    if (enforcePayment || statedPayment !== undefined) {
+      const due = spaAnswer(await spaRule(client, spa_id), toCents(rate.price));
+      const refusal = paymentRefusal({ website: enforcePayment, payment: statedPayment }, due);
+      if (refusal) { await client.query('ROLLBACK'); return { ok: false, code: 'payment_required', refusal }; }
+    }
 
     const propertyRes = await client.query(
       `SELECT p.timezone FROM property p JOIN spa s ON s.property_id = p.id WHERE s.id = $1`,
@@ -1294,6 +1312,7 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
         ...holdColumns(hold, railKey, branding, cancel_url), send_emails,
       ]
     );
+    await recordStatedPayment(client, 'spa_appointment', rows[0].id, property_id, statedPayment);
 
     await client.query('COMMIT');
     await afterAppointmentCreated(spa_id, property_id, rows[0], hold, branding, cancel_url, hold_sms);
@@ -1331,8 +1350,11 @@ async function createAppointmentFromAvailability(req, res, next) {
       send_emails: send_emails ?? true,
       enforceLeadTime: isGuestRail(req),
       guestRail: isGuestRail(req),
+      statedPayment: req.body.payment,
+      enforcePayment: req.api_key?.website === true,
     });
     if (!result.ok) {
+      if (result.code === 'payment_required') return res.status(result.refusal.status).json(result.refusal.body);
       if (result.code === 'too_soon') return res.status(409).json({ error: leadTimeError(result.leadTimeHours) });
       const [status, error] = BOOK_FAILURE_HTTP[result.code];
       return res.status(status).json({ error, code: result.code });
@@ -1370,6 +1392,10 @@ async function createAppointment(req, res, next) {
 
   const cancelUrlError = validateCancelUrl(cancel_url);
   if (cancelUrlError) return res.status(400).json({ error: cancelUrlError });
+
+  // Who may state a payment, and its shape (lib/amountDue.js).
+  const early = checkStatedPayment(req, null);
+  if (early) return res.status(early.status).json(early.body);
 
   if (slot_id) return createAppointmentFromSlot(req, res, next);
 

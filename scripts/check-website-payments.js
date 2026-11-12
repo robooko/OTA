@@ -219,8 +219,69 @@ const folioCtl = require('../src/controllers/entityFolio');
       assert.deepEqual(await paymentOf('equipment_hire_id', ok.body.id), { amount: '150.00', method: 'website', status: 'completed', stripe_payment_intent_id: 'pi_hire' });
       assert.equal((await call(equipment.createHire, { ...fullKey, body: body() })).status, 201);
     });
+
+    // ---- Enforcement: restaurant and spa ----
+    const restaurants = require('../src/controllers/restaurant');
+    const spa = require('../src/controllers/spa');
+    await pool.query(`INSERT INTO restaurant_table (property_id, restaurant_id, table_number, seats) VALUES ($1, $2, 'W1', 8), ($1, $2, 'W2', 8), ($1, $2, 'W3', 8)`, [P, rest]);
+    await pool.query(`INSERT INTO service_period (property_id, restaurant_id, label, start_time, end_time) VALUES ($1, $2, 'Dinner', '17:00', '23:00')`, [P, rest]);
+    let resDay = 10;
+    const resBody = (extra = {}) => ({ reservation_date: `2031-04-${resDay++}`, start_time: '19:00', contact_name: 'R', party_size: 3, ...extra });
+    await check('restaurant: a website key must pay the deposit; a hold restaurant is not enforced', async () => {
+      const before = await count('restaurant_reservation');
+      const none = await call(restaurants.createReservation, { ...websiteKey, params: { restaurant_id: rest }, body: resBody() });
+      assert.equal(none.status, 402, JSON.stringify(none.body)); assert.equal(none.body.amount_due, '60.00'); assert.equal(none.body.mode, 'deposit');
+      assert.equal(await count('restaurant_reservation'), before);
+      const ok = await call(restaurants.createReservation, { ...websiteKey, params: { restaurant_id: rest }, body: resBody({ payment: { amount: 60, stripe_payment_intent_id: 'pi_table' } }) });
+      assert.equal(ok.status, 201, JSON.stringify(ok.body));
+      assert.deepEqual(await paymentOf('restaurant_reservation_id', ok.body.id), { amount: '60.00', method: 'website', status: 'completed', stripe_payment_intent_id: 'pi_table' });
+      assert.equal((await call(restaurants.createReservation, { ...fullKey, params: { restaurant_id: rest }, body: resBody() })).status, 201);
+      assert.equal((await call(restaurants.createReservation, { ...staff, params: { restaurant_id: rest }, body: resBody() })).status, 201);
+      await setRule('restaurant', rest, "payment_protection = 'hold'");
+      try {
+        assert.equal((await call(restaurants.createReservation, { ...websiteKey, params: { restaurant_id: rest }, body: resBody() })).status, 201);
+      } finally {
+        await setRule('restaurant', rest, "payment_protection = 'deposit'");
+      }
+    });
+
+    // Spa: deposit 20 on a 30.00 treatment, a therapist working every day 08-20.
+    await setRule('spa', spaId, "payment_required = 'deposit', deposit_amount = 20");
+    const tia = (await one(`INSERT INTO spa_therapist (property_id, spa_id, name) VALUES ($1, $2, 'Tia') RETURNING id`, [P, spaId])).id;
+    for (let d = 1; d <= 7; d++) {
+      await pool.query(`INSERT INTO spa_therapist_hours (property_id, therapist_id, day_of_week, start_time, end_time) VALUES ($1, $2, $3, '08:00', '20:00')`, [P, tia, d]);
+    }
+    let spaHour = 8;
+    const spaBody = (extra = {}) => ({ treatment_id: treatment, date: '2031-03-11', time: `${String(spaHour++).padStart(2, '0')}:00`, contact_name: 'Sia', contact_email: `sia${spaHour}@example.test`, ...extra });
+    await check('spa: a website key must pay the deposit; paid, it is confirmed at once', async () => {
+      const before = await count('spa_appointment');
+      const none = await call(spa.createAppointment, { ...websiteKey, params: { spa_id: spaId }, body: spaBody() });
+      assert.equal(none.status, 402, JSON.stringify(none.body));
+      assert.deepEqual(none.body, { error: 'Payment required', mode: 'deposit', amount_due: '20.00', currency: 'GBP' });
+      assert.equal(await count('spa_appointment'), before, 'no row, pending or otherwise');
+      const ok = await call(spa.createAppointment, { ...websiteKey, params: { spa_id: spaId }, body: spaBody({ payment: { amount: 20, stripe_payment_intent_id: 'pi_spa' } }) });
+      assert.equal(ok.status, 201, JSON.stringify(ok.body));
+      const row = await one('SELECT status FROM spa_appointment WHERE id = $1', [ok.body.id]);
+      assert.equal(row.status, 'confirmed');
+      assert.deepEqual(await paymentOf('spa_appointment_id', ok.body.id), { amount: '20.00', method: 'website', status: 'completed', stripe_payment_intent_id: 'pi_spa' });
+      assert.equal((await computeEntityFolio('spa_appointment', ok.body.id, P)).balance, '10.00');
+    });
+    await check('spa: staff and other keys book unpaid; a non-website key cannot state a payment', async () => {
+      assert.equal((await call(spa.createAppointment, { ...fullKey, params: { spa_id: spaId }, body: spaBody() })).status, 201);
+      assert.equal((await call(spa.createAppointment, { ...staff, params: { spa_id: spaId }, body: spaBody() })).status, 201);
+      assert.equal((await call(spa.createAppointment, { ...fullKey, params: { spa_id: spaId }, body: spaBody({ payment: { amount: 20, stripe_payment_intent_id: 'pi_x' } }) })).status, 403);
+    });
+    await check('spa: the slot path is enforced too', async () => {
+      const slot = (await one(`INSERT INTO spa_slot (property_id, therapist_id, treatment_id, slot_date, slot_time) VALUES ($1, $2, $3, '2031-03-12', '09:00') RETURNING id`, [P, tia, treatment])).id;
+      const body = { slot_id: slot, contact_name: 'Slot', contact_email: 'slot@example.test' };
+      const none = await call(spa.createAppointment, { ...websiteKey, params: { spa_id: spaId }, body });
+      assert.equal(none.status, 402, JSON.stringify(none.body)); assert.equal(none.body.amount_due, '20.00');
+      const ok = await call(spa.createAppointment, { ...websiteKey, params: { spa_id: spaId }, body: { ...body, payment: { amount: 20, stripe_payment_intent_id: 'pi_slot' } } });
+      assert.equal(ok.status, 201, JSON.stringify(ok.body));
+      assert.equal((await paymentOf('spa_appointment_id', ok.body.id)).method, 'website');
+    });
   } finally {
-    for (const t of ['payment', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'restaurant', 'spa_appointment', 'spa_therapist', 'spa_treatment', 'spa']) {
+    for (const t of ['payment', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'service_period', 'restaurant', 'spa_appointment', 'spa_slot', 'spa_therapist_hours', 'spa_therapist', 'spa_treatment', 'spa']) {
       await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
     }
     await pool.query('DELETE FROM api_key WHERE property_id = $1 OR clerk_org_id = $2', [P, ORG]);

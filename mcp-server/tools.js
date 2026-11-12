@@ -2215,6 +2215,7 @@ function createTools(apiRequest) {
     name: 'bulk_create_spa_appointments',
     description: 'Book up to 50 spa appointments at one spa in one call, each with the same fields and rules as create_spa_appointment. Booked in order, each on its own: one failing does not stop the rest, and nothing is rolled back. Returns created/failed counts and a per-appointment outcome: { index, appointment } or { index, status, error, code, details }.',
     inputSchema: {
+      payment: STATED_PAYMENT,
       spa_id: z.string(),
       appointments: z.array(z.object(SPA_APPOINTMENT_FIELDS)).min(1).max(50),
       send_emails: z.boolean().optional().describe("Default for every appointment; an appointment's own send_emails wins"),
@@ -2781,6 +2782,7 @@ function createTools(apiRequest) {
     name: 'create_restaurant_reservation',
     description: 'Book a table. Times are HH:MM local to the restaurant; find one with search_restaurant_availability first.',
     inputSchema: {
+      payment: STATED_PAYMENT,
       restaurant_id: z.string(), reservation_date: z.string().describe('YYYY-MM-DD'), start_time: z.string().describe('HH:MM'),
       party_size: z.number().int().min(1), contact_name: z.string(),
       contact_email: z.string().optional(), contact_phone: z.string().optional(), guest_id: z.string().optional(),

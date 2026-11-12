@@ -116,8 +116,11 @@ async function dueNow(db, kind, propertyId, params = {}) {
 // just who sent it and its shape -- run that before any lock. Returns
 // { status, body } to send, or null to go on.
 function checkStatedPayment(req, due) {
-  const payment = req.body?.payment;
-  const website = req.api_key?.website === true;
+  return paymentRefusal({ website: req.api_key?.website === true, payment: req.body?.payment }, due);
+}
+
+// The same, for callers that have no req (bookFromAvailability).
+function paymentRefusal({ website, payment }, due) {
   if (payment !== undefined) {
     if (!website) return { status: 403, body: { error: 'Only a website API key can state a payment' } };
     const amount = typeof payment?.amount === 'number' || (typeof payment?.amount === 'string' && payment.amount.trim())
@@ -144,4 +147,13 @@ async function recordStatedPayment(client, kind, id, propertyId, payment) {
   );
 }
 
-module.exports = { dueNow, spaAnswer, checkStatedPayment, recordStatedPayment };
+// A spa's rule and currency, to price an appointment with spaAnswer.
+async function spaRule(db, spaId) {
+  const { rows: [r] } = await db.query(
+    'SELECT s.payment_required, s.deposit_amount, p.currency FROM spa s JOIN property p ON p.id = s.property_id WHERE s.id = $1',
+    [spaId]
+  );
+  return r;
+}
+
+module.exports = { dueNow, spaAnswer, spaRule, checkStatedPayment, paymentRefusal, recordStatedPayment };
