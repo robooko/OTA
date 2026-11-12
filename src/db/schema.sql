@@ -805,11 +805,13 @@ CREATE TABLE IF NOT EXISTS restaurant (
   timezone                  VARCHAR(50), -- NULL = inherit property.timezone
   payment_protection        VARCHAR(20)  NOT NULL DEFAULT 'none', -- 'none' | 'hold' | 'deposit'
   payment_protection_amount NUMERIC(14,2),
+  payment_protection_basis  VARCHAR(10)  NOT NULL DEFAULT 'per_table', -- payment_protection_amount once per table, or once per guest
   website_id                UUID REFERENCES property_website(id), -- NULL = no guest website; table QR codes then carry only the table id
   require_join_code         BOOLEAN      NOT NULL DEFAULT false, -- opt-in: newly opened table sessions get a 4-digit join code that api-key (guest-rail) callers must present
   menu_category_order       TEXT[]       NOT NULL DEFAULT '{}', -- menu category names in display order; unlisted ones follow, by name
   created_at                TIMESTAMPTZ DEFAULT now(),
-  CONSTRAINT restaurant_payment_protection_check CHECK (payment_protection IN ('none', 'hold', 'deposit'))
+  CONSTRAINT restaurant_payment_protection_check CHECK (payment_protection IN ('none', 'hold', 'deposit')),
+  CONSTRAINT restaurant_payment_protection_basis_check CHECK (payment_protection_basis IN ('per_table', 'per_guest'))
 );
 
 CREATE TABLE IF NOT EXISTS restaurant_table (

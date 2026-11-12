@@ -201,6 +201,22 @@ const pool = require('../src/db');
       assert.equal((await call(ctl.removeEntityAdjustment, at('golf_booking', a, { params: { adjustment_id: 'abc' } }))).status, 404);
       assert.ok(await one('SELECT id FROM folio_adjustment WHERE id = $1', [adj]));
     });
+
+    // ---- Restaurant deposit basis ----
+    const restaurants = require('../src/controllers/restaurant');
+    await check('restaurant: deposit basis defaults to per_table and can be set to per_guest', async () => {
+      const made = await call(restaurants.createRestaurant, { body: { name: 'Basis', default_duration_minutes: 90 } });
+      assert.equal(made.status, 201, JSON.stringify(made.body));
+      assert.equal(made.body.payment_protection_basis, 'per_table');
+      const id = made.body.id;
+      const put = await call(restaurants.updateRestaurant, { params: { id }, body: { payment_protection_basis: 'per_guest' } });
+      assert.equal(put.body.payment_protection_basis, 'per_guest');
+      assert.equal((await call(restaurants.updateRestaurant, { params: { id }, body: { name: 'Basis 2' } })).body.payment_protection_basis, 'per_guest');
+      assert.equal((await call(restaurants.updateRestaurant, { params: { id }, body: { payment_protection_basis: 'per_person' } })).status, 400);
+      assert.equal((await call(restaurants.createRestaurant, { body: { name: 'Bad', default_duration_minutes: 90, payment_protection_basis: 'per_person' } })).status, 400);
+      const guest = await call(restaurants.createRestaurant, { body: { name: 'Guest', default_duration_minutes: 90, payment_protection_basis: 'per_guest' } });
+      assert.equal(guest.body.payment_protection_basis, 'per_guest');
+    });
   } finally {
     for (const t of ['payment', 'folio_adjustment', 'golf_booking_item', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'restaurant']) {
       await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
