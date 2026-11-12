@@ -2,6 +2,7 @@ const pool = require('../db');
 const { computeEntityFolio, findEntity, ownerColumn } = require('../lib/entityFolio');
 const { syncSpaPaymentStatus } = require('../lib/spaLedger');
 const { deskPaymentBlock } = require('./spaPayments');
+const { dueNow } = require('../lib/amountDue');
 
 // /api/folios/:kind/:id -- the folio of a golf booking, equipment hire,
 // restaurant reservation or spa appointment (lib/entityFolio.js), with the
@@ -105,4 +106,16 @@ async function recordEntityPayment(req, res, next) {
   }
 }
 
-module.exports = { getEntityFolio, addEntityAdjustment, removeEntityAdjustment, recordEntityPayment };
+// GET /api/folios/due-now/:kind?<the create body's params> -- what a booking
+// of that kind would need paid at booking (lib/amountDue.js).
+async function getDueNow(req, res, next) {
+  try {
+    const r = await dueNow(pool, req.params.kind, req.property_id, req.query);
+    if (r.status) return res.status(r.status).json({ error: r.error });
+    res.json(r);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { getDueNow, getEntityFolio, addEntityAdjustment, removeEntityAdjustment, recordEntityPayment };

@@ -7,6 +7,8 @@ const { authenticateOrApiKey, requireRoleOrApiKey } = require('../middleware/aut
 // gate as /api/payments and the room folio.
 const staffOrFullKey = [authenticateOrApiKey, requireRoleOrApiKey('admin', 'staff')];
 
+// Before /:kind/:id, which would otherwise read 'due-now' as a kind.
+router.get('/due-now/:kind', staffOrFullKey, ctrl.getDueNow);
 router.get('/:kind/:id', staffOrFullKey, ctrl.getEntityFolio);
 router.post('/:kind/:id/adjustments', staffOrFullKey, ctrl.addEntityAdjustment);
 router.delete('/:kind/:id/adjustments/:adjustment_id', staffOrFullKey, ctrl.removeEntityAdjustment);

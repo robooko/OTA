@@ -17,6 +17,7 @@ const pool = require('../src/db');
 const apiKeys = require('../src/lib/apiKeys');
 const keysCtl = require('../src/controllers/apiKeys');
 const { resolveSiteProperty } = require('../src/lib/propertyResolver');
+const folioCtl = require('../src/controllers/entityFolio');
 
 (async () => {
   const one = async (sql, params) => (await pool.query(sql, params)).rows[0];
@@ -93,8 +94,78 @@ const { resolveSiteProperty } = require('../src/lib/propertyResolver');
       assert.equal((await call(equipment.updateEquipment, { params: { id: e.body.id }, body: { payment_required: 'deposit' } })).status, 400);
       assert.equal((await call(equipment.createEquipment, { body: { name: 'Bad', type: 'buggy', quantity: 1, payment_required: 5 } })).status, 400);
     });
+
+    // ---- Fixtures for the amount due and enforcement ----
+    const course = (await one(`INSERT INTO golf_course (property_id, name, holes, price_per_player, payment_required) VALUES ($1, 'Due Course', 18, 90, 'full') RETURNING id`, [P])).id;
+    const tt = (await one(`INSERT INTO tee_time (property_id, course_id, tee_date, tee_time, max_players) VALUES ($1, $2, '2031-03-10', '08:00', 40) RETURNING id`, [P, course])).id;
+    const kit = (await one(`INSERT INTO equipment (property_id, name, type, quantity, price_per_day, payment_required) VALUES ($1, 'Due Buggy', 'buggy', 50, 25, 'full') RETURNING id`, [P])).id;
+    const rest = (await one(`INSERT INTO restaurant (property_id, name, default_duration_minutes, payment_protection, payment_protection_amount, payment_protection_basis)
+                             VALUES ($1, 'Due Grill', 90, 'deposit', 20, 'per_guest') RETURNING id`, [P])).id;
+    const spaId = (await one(`INSERT INTO spa (property_id, name, payment_required, deposit_amount) VALUES ($1, 'Due Spa', 'deposit', 50) RETURNING id`, [P])).id;
+    const treatment = (await one(`INSERT INTO spa_treatment (property_id, spa_id, name, duration_mins, price) VALUES ($1, $2, 'Due Massage', 60, 30) RETURNING id`, [P, spaId])).id;
+    const setRule = (table, id, sets) => pool.query(`UPDATE ${table} SET ${sets} WHERE id = $1`, [id]);
+
+    // ---- Amount due now ----
+    const { dueNow } = require('../src/lib/amountDue');
+    const due = async (kind, params) => {
+      const r = await dueNow(pool, kind, P, params);
+      return r.status ? r : { mode: r.mode, price: r.price, due_now: r.due_now, currency: r.currency };
+    };
+    await check('due now: golf full, and none still prices the round', async () => {
+      assert.deepEqual(await due('golf_booking', { tee_time_id: tt, players: 2 }), { mode: 'full', price: '180.00', due_now: '180.00', currency: 'GBP' });
+      await setRule('golf_course', course, "payment_required = 'none'");
+      assert.deepEqual(await due('golf_booking', { tee_time_id: tt, players: '2' }), { mode: 'none', price: '180.00', due_now: '0.00', currency: 'GBP' });
+      await setRule('golf_course', course, "payment_required = 'full'");
+    });
+    await check('due now: hire full is rate x quantity x duration', async () => {
+      assert.deepEqual(await due('equipment_hire', { equipment_id: kit, quantity: 2, duration: 3 }), { mode: 'full', price: '150.00', due_now: '150.00', currency: 'GBP' });
+    });
+    await check('due now: restaurant deposit per guest or per table, hold and none', async () => {
+      assert.deepEqual(await due('restaurant_reservation', { restaurant_id: rest, party_size: 4 }), { mode: 'deposit', price: null, due_now: '80.00', currency: 'GBP' });
+      await setRule('restaurant', rest, "payment_protection_basis = 'per_table'");
+      assert.equal((await due('restaurant_reservation', { restaurant_id: rest, party_size: 4 })).due_now, '20.00');
+      await setRule('restaurant', rest, "payment_protection = 'hold'");
+      assert.deepEqual(await due('restaurant_reservation', { restaurant_id: rest, party_size: 4 }), { mode: 'hold', price: null, due_now: '0.00', currency: 'GBP' });
+      await setRule('restaurant', rest, "payment_protection = 'none'");
+      assert.equal((await due('restaurant_reservation', { restaurant_id: rest, party_size: 4 })).mode, 'none');
+      await setRule('restaurant', rest, "payment_protection = 'deposit', payment_protection_basis = 'per_guest'");
+    });
+    await check('due now: a spa deposit is capped at the price; full is the price', async () => {
+      const q = { spa_id: spaId, treatment_id: treatment, date: '2031-03-10' };
+      assert.deepEqual(await due('spa_appointment', q), { mode: 'deposit', price: '30.00', due_now: '30.00', currency: 'GBP' });
+      await setRule('spa', spaId, 'deposit_amount = 20');
+      assert.equal((await due('spa_appointment', q)).due_now, '20.00');
+      await setRule('spa', spaId, "payment_required = 'full'");
+      assert.deepEqual(await due('spa_appointment', q), { mode: 'full', price: '30.00', due_now: '30.00', currency: 'GBP' });
+      await setRule('spa', spaId, "payment_required = 'deposit'");
+    });
+    await check('due now: bad params 400, another property 404, unknown kind 404', async () => {
+      const other = (await one(`INSERT INTO property (name, currency) VALUES ('Other', 'GBP') RETURNING id`)).id;
+      try {
+        const oc = (await one(`INSERT INTO golf_course (property_id, name, holes, price_per_player) VALUES ($1, 'X', 9, 10) RETURNING id`, [other])).id;
+        const ot = (await one(`INSERT INTO tee_time (property_id, course_id, tee_date, tee_time) VALUES ($1, $2, '2031-03-10', '09:00') RETURNING id`, [other, oc])).id;
+        assert.equal((await due('golf_booking', { tee_time_id: ot, players: 1 })).status, 404);
+        await pool.query('DELETE FROM tee_time WHERE property_id = $1', [other]);
+        await pool.query('DELETE FROM golf_course WHERE property_id = $1', [other]);
+      } finally {
+        await pool.query('DELETE FROM property WHERE id = $1', [other]);
+      }
+      assert.equal((await due('golf_booking', { tee_time_id: tt, players: 0 })).status, 400);
+      assert.equal((await due('golf_booking', { tee_time_id: 'abc', players: 1 })).status, 404);
+      assert.equal((await due('equipment_hire', { equipment_id: kit, quantity: 1.5 })).status, 400);
+      assert.equal((await due('restaurant_reservation', { restaurant_id: rest })).status, 400);
+      assert.equal((await due('spa_appointment', { spa_id: spaId, treatment_id: treatment, date: 'soon' })).status, 400);
+      assert.equal((await due('nope', {})).status, 404);
+    });
+    await check('due now: the route answers what dueNow does', async () => {
+      const r = await call(folioCtl.getDueNow, { params: { kind: 'golf_booking' }, query: { tee_time_id: tt, players: '2' } });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual(r.body, await dueNow(pool, 'golf_booking', P, { tee_time_id: tt, players: '2' }));
+      assert.equal((await call(folioCtl.getDueNow, { params: { kind: 'nope' }, query: {} })).status, 404);
+      assert.equal((await call(folioCtl.getDueNow, { params: { kind: 'golf_booking' }, query: { tee_time_id: tt } })).status, 400);
+    });
   } finally {
-    for (const t of ['payment', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment']) {
+    for (const t of ['payment', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'restaurant', 'spa_appointment', 'spa_therapist', 'spa_treatment', 'spa']) {
       await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
     }
     await pool.query('DELETE FROM api_key WHERE property_id = $1 OR clerk_org_id = $2', [P, ORG]);
