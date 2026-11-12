@@ -138,6 +138,69 @@ const pool = require('../src/db');
       assert.equal(ownerColumn('booking'), null);
       assert.deepEqual(ENTITY_KINDS, ['golf_booking', 'equipment_hire', 'restaurant_reservation']);
     });
+
+    // ---- Routes ----
+    const ctl = require('../src/controllers/entityFolio');
+    const at = (kind, id, extra = {}) => ({ params: { kind, id, ...extra.params }, body: extra.body ?? {} });
+
+    await check('routes: read, add a charge, remove it', async () => {
+      const g = await golfBooking({ players: 2, price: '180.00' });
+      assert.equal((await call(ctl.getEntityFolio, at('golf_booking', g))).body.balance, '360.00');
+      const add = await call(ctl.addEntityAdjustment, at('golf_booking', g, { body: { description: 'Glove', amount: 10.006 } }));
+      assert.equal(add.status, 201);
+      assert.equal(add.body.amount, '10.01');
+      assert.equal(add.body.golf_booking_id, g);
+      assert.equal((await call(ctl.getEntityFolio, at('golf_booking', g))).body.balance, '370.01');
+      const del = await call(ctl.removeEntityAdjustment, at('golf_booking', g, { params: { adjustment_id: add.body.id } }));
+      assert.equal(del.status, 204);
+      assert.equal((await call(ctl.getEntityFolio, at('golf_booking', g))).body.balance, '360.00');
+    });
+
+    await check('routes: adjustment validation', async () => {
+      const g = await golfBooking({ players: 1, price: '180.00' });
+      for (const body of [{ description: 'x', amount: 0 }, { description: 'x', amount: 'abc' }, { amount: 5 }, { description: 'y'.repeat(201), amount: 5 }]) {
+        assert.equal((await call(ctl.addEntityAdjustment, at('golf_booking', g, { body }))).status, 400, JSON.stringify(body));
+      }
+      assert.equal((await call(ctl.getEntityFolio, at('golf_booking', g))).body.items.length, 1);
+    });
+
+    await check('routes: record a payment, including on a cancelled booking and over the balance', async () => {
+      const h = await hire({ quantity: 1, total: '50.00' });
+      const pay = await call(ctl.recordEntityPayment, at('equipment_hire', h, { body: { amount: 80, method: 'cash' } }));
+      assert.equal(pay.status, 201);
+      assert.deepEqual([pay.body.status, pay.body.method, pay.body.equipment_hire_id], ['completed', 'cash', h]);
+      assert.equal(pay.body.booking_id, null);
+      assert.ok(pay.body.paid_at);
+      assert.equal((await call(ctl.getEntityFolio, at('equipment_hire', h))).body.balance, '-30.00');
+      const g = await golfBooking({ players: 1, price: '180.00', status: 'cancelled' });
+      assert.equal((await call(ctl.recordEntityPayment, at('golf_booking', g, { body: { amount: 20 } }))).status, 201);
+      for (const amount of [0, -5, 'abc', undefined]) {
+        assert.equal((await call(ctl.recordEntityPayment, at('equipment_hire', h, { body: { amount } }))).status, 400, String(amount));
+      }
+    });
+
+    await check('routes: unknown kind, bad id and another property are 404, never 500', async () => {
+      const g = await golfBooking({ players: 1, price: '180.00' });
+      const other = { property_id: '00000000-0000-0000-0000-000000000000' };
+      for (const fn of [ctl.getEntityFolio, ctl.addEntityAdjustment, ctl.recordEntityPayment]) {
+        const body = { description: 'x', amount: 5 };
+        assert.equal((await call(fn, at('booking', g, { body }))).status, 404);
+        assert.equal((await call(fn, at('golf_booking', 'abc', { body }))).status, 404);
+        assert.equal((await call(fn, { ...at('golf_booking', g, { body }), ...other })).status, 404);
+      }
+      assert.equal((await one('SELECT count(*)::int AS n FROM payment WHERE golf_booking_id = $1', [g])).n, 0);
+    });
+
+    await check('routes: an adjustment can only be removed through the booking that owns it', async () => {
+      const a = await golfBooking({ players: 1, price: '180.00' });
+      const b = await golfBooking({ players: 1, price: '180.00' });
+      const h = await hire({ quantity: 1, total: '50.00' });
+      const adj = (await call(ctl.addEntityAdjustment, at('golf_booking', a, { body: { description: 'Glove', amount: 10 } }))).body.id;
+      assert.equal((await call(ctl.removeEntityAdjustment, at('golf_booking', b, { params: { adjustment_id: adj } }))).status, 404);
+      assert.equal((await call(ctl.removeEntityAdjustment, at('equipment_hire', h, { params: { adjustment_id: adj } }))).status, 404);
+      assert.equal((await call(ctl.removeEntityAdjustment, at('golf_booking', a, { params: { adjustment_id: 'abc' } }))).status, 404);
+      assert.ok(await one('SELECT id FROM folio_adjustment WHERE id = $1', [adj]));
+    });
   } finally {
     for (const t of ['payment', 'folio_adjustment', 'golf_booking_item', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'restaurant']) {
       await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
