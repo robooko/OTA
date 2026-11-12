@@ -12,7 +12,7 @@ const STAFF_OR_FULL_KEY = [{ bearerAuth: [] }, { apiKeyAuth: [] }];
 const { PERMISSIONS } = require('../lib/permissions');
 const PERMISSIONS_DESC = 'Permission names (lowercase dotted <module>.<action>). Staff pass a gated route when their grant at the property lists the name; a scoped API key when its list does; admins and full keys always. 403 { error: "Missing permission", permission } otherwise.';
 const KEY_PERMISSIONS = { type: 'array', nullable: true, items: { $ref: '#/components/schemas/Permission' }, description: 'null = full key: does everything, the only kind that existed before 2026-10-31. A list = scoped: passes only routes requiring one of these names, and fails admin-gated routes with 403 { error: "This key is scoped; this route needs a full key or a named permission" }.' };
-const KEY_BODY = { type: 'object', properties: { name: { type: 'string', maxLength: 100, description: "'Default' is reserved for the main key (the /api-key endpoints)" }, permissions: KEY_PERMISSIONS, enabled: { type: 'boolean' } } };
+const KEY_BODY = { type: 'object', properties: { name: { type: 'string', maxLength: 100, description: "'Default' is reserved for the main key (the /api-key endpoints)" }, permissions: KEY_PERMISSIONS, enabled: { type: 'boolean' }, website: { type: 'boolean', description: "A guest-facing site: its golf, hire, restaurant and spa bookings must carry the payment the venue requires (else 402), and only it may state one. Default false; staff and other keys are exempt" } } };
 const KEY_RESPONSES = { 400: { description: 'Invalid name, unknown permission name, or non-boolean enabled' }, 403: { description: 'Insufficient permissions' }, 404: { description: 'No such key for this owner' } };
 const KEY_ID = { name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } };
 const keyPaths = (prefix, tag, security, owner) => ({
@@ -101,6 +101,7 @@ const swaggerSpec = {
           key: { type: 'string', description: 'The X-Api-Key value (prop_... or org_...)' },
           permissions: KEY_PERMISSIONS,
           enabled: { type: 'boolean', description: 'A disabled key is refused with 401' },
+          website: { type: 'boolean', description: "A guest-facing site: its golf, hire, restaurant and spa bookings must carry the payment the venue requires (else 402), and only it may state one. Default false; staff and other keys are exempt" },
           created_at: { type: 'string', format: 'date-time' },
           created_by: { type: 'string', nullable: true, description: 'Clerk user id of the admin; null for keys that predate 2026-10-31' },
         },

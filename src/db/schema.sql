@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS api_key (
   enabled       BOOLEAN NOT NULL DEFAULT true,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_by    VARCHAR(100),                -- clerk user id; NULL for migrated rows
+  website       BOOLEAN NOT NULL DEFAULT false, -- its bookings must carry payment; see migrate-2026-11-12-website-keys.sql
   CHECK ((property_id IS NULL) <> (clerk_org_id IS NULL))
 );
 

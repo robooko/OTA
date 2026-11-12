@@ -210,8 +210,13 @@ Robert chose enforcement. The rules below are calls.
   keys may use. "Full API keys are exempt" would therefore exempt the very
   site this is for. The enforcement plan (plan 3) must decide exemption by
   what the request is, a guest booking from a website versus a staff or
-  script action, not by key type alone. Unresolved; raise with Robert when
-  plan 3 is written.
+  script action, not by key type alone. **Answered by Robert (2026-11-12):**
+  API keys carry a `website` flag; only a website key's bookings are
+  enforced, and only a website key may state a payment. Staff and every
+  other key, full or scoped, are exempt (scoped keys too, a call: other
+  sites' widgets have no way to pay yet). A website key is trusted for the
+  amount it states; OTA does not call Stripe for it. See
+  `docs/superpowers/plans/2026-11-12-entity-charges-3-enforcement.md`.
 - **Switching a rule on is an operational step.** It must wait until every
   page that books that venue can take the payment. For Hamilton that means
   the site's cart and its separate golf, spa and restaurant pages.

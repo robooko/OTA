@@ -47,7 +47,8 @@ function siteSelectors(req) {
 // headers ignored). An org key picks among the org's active hotels:
 // X-Property-Id > X-Property-Slug > X-Site-Host > "the only one". null means
 // the key matched nothing (caller's 401). Successes carry apiKey
-// { id, permissions } for requirePermission (permissions null = full key).
+// { id, permissions, website } for requirePermission (permissions null = full
+// key) and the payment rules (website = bookings must carry payment).
 async function resolveSiteProperty(db = pool, sel = {}) {
   const key = given(sel.key);
   const propertyId = given(sel.propertyId);
@@ -57,7 +58,7 @@ async function resolveSiteProperty(db = pool, sel = {}) {
 
   const row = await findByKey(db, key);
   if (!row) return null;
-  const apiKey = { id: row.id, permissions: row.permissions };
+  const apiKey = { id: row.id, permissions: row.permissions, website: row.website };
   if (row.property_id) return { propertyId: row.property_id, apiKey };
   const clerkOrgId = row.clerk_org_id;
 
