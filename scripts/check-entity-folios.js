@@ -256,6 +256,45 @@ const pool = require('../src/db');
       assert.equal((await computeEntityFolio('spa_appointment', a, P)).balance, '0.00');
     });
 
+    const { recordSpaPayment } = require('../src/lib/spaLedger');
+    const { computeFolio } = require('../src/lib/folio');
+    await check('spa: payment_status follows the balance through the folio routes', async () => {
+      const a = await spaAppointment({ price: '80.00' });
+      const status = async () => one('SELECT payment_status, payment_method FROM spa_appointment WHERE id = $1', [a]);
+      assert.equal((await call(ctl.recordEntityPayment, at('spa_appointment', a, { body: { amount: 30, method: 'card' } }))).status, 201);
+      assert.equal((await status()).payment_status, 'unpaid');
+      await call(ctl.recordEntityPayment, at('spa_appointment', a, { body: { amount: 50, method: 'cash' } }));
+      assert.deepEqual(await status(), { payment_status: 'paid', payment_method: 'cash' });
+      const add = await call(ctl.addEntityAdjustment, at('spa_appointment', a, { body: { description: 'Oil', amount: 12 } }));
+      assert.equal(add.status, 201);
+      assert.deepEqual(await status(), { payment_status: 'unpaid', payment_method: null });
+      await call(ctl.removeEntityAdjustment, at('spa_appointment', a, { params: { adjustment_id: add.body.id } }));
+      assert.equal((await status()).payment_status, 'paid');
+    });
+
+    await check('spa: stay-linked appointment refuses charges and payments; room folio unchanged', async () => {
+      const b = await roomBooking();
+      const a = await spaAppointment({ bookingId: b });
+      const before = await computeFolio(b, P);
+      assert.equal((await call(ctl.addEntityAdjustment, at('spa_appointment', a, { body: { description: 'x', amount: 5 } }))).status, 409);
+      const pay = await call(ctl.recordEntityPayment, at('spa_appointment', a, { body: { amount: 5 } }));
+      assert.equal(pay.status, 409); assert.equal(pay.body.booking_id, b);
+      assert.deepEqual(await computeFolio(b, P), before);
+      assert.equal((await one('SELECT count(*)::int AS n FROM payment WHERE spa_appointment_id = $1', [a])).n, 0);
+    });
+
+    await check('spa: recordSpaPayment takes the balance once, dedupes a Stripe ref', async () => {
+      const a = await spaAppointment({ price: '80.00' });
+      const first = await recordSpaPayment(a, P, { method: 'cash' });
+      assert.equal(first.recorded, true); assert.equal(first.appointment.payment_status, 'paid');
+      assert.equal(await recordSpaPayment(a, P, { method: 'cash' }), null);
+      const b = await spaAppointment({ price: '80.00' });
+      assert.equal((await recordSpaPayment(b, P, { method: 'card', stripeRef: 'pi_x', cents: 2000 })).recorded, true);
+      assert.equal((await recordSpaPayment(b, P, { method: 'card', stripeRef: 'pi_x', cents: 2000 })).recorded, false);
+      assert.equal((await computeEntityFolio('spa_appointment', b, P)).payments_total, '20.00');
+      assert.equal(await recordSpaPayment('abc', P, { method: 'cash' }), null);
+    });
+
     // ---- Restaurant deposit basis ----
     const restaurants = require('../src/controllers/restaurant');
     await check('restaurant: deposit basis defaults to per_table and can be set to per_guest', async () => {
