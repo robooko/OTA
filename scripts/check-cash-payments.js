@@ -9,16 +9,22 @@ if (/neon\.tech|render\.com/.test(process.env.DATABASE_URL || '')) throw new Err
 
 const fakeStripe = require('./fake-stripe');
 // The slice of billing the spa cash path reads; tests fill these in.
-const billing = { customers: [], items: [], invoices: [], deleted: [], invoiceLines: [] };
-fakeStripe.customers = { list: async () => ({ data: billing.customers }) };
+const billing = { customers: [], items: [], invoices: [], deleted: [], invoiceLines: [], created: [] };
+fakeStripe.customers = { list: async () => ({ data: billing.customers }), create: async (p) => ({ id: 'cus_new', ...p }) };
 fakeStripe.invoiceItems = {
   // settlePaidInvoice walks one invoice's lines with for-await.
   list: (params) => (params?.invoice
     ? { async *[Symbol.asyncIterator]() { yield* billing.invoiceLines; } }
     : Promise.resolve({ data: billing.items })),
+  create: async (p) => { billing.created.push(p); return { id: `ii_new_${billing.created.length}`, ...p }; },
   del: async (id) => { billing.deleted.push(id); billing.items = billing.items.filter((i) => i.id !== id); return { id, deleted: true }; },
 };
-fakeStripe.invoices = { list: async () => ({ data: billing.invoices }) };
+fakeStripe.invoices = {
+  list: async () => ({ data: billing.invoices }),
+  create: async (p) => ({ id: 'in_new', status: 'draft', ...p }),
+  finalizeInvoice: async (id) => ({ id, status: 'open' }),
+  sendInvoice: async (id) => ({ id, status: 'open', hosted_invoice_url: 'https://invoice.test', amount_due: billing.created.at(-1)?.amount }),
+};
 require.cache[require.resolve('stripe')] = { id: 'stripe', filename: require.resolve('stripe'), loaded: true, exports: () => fakeStripe };
 
 const pool = require('../src/db');
@@ -208,16 +214,18 @@ const folios = require('../src/controllers/entityFolio');
     await check('spa: an unpaid tap is repriced to what is owed; a succeeded one is recorded, then the rest charged', async () => {
       const a = await book();
       const pi = await call(spa.createAppointmentPaymentIntent, { params: { id: a, spa_id: spaId } });
-      await call(folios.recordEntityPayment, { params: { kind: 'spa_appointment', id: a }, body: { amount: 30, method: 'cash' } });
+      // A desk payment would cancel the waiting intent (see the Charges dialog
+      // check below), so move the balance with an added charge instead.
+      await call(folios.addEntityAdjustment, { params: { kind: 'spa_appointment', id: a }, body: { description: 'Oil', amount: 12 } });
       const again = await call(spa.createAppointmentPaymentIntent, { params: { id: a, spa_id: spaId } });
       assert.equal(again.body.payment_intent_id, pi.body.payment_intent_id);
-      assert.equal(again.body.amount, 5000);
+      assert.equal(again.body.amount, 9200);
       const intent = fakeStripe.store.get(pi.body.payment_intent_id);
       intent.amount = 2000; intent.status = 'succeeded';           // tapped for 20, app died before confirm
       const after = await call(spa.createAppointmentPaymentIntent, { params: { id: a, spa_id: spaId } });
       assert.notEqual(after.body.payment_intent_id, intent.id);
-      assert.equal(after.body.amount, 3000);
-      assert.deepEqual(await paymentsOf(a), [{ amount: '20.00', method: 'card' }, { amount: '30.00', method: 'cash' }]);
+      assert.equal(after.body.amount, 7200);
+      assert.deepEqual(await paymentsOf(a), [{ amount: '20.00', method: 'card' }]);
     });
 
     await check('spa: a paid invoice settles once', async () => {
@@ -229,6 +237,40 @@ const folios = require('../src/controllers/entityFolio');
       assert.equal((await paymentsOf(a)).length, 1);
       assert.equal((await appt(a)).payment_status, 'paid');
       billing.invoiceLines = [];
+    });
+
+    const deskPay = (id, amount) => call(folios.recordEntityPayment, { params: { kind: 'spa_appointment', id }, body: { amount, method: 'cash' } });
+    await check('spa: a payment in the Charges dialog gets the same Stripe guards as cash', async () => {
+      const a = await book();
+      const pi = await call(spa.createAppointmentPaymentIntent, { params: { id: a, spa_id: spaId } });
+      assert.equal((await deskPay(a, 80)).status, 201);
+      assert.equal(fakeStripe.store.get(pi.body.payment_intent_id).status, 'canceled');
+
+      billing.customers = [{ id: 'cus_ana' }];
+      const b = await book();
+      billing.invoices = [{ id: 'in_open', status: 'open', metadata: { spa_appointment_id: b } }];
+      const r = await deskPay(b, 80);
+      assert.equal(r.status, 409, JSON.stringify(r.body)); assert.equal(r.body.invoice_id, 'in_open');
+      assert.deepEqual(await paymentsOf(b), []);
+      billing.customers = []; billing.invoices = [];
+    });
+
+    await check('spa: a paid, recorded invoice does not block taking the rest', async () => {
+      billing.customers = [{ id: 'cus_ana' }];
+      const a = await book();
+      const paid = { id: 'in_paid_rest', status: 'paid', currency: 'gbp', metadata: { spa_appointment_id: a } };
+      billing.invoiceLines = [{ amount: 8000, metadata: { spa_appointment_id: a } }];
+      await spa.settlePaidInvoice(fakeStripe, paid, P);
+      billing.invoices = [paid];
+      await call(folios.addEntityAdjustment, { params: { kind: 'spa_appointment', id: a }, body: { description: 'Oil', amount: 12 } });
+      const inv = await call(spa.createAppointmentInvoice, { params: { id: a, spa_id: spaId } });
+      assert.equal(inv.status, 200, JSON.stringify(inv.body));
+      assert.equal(billing.created.at(-1).amount, 1200);
+      billing.invoices = [paid];   // the new invoice is not in the fake's list; only the paid one is
+      const cash = await pay(a, { paid_with: 'cash' });
+      assert.equal(cash.status, 200, JSON.stringify(cash.body));
+      assert.deepEqual(await paymentsOf(a), [{ amount: '12.00', method: 'cash' }, { amount: '80.00', method: 'card' }]);
+      billing.customers = []; billing.invoices = []; billing.invoiceLines = [];
     });
   } finally {
     await pool.query('DELETE FROM restaurant_order WHERE property_id = $1', [P]);

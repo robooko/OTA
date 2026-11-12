@@ -1,6 +1,7 @@
 const pool = require('../db');
 const { computeEntityFolio, findEntity, ownerColumn } = require('../lib/entityFolio');
 const { syncSpaPaymentStatus } = require('../lib/spaLedger');
+const { deskPaymentBlock } = require('./spaPayments');
 
 // /api/folios/:kind/:id -- the folio of a golf booking, equipment hire,
 // restaurant reservation or spa appointment (lib/entityFolio.js), with the
@@ -84,6 +85,13 @@ async function recordEntityPayment(req, res, next) {
     if (amount == null || !Number.isFinite(amt) || amt <= 0) {
       return res.status(400).json({ error: 'amount must be a positive number' });
     }
+    // A spa appointment may also be billable on Stripe (a terminal tap, an
+    // invoice, a bill line): same clean-up as its cash path first, so the
+    // guest is never charged twice.
+    if (kind === 'spa_appointment') {
+      const blocked = await deskPaymentBlock(id, req.property_id);
+      if (blocked) return res.status(409).json(blocked);
+    }
     const { rows } = await pool.query(
       `INSERT INTO payment (property_id, ${ownerColumn(kind)}, amount, method, status, paid_at)
        VALUES ($1, $2, $3, $4, 'completed', now()) RETURNING *`,
@@ -92,6 +100,7 @@ async function recordEntityPayment(req, res, next) {
     await afterChange(kind, id, req.property_id);
     res.status(201).json(rows[0]);
   } catch (err) {
+    if (err.type?.startsWith('Stripe')) return res.status(502).json({ error: `Stripe error: ${err.message}` });
     next(err);
   }
 }

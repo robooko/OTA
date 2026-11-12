@@ -148,29 +148,8 @@ async function recordCashPayment(req, res, next) {
     if (!appt) return res.status(404).json({ error: 'Appointment not found' });
     if (appt.status === 'cancelled') return res.status(409).json({ error: 'Appointment is cancelled' });
     if ((await owedCents(appt)) <= 0) return nothingOwed(res, appt);
-
-    if (appt.stripe_secret_key) {
-      const stripe = require('stripe')(appt.stripe_secret_key);
-      if (appt.stripe_payment_intent_id) {
-        const intent = await stripe.paymentIntents.retrieve(appt.stripe_payment_intent_id);
-        if (intent.status === 'requires_payment_method') await stripe.paymentIntents.cancel(intent.id);
-        // A succeeded tap already on record (a deposit) is part of the
-        // balance; one not yet recorded must be confirmed first.
-        else if (intent.status === 'succeeded' && await isRecorded(appt.id, intent.id)) { /* nothing to undo */ }
-        else if (intent.status !== 'canceled') {
-          return res.status(409).json({
-            error: intent.status === 'succeeded' ? 'Appointment was already paid by card' : 'A card payment is in progress on this appointment',
-            payment_intent_id: intent.id,
-          });
-        }
-      }
-      const customer = appt.contact_email ? await findCustomer(stripe, appt.contact_email) : null;
-      if (customer) {
-        const { pendingItem, invoice } = await findAppointmentBilling(stripe, customer.id, appt.id);
-        if (invoice) return res.status(409).json({ error: 'Appointment is on a Stripe invoice -- void it in Stripe first', invoice_id: invoice.id });
-        if (pendingItem) await stripe.invoiceItems.del(pendingItem.id);
-      }
-    }
+    const blocked = await clearStripeForDeskPayment(appt);
+    if (blocked) return res.status(409).json(blocked);
 
     // Takes whatever is owed under the row lock; null = someone else just did.
     const recorded = await recordSpaPayment(appt.id, appt.property_id, { method: 'cash' });
@@ -184,6 +163,47 @@ async function recordCashPayment(req, res, next) {
   }
 }
 
+// Before money taken at the desk (cash here, or a payment in the Charges
+// dialog -- controllers/entityFolio.js) nothing on Stripe may still be able
+// to charge for it: an untouched terminal intent is cancelled and a pending
+// bill line removed. A tap in progress, a succeeded tap not yet recorded, or
+// a live invoice is returned as the 409 body for staff to sort out first.
+async function clearStripeForDeskPayment(appt) {
+  if (!appt.stripe_secret_key) return null;
+  const stripe = require('stripe')(appt.stripe_secret_key);
+  if (appt.stripe_payment_intent_id) {
+    const intent = await stripe.paymentIntents.retrieve(appt.stripe_payment_intent_id);
+    if (intent.status === 'requires_payment_method') await stripe.paymentIntents.cancel(intent.id);
+    // A succeeded tap already on record (a deposit) is part of the
+    // balance; one not yet recorded must be confirmed first.
+    else if (intent.status === 'succeeded' && await isRecorded(appt.id, intent.id)) { /* nothing to undo */ }
+    else if (intent.status !== 'canceled') {
+      return {
+        error: intent.status === 'succeeded' ? 'Appointment was already paid by card' : 'A card payment is in progress on this appointment',
+        payment_intent_id: intent.id,
+      };
+    }
+  }
+  const customer = appt.contact_email ? await findCustomer(stripe, appt.contact_email) : null;
+  if (customer) {
+    const { pendingItem, invoice } = await findAppointmentBilling(stripe, customer.id, appt.id);
+    if (invoice) return { error: 'Appointment is on a Stripe invoice -- void it in Stripe first', invoice_id: invoice.id };
+    if (pendingItem) await stripe.invoiceItems.del(pendingItem.id);
+  }
+  return null;
+}
+
+// The same, for a spa appointment known only by id (the /api/folios routes).
+// null when there is nothing to block, or no such appointment.
+async function deskPaymentBlock(appointmentId, propertyId) {
+  const { rows: [appt] } = await pool.query(
+    `SELECT sa.*, p.stripe_secret_key FROM spa_appointment sa JOIN property p ON p.id = sa.property_id
+     WHERE sa.id = $1 AND sa.property_id = $2`,
+    [appointmentId, propertyId]
+  );
+  return appt ? clearStripeForDeskPayment(appt) : null;
+}
+
 // Stripe matches email case-sensitively, so always store and look up lowercase.
 async function findCustomer(stripe, email) {
   const { data } = await stripe.customers.list({ email: email.trim().toLowerCase(), limit: 1 });
@@ -192,7 +212,9 @@ async function findCustomer(stripe, email) {
 
 // Where an appointment stands in Stripe: a pending line on the guest's open
 // bill, and/or a live invoice carrying it -- either its own (invoice
-// metadata) or a bill it was swept into (item metadata).
+// metadata) or a bill it was swept into (item metadata). A paid invoice
+// already recorded as a payment is history, not live: it never blocks taking
+// what is still owed.
 // ponytail: scans the customer's latest 100 items and invoices; a regular with
 // more than that would need invoices.search or a stored stripe_invoice_id.
 async function findAppointmentBilling(stripe, customerId, appointmentId) {
@@ -202,11 +224,15 @@ async function findAppointmentBilling(stripe, customerId, appointmentId) {
   ]);
   const mine = items.filter(i => i.metadata?.spa_appointment_id === appointmentId);
   const onInvoice = new Set(mine.map(i => i.invoice).filter(Boolean));
-  return {
-    pendingItem: mine.find(i => !i.invoice) ?? null,
-    invoice: invoices.find(i => ['draft', 'open', 'paid'].includes(i.status)
-      && (i.metadata?.spa_appointment_id === appointmentId || onInvoice.has(i.id))) ?? null,
-  };
+  let invoice = null;
+  for (const i of invoices) {
+    if (!['draft', 'open', 'paid'].includes(i.status)) continue;
+    if (i.metadata?.spa_appointment_id !== appointmentId && !onInvoice.has(i.id)) continue;
+    if (i.status === 'paid' && await isRecorded(appointmentId, i.id)) continue;
+    invoice = i;
+    break;
+  }
+  return { pendingItem: mine.find(i => !i.invoice) ?? null, invoice };
 }
 
 // Records each line of a paid invoice as a card payment on its appointment,
@@ -245,7 +271,7 @@ async function createAppointmentInvoice(req, res, next) {
     if (!appt.contact_email) return res.status(409).json({ error: 'Appointment has no contact email to invoice' });
 
     const stripe = require('stripe')(appt.stripe_secret_key);
-    const amount = toStripeAmount(owed, appt.currency);
+    let amount = toStripeAmount(owed, appt.currency);
 
     const email = appt.contact_email.trim().toLowerCase();
     const customer = await findCustomer(stripe, email) ?? await stripe.customers.create({ email, name: appt.contact_name });
@@ -254,15 +280,16 @@ async function createAppointmentInvoice(req, res, next) {
       return res.status(409).json({ error: "Appointment is on the guest's open bill -- invoice the bill instead", invoice_item_id: pendingItem.id });
     }
 
+    let invoice = live;
     if (live?.status === 'paid') {
       const { settled } = await settlePaidInvoice(stripe, live, req.property_id);
-      if (!settled.includes(String(appt.id))) {
-        return res.status(409).json({ error: 'Invoice was paid but a balance remains', invoice_id: live.id });
-      }
-      return res.json({ already_paid: true, invoice_id: live.id });
+      if (settled.includes(String(appt.id))) return res.json({ already_paid: true, invoice_id: live.id });
+      // Paid, but something is still owed (a charge added since): invoice the rest.
+      invoice = null;
+      amount = toStripeAmount(await owedCents(appt), appt.currency);
+      if (amount <= 0) return nothingOwed(res, appt);
     }
 
-    let invoice = live;
     if (!invoice) {
       invoice = await stripe.invoices.create({
         customer: customer.id,
@@ -533,4 +560,4 @@ async function removeBillLine(req, res, next) {
   }
 }
 
-module.exports = { loadAppointmentForPayment, treatmentPriceCents, settlePaidInvoice, createAppointmentPaymentIntent, confirmAppointmentPayment, createAppointmentInvoice, addAppointmentToBill, invoiceGuestBill, listBills, removeBillLine, removeAppointmentFromBill };
+module.exports = { loadAppointmentForPayment, treatmentPriceCents, settlePaidInvoice, deskPaymentBlock, createAppointmentPaymentIntent, confirmAppointmentPayment, createAppointmentInvoice, addAppointmentToBill, invoiceGuestBill, listBills, removeBillLine, removeAppointmentFromBill };

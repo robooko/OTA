@@ -321,7 +321,7 @@ await check('spa: payment at booking is none, deposit with an amount, or full', 
 Do a final fresh review of OTA, hotal-ui `spa-charges` and the staff app together. Robert's shipping order:
 
 1. Run both migrations on the live DB, with his OK: the backfill, then the payment-required migration.
-2. Push OTA `main`.
+2. Push OTA `main`, then **run the backfill on live once more** as soon as the deploy is up. It is idempotent. It catches any appointment the old code marked paid between step 1 and the deploy. Those have no payment row, so they would otherwise show as owing.
 3. Publish hotal-ui 0.46.2, or re-vendor whatever he publishes.
 4. Deploy the staff app.
 
