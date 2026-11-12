@@ -947,7 +947,13 @@ CREATE TABLE IF NOT EXISTS spa (
   -- Minimum notice (hours) for a guest/AI booking; NULL = none. Staff are
   -- exempt. See migrate-2026-09-23-spa-lead-time.sql.
   lead_time_hours       INT CONSTRAINT spa_lead_time_hours_valid CHECK (lead_time_hours IS NULL OR lead_time_hours BETWEEN 1 AND 720),
-  created_at            TIMESTAMPTZ DEFAULT now()
+  -- What a guest pays at booking: nothing, deposit_amount per appointment, or
+  -- the full price. See migrate-2026-11-12-spa-payment-required.sql.
+  payment_required      VARCHAR(10)  NOT NULL DEFAULT 'none'
+                        CONSTRAINT spa_payment_required_valid CHECK (payment_required IN ('none', 'deposit', 'full')),
+  deposit_amount        NUMERIC(14,2) CONSTRAINT spa_deposit_amount_positive CHECK (deposit_amount IS NULL OR deposit_amount > 0),
+  created_at            TIMESTAMPTZ DEFAULT now(),
+  CONSTRAINT spa_deposit_has_amount CHECK (payment_required <> 'deposit' OR deposit_amount IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS spa_treatment (

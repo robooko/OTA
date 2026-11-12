@@ -1,7 +1,7 @@
 const { z } = require('zod');
 
 // Bookings that have their own folio besides room stays (/api/folios/:kind/:id).
-const ENTITY_KIND = z.enum(['golf_booking', 'equipment_hire', 'restaurant_reservation']).describe('Which kind of booking the id is');
+const ENTITY_KIND = z.enum(['golf_booking', 'equipment_hire', 'restaurant_reservation', 'spa_appointment']).describe('Which kind of booking the id is');
 
 // Optional email styling accepted by spa appointment create/update and by
 // create_event_inquiry. Values come from the venue's website; OTA relays
@@ -562,13 +562,13 @@ function createTools(apiRequest) {
   },
   {
     name: 'get_entity_folio',
-    description: "The folio of a golf booking, equipment hire or restaurant reservation: its own price (dropped once cancelled), golf pro-shop items, manual charges, payments, and balance. A negative balance is a credit. external_payment: true = a card deposit or hold exists on Stripe and is not in the totals",
+    description: "The folio of a golf booking, equipment hire, restaurant reservation or spa appointment: its own price (dropped once cancelled), golf pro-shop items, manual charges, payments, and balance. A negative balance is a credit. external_payment: true = a card deposit or hold exists on Stripe and is not in the totals. charged_to_booking_id set = a spa appointment carried on that room booking's folio (charges and payments go there)",
     inputSchema: { kind: ENTITY_KIND, id: z.string().describe('The booking id of that kind') },
     run: ({ kind, id }) => apiRequest('GET', `/api/folios/${kind}/${id}`),
   },
   {
     name: 'add_entity_folio_adjustment',
-    description: 'Add a manual charge to a golf booking, equipment hire or restaurant reservation folio: positive amount = charge, negative = credit/comp',
+    description: 'Add a manual charge to a golf booking, equipment hire, restaurant reservation or spa appointment folio: positive amount = charge, negative = credit/comp',
     inputSchema: { kind: ENTITY_KIND, id: z.string(), description: z.string().max(200), amount: z.number() },
     run: ({ kind, id, ...body }) => apiRequest('POST', `/api/folios/${kind}/${id}/adjustments`, { body }),
   },
@@ -580,7 +580,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'record_entity_payment',
-    description: 'Record a completed payment taken at the desk (cash, card terminal, bank transfer) against a golf booking, equipment hire or restaurant reservation. It reduces that folio balance; more than the balance leaves a credit',
+    description: 'Record a completed payment taken at the desk (cash, card terminal, bank transfer) against a golf booking, equipment hire, restaurant reservation or spa appointment. It reduces that folio balance; more than the balance leaves a credit',
     inputSchema: { kind: ENTITY_KIND, id: z.string(), amount: z.number().positive(), method: z.string().optional().describe('e.g. card, cash, bank_transfer') },
     run: ({ kind, id, ...body }) => apiRequest('POST', `/api/folios/${kind}/${id}/payments`, { body }),
   },
@@ -1996,6 +1996,8 @@ function createTools(apiRequest) {
       contact_email: z.string().optional(),
       address: z.string().optional(),
       lead_time_hours: z.number().int().min(1).max(720).nullable().optional().describe('Minimum notice in hours for a guest booking (staff bookings are exempt). null = none'),
+      payment_required: z.enum(['none', 'deposit', 'full']).optional().describe('What a guest pays at booking: nothing, deposit_amount per appointment, or the full price. Not enforced yet'),
+      deposit_amount: z.number().positive().optional().describe('Deposit per appointment. Required (sent or already stored) when payment_required is deposit'),
     },
     run: ({ id, ...body }) => apiRequest('PUT', `/api/spa/${id}`, { body }),
   },

@@ -85,6 +85,21 @@ function normalizeLeadTimeHours(value) {
   return { value: hours };
 }
 
+// spa.payment_required / deposit_amount: what a guest pays at booking. Both
+// optional on update (absent = unchanged). The DB's spa_deposit_has_amount
+// check catches a deposit with no amount sent or stored.
+const PAYMENT_REQUIRED = ['none', 'deposit', 'full'];
+function invalidPaymentRule({ payment_required, deposit_amount }) {
+  if (payment_required !== undefined && !PAYMENT_REQUIRED.includes(payment_required)) {
+    return `payment_required must be one of ${PAYMENT_REQUIRED.join(', ')}`;
+  }
+  if (deposit_amount === undefined) return null;
+  // Number('') and Number(null) are 0, so only numbers and non-blank strings count.
+  const amount = typeof deposit_amount === 'number' || (typeof deposit_amount === 'string' && deposit_amount.trim()) ? Number(deposit_amount) : NaN;
+  if (!(amount > 0 && amount <= 999999999999.99)) return 'deposit_amount must be a positive amount';
+  return null;
+}
+
 // Does date+time fall inside the salon's lead time? Returns the salon's
 // lead_time_hours when it does, else null (including when it has none).
 // Compared in the property's own timezone, same as isTherapistFree's is_past.
@@ -153,6 +168,9 @@ async function updateSpa(req, res, next) {
     const hasLead = Object.prototype.hasOwnProperty.call(req.body, 'lead_time_hours');
     const lead = normalizeLeadTimeHours(req.body.lead_time_hours);
     if (lead.error) return res.status(400).json({ error: lead.error });
+    const ruleError = invalidPaymentRule(req.body);
+    if (ruleError) return res.status(400).json({ error: ruleError });
+    const depositAmount = req.body.deposit_amount === undefined ? null : Number(req.body.deposit_amount).toFixed(2);
     const { rows } = await pool.query(
       `UPDATE spa SET
          name                  = COALESCE($1, name),
@@ -162,13 +180,21 @@ async function updateSpa(req, res, next) {
          slot_interval_minutes = COALESCE($5, slot_interval_minutes),
          contact_email         = COALESCE($6, contact_email),
          address               = COALESCE($7, address),
-         lead_time_hours       = CASE WHEN $8 THEN $9::int ELSE lead_time_hours END
+         lead_time_hours       = CASE WHEN $8 THEN $9::int ELSE lead_time_hours END,
+         payment_required      = COALESCE($12, payment_required),
+         deposit_amount        = COALESCE($13::numeric, deposit_amount)
        WHERE id = $10 AND property_id = $11 RETURNING *`,
-      [name, description, phone, status, slot_interval_minutes, contact_email, address, hasLead, lead.value, req.params.id, req.property_id]
+      [name, description, phone, status, slot_interval_minutes, contact_email, address, hasLead, lead.value, req.params.id, req.property_id,
+        req.body.payment_required ?? null, depositAmount]
     );
     if (!rows.length) return res.status(404).json({ error: 'Spa not found' });
     res.json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === '23514' && err.constraint === 'spa_deposit_has_amount') {
+      return res.status(400).json({ error: 'deposit_amount is required when payment_required is deposit' });
+    }
+    next(err);
+  }
 }
 
 // ── Treatments ────────────────────────────────────────────────────────────────

@@ -295,6 +295,25 @@ const pool = require('../src/db');
       assert.equal(await recordSpaPayment('abc', P, { method: 'cash' }), null);
     });
 
+    const spaCtl = require('../src/controllers/spa');
+    await check('spa: payment at booking is none, deposit with an amount, or full', async () => {
+      const s = await one(`INSERT INTO spa (property_id, name) VALUES ($1, 'Rules') RETURNING id, payment_required, deposit_amount`, [P]);
+      assert.equal(s.payment_required, 'none'); assert.equal(s.deposit_amount, null);
+      const put = (body) => call(spaCtl.updateSpa, { params: { id: s.id }, body });
+      const noAmount = await put({ payment_required: 'deposit' });
+      assert.equal(noAmount.status, 400, JSON.stringify(noAmount.body));
+      const ok = await put({ payment_required: 'deposit', deposit_amount: 25 });
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      assert.equal(ok.body.payment_required, 'deposit'); assert.equal(ok.body.deposit_amount, '25.00');
+      assert.equal((await put({ name: 'Rules 2' })).body.deposit_amount, '25.00');
+      const full = await put({ payment_required: 'full' });
+      assert.equal(full.body.payment_required, 'full'); assert.equal(full.body.deposit_amount, '25.00');
+      assert.equal((await put({ payment_required: 'half' })).status, 400);
+      assert.equal((await put({ deposit_amount: 0 })).status, 400);
+      assert.equal((await put({ deposit_amount: 'abc' })).status, 400);
+      assert.equal((await put({ deposit_amount: -5 })).status, 400);
+    });
+
     // ---- Restaurant deposit basis ----
     const restaurants = require('../src/controllers/restaurant');
     await check('restaurant: deposit basis defaults to per_table and can be set to per_guest', async () => {
