@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { dueNow, checkStatedPayment, recordStatedPayment } = require('../lib/amountDue');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { toMinutes, fmt, hireWindow, peakUse, fitsHours, startTimes } = require('../lib/equipmentWindows');
 
@@ -229,6 +230,9 @@ async function createHire(req, res, next) {
   if (!(duration > 0 && duration <= 999.99)) return res.status(400).json({ error: 'duration must be from 0.01 to 999.99' });
   if (rate_type === 'per_hour' && !Number.isInteger(duration * 2)) return res.status(400).json({ error: 'Hourly duration must be a multiple of 0.5' });
   if (start_time != null && !isHour(start_time)) return res.status(400).json({ error: 'start_time must be HH:MM' });
+  // Who may state a payment, and its shape (lib/amountDue.js).
+  const early = checkStatedPayment(req, null);
+  if (early) return res.status(early.status).json(early.body);
 
   const client = await pool.connect();
   try {
@@ -253,15 +257,20 @@ async function createHire(req, res, next) {
     const error = shortfall(eq, hires, window, quantity);
     if (error) { await client.query('ROLLBACK'); return res.status(409).json({ error }); }
 
-    const rate = rate_type === 'per_hour' ? parseFloat(eq.price_per_hour || 0) : parseFloat(eq.price_per_day || 0);
-    const total_price = (rate * quantity * duration).toFixed(2);
+    // The price, and what a website key's hire must carry of it.
+    const due = await dueNow(client, 'equipment_hire', req.property_id, { equipment_id, quantity, rate_type, duration });
+    if (due.status) { await client.query('ROLLBACK'); return res.status(due.status).json({ error: due.error }); }
+    const total_price = due.price;
     if (Number(total_price) > MAX_MONEY) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Total price too large' }); }
+    const refusal = checkStatedPayment(req, due);
+    if (refusal) { await client.query('ROLLBACK'); return res.status(refusal.status).json(refusal.body); }
 
     const { rows } = await client.query(
       `INSERT INTO equipment_hire (property_id, equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, start_time, quantity, rate_type, duration, notes, golf_booking_id, total_price)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
       [req.property_id, equipment_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, hire_date, start_time ?? null, quantity, rate_type, duration, notes ?? null, golf_booking_id ?? null, total_price]
     );
+    await recordStatedPayment(client, 'equipment_hire', rows[0].id, req.property_id, req.body.payment);
 
     await client.query('COMMIT');
     res.status(201).json(rows[0]);

@@ -1,6 +1,9 @@
 const { z } = require('zod');
 
 // Bookings that have their own folio besides room stays (/api/folios/:kind/:id).
+// A booking's payment, stated by a website API key only (lib/amountDue.js).
+const STATED_PAYMENT = z.object({ amount: z.number().positive(), stripe_payment_intent_id: z.string().min(1).max(255) }).optional()
+  .describe("Only with a website API key: what the site took on its own Stripe account, recorded as a payment with the booking. A website key's booking must carry at least the venue's due_now (get_amount_due_now), else 402");
 const ENTITY_KIND = z.enum(['golf_booking', 'equipment_hire', 'restaurant_reservation', 'spa_appointment']).describe('Which kind of booking the id is');
 
 // Optional email styling accepted by spa appointment create/update and by
@@ -2365,6 +2368,7 @@ function createTools(apiRequest) {
     name: 'create_equipment_hire',
     description: 'Hire equipment for a guest. rate_type defaults to "per_day"; total_price is computed server-side from the equipment\'s rate.',
     inputSchema: {
+      payment: STATED_PAYMENT,
       equipment_id: z.string(),
       guest_id: z.string().optional(),
       contact_name: z.string(),
@@ -2458,6 +2462,7 @@ function createTools(apiRequest) {
     name: 'create_golf_booking',
     description: 'Book a tee time. total_price is computed server-side from the course rate and player count.',
     inputSchema: {
+      payment: STATED_PAYMENT,
       tee_time_id: z.string(),
       guest_id: z.string().optional(),
       contact_name: z.string(),

@@ -164,6 +164,61 @@ const folioCtl = require('../src/controllers/entityFolio');
       assert.equal((await call(folioCtl.getDueNow, { params: { kind: 'nope' }, query: {} })).status, 404);
       assert.equal((await call(folioCtl.getDueNow, { params: { kind: 'golf_booking' }, query: { tee_time_id: tt } })).status, 400);
     });
+
+    // ---- Enforcement: golf and hire ----
+    const { computeEntityFolio } = require('../src/lib/entityFolio');
+    const count = async (table) => (await one(`SELECT count(*)::int AS n FROM ${table} WHERE property_id = $1`, [P])).n;
+    const paymentOf = (column, id) => one(`SELECT amount, method, status, stripe_payment_intent_id FROM payment WHERE ${column} = $1`, [id]);
+    const golfBody = (extra = {}) => ({ tee_time_id: tt, contact_name: 'W', players: 2, ...extra });
+    await check('golf: a website key must pay; a short or missing payment books nothing', async () => {
+      const before = await count('golf_booking');
+      const none = await call(golf.createBooking, { ...websiteKey, body: golfBody() });
+      assert.equal(none.status, 402, JSON.stringify(none.body));
+      assert.deepEqual(none.body, { error: 'Payment required', mode: 'full', amount_due: '180.00', currency: 'GBP' });
+      const short = await call(golf.createBooking, { ...websiteKey, body: golfBody({ payment: { amount: 100, stripe_payment_intent_id: 'pi_site_1' } }) });
+      assert.equal(short.status, 402);
+      assert.equal(await count('golf_booking'), before);
+      assert.equal(await count('payment'), 0);
+      const ok = await call(golf.createBooking, { ...websiteKey, body: golfBody({ payment: { amount: 180, stripe_payment_intent_id: 'pi_site_2' } }) });
+      assert.equal(ok.status, 201, JSON.stringify(ok.body));
+      assert.equal(ok.body.total_price, '180.00');
+      assert.deepEqual(await paymentOf('golf_booking_id', ok.body.id), { amount: '180.00', method: 'website', status: 'completed', stripe_payment_intent_id: 'pi_site_2' });
+      assert.equal((await computeEntityFolio('golf_booking', ok.body.id, P)).balance, '0.00');
+    });
+    await check('golf: staff and other keys are exempt; only a website key may state a payment', async () => {
+      assert.equal((await call(golf.createBooking, { ...staff, body: golfBody({ contact_name: 'S', players: 1 }) })).status, 201);
+      assert.equal((await call(golf.createBooking, { ...fullKey, body: golfBody({ contact_name: 'F', players: 1 }) })).status, 201);
+      const claimed = await call(golf.createBooking, { ...fullKey, body: golfBody({ players: 1, payment: { amount: 90, stripe_payment_intent_id: 'pi_x' } }) });
+      assert.equal(claimed.status, 403);
+      assert.equal((await call(golf.createBooking, { ...staff, body: golfBody({ players: 1, payment: { amount: 90, stripe_payment_intent_id: 'pi_x' } }) })).status, 403);
+    });
+    await check('golf: a malformed payment is 400', async () => {
+      for (const payment of [{ amount: 0, stripe_payment_intent_id: 'pi_x' }, { amount: 'x', stripe_payment_intent_id: 'pi_x' }, { amount: 180 }, { amount: 180, stripe_payment_intent_id: '' }, 'pi_x']) {
+        assert.equal((await call(golf.createBooking, { ...websiteKey, body: golfBody({ payment }) })).status, 400, JSON.stringify(payment));
+      }
+    });
+    await check('golf: a rule that is off books a website key as today, and records a payment it sends', async () => {
+      await setRule('golf_course', course, "payment_required = 'none'");
+      try {
+        const plain = await call(golf.createBooking, { ...websiteKey, body: golfBody({ players: 1 }) });
+        assert.equal(plain.status, 201);
+        assert.equal(await paymentOf('golf_booking_id', plain.body.id), undefined);
+        const paid = await call(golf.createBooking, { ...websiteKey, body: golfBody({ players: 1, payment: { amount: '10.00', stripe_payment_intent_id: 'pi_tip' } }) });
+        assert.equal(paid.status, 201);
+        assert.equal((await paymentOf('golf_booking_id', paid.body.id)).amount, '10.00');
+      } finally {
+        await setRule('golf_course', course, "payment_required = 'full'");
+      }
+    });
+    await check('hire: a website key must pay the full hire', async () => {
+      const body = (extra = {}) => ({ equipment_id: kit, contact_name: 'H', hire_date: '2031-03-10', quantity: 2, duration: 3, ...extra });
+      const none = await call(equipment.createHire, { ...websiteKey, body: body() });
+      assert.equal(none.status, 402, JSON.stringify(none.body)); assert.equal(none.body.amount_due, '150.00');
+      const ok = await call(equipment.createHire, { ...websiteKey, body: body({ payment: { amount: 150, stripe_payment_intent_id: 'pi_hire' } }) });
+      assert.equal(ok.status, 201, JSON.stringify(ok.body)); assert.equal(ok.body.total_price, '150.00');
+      assert.deepEqual(await paymentOf('equipment_hire_id', ok.body.id), { amount: '150.00', method: 'website', status: 'completed', stripe_payment_intent_id: 'pi_hire' });
+      assert.equal((await call(equipment.createHire, { ...fullKey, body: body() })).status, 201);
+    });
   } finally {
     for (const t of ['payment', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'restaurant', 'spa_appointment', 'spa_therapist', 'spa_treatment', 'spa']) {
       await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);

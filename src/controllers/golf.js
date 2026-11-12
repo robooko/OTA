@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { dueNow, checkStatedPayment, recordStatedPayment } = require('../lib/amountDue');
 const { isValidDate, isValidTime } = require('../middleware/validate');
 const { seedCourseTeeTimes } = require('../lib/teeTimeSeeder');
 const { publishNewGolfBookingForProperty, publishGolfBookingStatusChangedForProperty } = require('../lib/ably');
@@ -315,6 +316,9 @@ async function createBooking(req, res, next) {
   if (!tee_time_id || !contact_name || !players) {
     return res.status(400).json({ error: 'tee_time_id, contact_name, and players are required' });
   }
+  // Who may state a payment, and its shape (lib/amountDue.js).
+  const early = checkStatedPayment(req, null);
+  if (early) return res.status(early.status).json(early.body);
 
   const client = await pool.connect();
   try {
@@ -344,12 +348,19 @@ async function createBooking(req, res, next) {
       return res.status(409).json({ error: `Only ${available} spots remaining` });
     }
 
-    const total_price = parseFloat(tt.price_per_player) * players;
+    // The price, and what a website key's booking must carry of it.
+    const due = await dueNow(client, 'golf_booking', req.property_id, { tee_time_id, players });
+    if (due.status) { await client.query('ROLLBACK'); return res.status(due.status).json({ error: due.error }); }
+    const refusal = checkStatedPayment(req, due);
+    if (refusal) { await client.query('ROLLBACK'); return res.status(refusal.status).json(refusal.body); }
+
+    const total_price = due.price;
     const { rows } = await client.query(
       `INSERT INTO golf_booking (property_id, tee_time_id, guest_id, contact_name, contact_email, contact_phone, players, total_price, notes)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.property_id, tee_time_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, players, total_price.toFixed(2), notes ?? null]
+      [req.property_id, tee_time_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, players, total_price, notes ?? null]
     );
+    await recordStatedPayment(client, 'golf_booking', rows[0].id, req.property_id, req.body.payment);
 
     await client.query('COMMIT');
 

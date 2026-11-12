@@ -2,6 +2,7 @@ const pool = require('../db');
 const { isValidUuid, isValidDate } = require('../middleware/validate');
 const { toCents, fromCents } = require('./folio');
 const { memberRateUntil, resolveRate } = require('./spaMemberRate');
+const { ownerColumn } = require('./entityFolio');
 
 // What a prospective booking must have paid at booking, by the venue's rule:
 // golf course and equipment payment_required (none / full), restaurant
@@ -108,4 +109,39 @@ async function dueNow(db, kind, propertyId, params = {}) {
   return KINDS[kind](db ?? pool, propertyId, params);
 }
 
-module.exports = { dueNow, spaAnswer };
+// A create request may carry payment: { amount, stripe_payment_intent_id },
+// what a website took on its own Stripe account. Only a website API key may
+// state one, and only its bookings must carry what is due (Robert,
+// 2026-11-12); staff and every other key book unpaid. With due null, checks
+// just who sent it and its shape -- run that before any lock. Returns
+// { status, body } to send, or null to go on.
+function checkStatedPayment(req, due) {
+  const payment = req.body?.payment;
+  const website = req.api_key?.website === true;
+  if (payment !== undefined) {
+    if (!website) return { status: 403, body: { error: 'Only a website API key can state a payment' } };
+    const amount = typeof payment?.amount === 'number' || (typeof payment?.amount === 'string' && payment.amount.trim())
+      ? Number(payment.amount) : NaN;
+    const ref = payment?.stripe_payment_intent_id;
+    if (!(amount > 0 && amount <= 999999999999.99) || typeof ref !== 'string' || !ref || ref.length > 255) {
+      return { status: 400, body: { error: 'payment must be { amount: a positive amount, stripe_payment_intent_id: the Stripe id }' } };
+    }
+  }
+  if (!due || !website || !['deposit', 'full'].includes(due.mode) || toCents(due.due_now) <= 0) return null;
+  if (payment !== undefined && toCents(payment.amount) >= toCents(due.due_now)) return null;
+  return { status: 402, body: { error: 'Payment required', mode: due.mode, amount_due: due.due_now, currency: due.currency } };
+}
+
+// Records a stated payment against the booking just inserted, in the same
+// transaction. method 'website': the money sits on the site's own Stripe
+// account, so nothing in OTA ever refunds or captures it.
+async function recordStatedPayment(client, kind, id, propertyId, payment) {
+  if (payment === undefined) return;
+  await client.query(
+    `INSERT INTO payment (property_id, ${ownerColumn(kind)}, amount, method, status, stripe_payment_intent_id, paid_at)
+     VALUES ($1, $2, $3, 'website', 'completed', $4, now())`,
+    [propertyId, id, Number(payment.amount).toFixed(2), payment.stripe_payment_intent_id]
+  );
+}
+
+module.exports = { dueNow, spaAnswer, checkStatedPayment, recordStatedPayment };
