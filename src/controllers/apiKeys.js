@@ -17,7 +17,7 @@ const { isValidUuid } = require('../middleware/validate');
 const RESERVED = 'Default';
 
 // { error } or the validated fields present in body. `permissions` may be
-// null (full key) or a list of known names; `enabled` a boolean.
+// null (full key) or a list of known names; `enabled` and `website` booleans.
 function parseBody(body, { requireName }) {
   const out = {};
   if (body.name !== undefined || requireName) {
@@ -37,6 +37,10 @@ function parseBody(body, { requireName }) {
   if (body.enabled !== undefined) {
     if (typeof body.enabled !== 'boolean') return { error: 'enabled must be a boolean' };
     out.enabled = body.enabled;
+  }
+  if (body.website !== undefined) {
+    if (typeof body.website !== 'boolean') return { error: 'website must be a boolean' };
+    out.website = body.website;
   }
   return out;
 }

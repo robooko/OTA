@@ -14,9 +14,20 @@ async function listPayments(req, res, next) {
 
 async function createPayment(req, res, next) {
   try {
-    const { booking_id, amount, method, status } = req.body;
+    const { booking_id, amount, method, status, stripe_payment_intent_id } = req.body;
     if (!booking_id || amount == null) {
       return res.status(400).json({ error: 'booking_id and amount are required' });
+    }
+    // The Stripe id a website took this on (its own account): a record, never
+    // refunded by OTA (room cancels refund method 'card' rows only). One id
+    // may pay several bookings, so it is not unique.
+    if (stripe_payment_intent_id !== undefined && (typeof stripe_payment_intent_id !== 'string' || !stripe_payment_intent_id || stripe_payment_intent_id.length > 255)) {
+      return res.status(400).json({ error: 'stripe_payment_intent_id must be a string of 1-255 characters' });
+    }
+    // Only on a website payment: a 'card' row with an intent id is one a room
+    // cancel refunds with the property's own Stripe key.
+    if (stripe_payment_intent_id !== undefined && method !== 'website') {
+      return res.status(400).json({ error: "stripe_payment_intent_id is only accepted with method 'website'" });
     }
     if (!(Number(amount) > 0)) {
       return res.status(400).json({ error: 'amount must be a positive number' });
@@ -31,8 +42,8 @@ async function createPayment(req, res, next) {
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO payment (property_id, booking_id, amount, method, status, paid_at)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      `INSERT INTO payment (property_id, booking_id, amount, method, status, paid_at, stripe_payment_intent_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
       [
         req.property_id,
         booking_id,
@@ -40,6 +51,7 @@ async function createPayment(req, res, next) {
         method || null,
         status || 'pending',
         status === 'completed' ? new Date() : null,
+        stripe_payment_intent_id ?? null,
       ]
     );
     res.status(201).json(rows[0]);

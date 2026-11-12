@@ -1,4 +1,6 @@
 const pool = require('../db');
+const { spaAnswer, spaRule, checkStatedPayment, paymentRefusal, recordStatedPayment } = require('../lib/amountDue');
+const { toCents } = require('../lib/folio');
 const { isValidDate, isValidTime, isValidUuid, validateBranding, validateCancelUrl } = require('../middleware/validate');
 const {
   publishNewAppointment,
@@ -85,6 +87,21 @@ function normalizeLeadTimeHours(value) {
   return { value: hours };
 }
 
+// spa.payment_required / deposit_amount: what a guest pays at booking. Both
+// optional on update (absent = unchanged). The DB's spa_deposit_has_amount
+// check catches a deposit with no amount sent or stored.
+const PAYMENT_REQUIRED = ['none', 'deposit', 'full'];
+function invalidPaymentRule({ payment_required, deposit_amount }) {
+  if (payment_required !== undefined && !PAYMENT_REQUIRED.includes(payment_required)) {
+    return `payment_required must be one of ${PAYMENT_REQUIRED.join(', ')}`;
+  }
+  if (deposit_amount === undefined) return null;
+  // Number('') and Number(null) are 0, so only numbers and non-blank strings count.
+  const amount = typeof deposit_amount === 'number' || (typeof deposit_amount === 'string' && deposit_amount.trim()) ? Number(deposit_amount) : NaN;
+  if (!(amount > 0 && amount <= 999999999999.99)) return 'deposit_amount must be a positive amount';
+  return null;
+}
+
 // Does date+time fall inside the salon's lead time? Returns the salon's
 // lead_time_hours when it does, else null (including when it has none).
 // Compared in the property's own timezone, same as isTherapistFree's is_past.
@@ -153,6 +170,9 @@ async function updateSpa(req, res, next) {
     const hasLead = Object.prototype.hasOwnProperty.call(req.body, 'lead_time_hours');
     const lead = normalizeLeadTimeHours(req.body.lead_time_hours);
     if (lead.error) return res.status(400).json({ error: lead.error });
+    const ruleError = invalidPaymentRule(req.body);
+    if (ruleError) return res.status(400).json({ error: ruleError });
+    const depositAmount = req.body.deposit_amount === undefined ? null : Number(req.body.deposit_amount).toFixed(2);
     const { rows } = await pool.query(
       `UPDATE spa SET
          name                  = COALESCE($1, name),
@@ -162,13 +182,21 @@ async function updateSpa(req, res, next) {
          slot_interval_minutes = COALESCE($5, slot_interval_minutes),
          contact_email         = COALESCE($6, contact_email),
          address               = COALESCE($7, address),
-         lead_time_hours       = CASE WHEN $8 THEN $9::int ELSE lead_time_hours END
+         lead_time_hours       = CASE WHEN $8 THEN $9::int ELSE lead_time_hours END,
+         payment_required      = COALESCE($12, payment_required),
+         deposit_amount        = COALESCE($13::numeric, deposit_amount)
        WHERE id = $10 AND property_id = $11 RETURNING *`,
-      [name, description, phone, status, slot_interval_minutes, contact_email, address, hasLead, lead.value, req.params.id, req.property_id]
+      [name, description, phone, status, slot_interval_minutes, contact_email, address, hasLead, lead.value, req.params.id, req.property_id,
+        req.body.payment_required ?? null, depositAmount]
     );
     if (!rows.length) return res.status(404).json({ error: 'Spa not found' });
     res.json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === '23514' && err.constraint === 'spa_deposit_has_amount') {
+      return res.status(400).json({ error: 'deposit_amount is required when payment_required is deposit' });
+    }
+    next(err);
+  }
 }
 
 // ── Treatments ────────────────────────────────────────────────────────────────
@@ -1079,9 +1107,16 @@ async function createAppointmentFromSlot(req, res, next) {
       const leadTimeHours = await withinLeadTime(client, spa_id, slot.slot_date_text, slot.slot_time);
       if (leadTimeHours) { await client.query('ROLLBACK'); return res.status(409).json({ error: leadTimeError(leadTimeHours) }); }
     }
+    // What a website key's booking must carry: the spa's rule on the
+    // standard price this flow books at.
+    const due = spaAnswer(await spaRule(client, spa_id), toCents(treatmentRes.rows[0].price ?? 0));
+    const refusal = checkStatedPayment(req, due);
+    if (refusal) { await client.query('ROLLBACK'); return res.status(refusal.status).json(refusal.body); }
+    // A website's stated payment proves the guest as a card would.
+    const paid = payment_verified === true || Number(req.body.payment?.amount) > 0;
     let hold = null;
     if (isGuestRail(req)) {
-      const check = await guard.checkGuestBooking(client, { property_id: req.property_id, contact_email, member_email, payment_verified: payment_verified === true });
+      const check = await guard.checkGuestBooking(client, { property_id: req.property_id, contact_email, member_email, payment_verified: paid });
       if (!check.ok) { await client.query('ROLLBACK'); return res.status(429).json({ error: BOOKING_LIMIT_ERROR }); }
       hold = check.hold;
     }
@@ -1100,6 +1135,7 @@ async function createAppointmentFromSlot(req, res, next) {
         ...holdColumns(hold, contact_email, branding, cancel_url), send_emails ?? true,
       ]
     );
+    await recordStatedPayment(client, 'spa_appointment', rows[0].id, req.property_id, req.body.payment);
 
     await client.query('COMMIT');
     await afterAppointmentCreated(spa_id, req.property_id, rows[0], hold, branding, cancel_url);
@@ -1176,7 +1212,9 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // see lib/spaMemberRate.js); when it qualifies for the regulars' rate on
 // `date`, the appointment books at member_price/member_duration_mins. The
 // price is frozen onto the appointment either way.
-async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, payment_verified = false, branding, cancel_url, enforceLeadTime = false, guestRail = false, send_emails = true, hold_sms = null }) {
+async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, payment_verified = false, branding, cancel_url, enforceLeadTime = false, guestRail = false, send_emails = true, hold_sms = null, statedPayment = undefined, enforcePayment = false }) {
+  // A website's stated payment proves the guest as a card would.
+  if (Number(statedPayment?.amount) > 0) payment_verified = true;
   // A texted hold has no email to cap bookings by, so the caller's number stands in.
   const railKey = contact_email || (hold_sms && `tel:${hold_sms.to}`);
   const client = await pool.connect();
@@ -1211,6 +1249,12 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
     const rate = resolveRate(treatmentRes.rows[0], await memberRateUntil(client, property_id, member_email), date);
     if (!rate.ok) { await client.query('ROLLBACK'); return { ok: false, code: rate.code }; }
     const durationMins = rate.durationMins;
+    // What a website key's booking must carry of the price it freezes.
+    if (enforcePayment || statedPayment !== undefined) {
+      const due = spaAnswer(await spaRule(client, spa_id), toCents(rate.price));
+      const refusal = paymentRefusal({ website: enforcePayment, payment: statedPayment }, due);
+      if (refusal) { await client.query('ROLLBACK'); return { ok: false, code: 'payment_required', refusal }; }
+    }
 
     const propertyRes = await client.query(
       `SELECT p.timezone FROM property p JOIN spa s ON s.property_id = p.id WHERE s.id = $1`,
@@ -1268,6 +1312,7 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
         ...holdColumns(hold, railKey, branding, cancel_url), send_emails,
       ]
     );
+    await recordStatedPayment(client, 'spa_appointment', rows[0].id, property_id, statedPayment);
 
     await client.query('COMMIT');
     await afterAppointmentCreated(spa_id, property_id, rows[0], hold, branding, cancel_url, hold_sms);
@@ -1305,8 +1350,11 @@ async function createAppointmentFromAvailability(req, res, next) {
       send_emails: send_emails ?? true,
       enforceLeadTime: isGuestRail(req),
       guestRail: isGuestRail(req),
+      statedPayment: req.body.payment,
+      enforcePayment: req.api_key?.website === true,
     });
     if (!result.ok) {
+      if (result.code === 'payment_required') return res.status(result.refusal.status).json(result.refusal.body);
       if (result.code === 'too_soon') return res.status(409).json({ error: leadTimeError(result.leadTimeHours) });
       const [status, error] = BOOK_FAILURE_HTTP[result.code];
       return res.status(status).json({ error, code: result.code });
@@ -1344,6 +1392,10 @@ async function createAppointment(req, res, next) {
 
   const cancelUrlError = validateCancelUrl(cancel_url);
   if (cancelUrlError) return res.status(400).json({ error: cancelUrlError });
+
+  // Who may state a payment, and its shape (lib/amountDue.js).
+  const early = checkStatedPayment(req, null);
+  if (early) return res.status(early.status).json(early.body);
 
   if (slot_id) return createAppointmentFromSlot(req, res, next);
 
@@ -1756,8 +1808,11 @@ async function importAppointments(req, res, next) {
     }
 
     if (rows.length) {
+      // A paid row is also on record as a payment (what its folio's Paid
+      // reads). Rows lost to ON CONFLICT insert nothing, so neither does a re-import.
       const inserted = await q(
-        `INSERT INTO spa_appointment (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time, guest_id,
+        `WITH ins AS (
+         INSERT INTO spa_appointment (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time, guest_id,
                                       contact_name, status, notes, price, payment_status, paid_at, payment_method, send_emails, external_ref)
          SELECT $1, r.treatment_id, r.therapist_id, r.date, r.start_time,
                 COALESCE(r.end_time, r.start_time + make_interval(mins => r.duration_mins)), r.guest_id,
@@ -1770,7 +1825,13 @@ async function importAppointments(req, res, next) {
                 notes text, price numeric, paid boolean, payment_method varchar)
            JOIN property p ON p.id = $1
          ON CONFLICT (property_id, external_ref) WHERE external_ref IS NOT NULL DO NOTHING
-         RETURNING id, external_ref`,
+         RETURNING id, external_ref, property_id, price, payment_status, payment_method, paid_at
+         ), paid AS (
+           INSERT INTO payment (property_id, spa_appointment_id, amount, method, status, paid_at)
+           SELECT property_id, id, price, payment_method, 'completed', paid_at FROM ins
+           WHERE payment_status = 'paid' AND price > 0
+         )
+         SELECT id, external_ref FROM ins`,
         [propertyId, JSON.stringify(rows)]);
       const created = new Set(inserted.map((r) => r.external_ref));
       for (const r of inserted) refIds.set(r.external_ref, r.id);

@@ -137,7 +137,7 @@ async function authenticateOrApiKey(req, res, next) {
       if (r.error) return res.status(r.status).json({ error: r.error });
       req.property_id = r.propertyId;
       if (r.clerkOrgId) req.clerk_org_id = r.clerkOrgId;
-      req.api_key = r.apiKey; // { id, permissions }; permissions null = full key
+      req.api_key = r.apiKey; // { id, permissions, website }; permissions null = full key
       req.auth_method = 'api_key'; // untrusted guest-proxy rail -- join codes enforced
       next();
     } catch (err) {
@@ -158,7 +158,7 @@ async function authenticateOrgKey(req, res, next) {
       if (!row) return res.status(401).json({ error: BAD_KEY });
       if (row.property_id) return res.status(403).json({ error: 'This endpoint requires an organization API key' });
       req.clerk_org_id = row.clerk_org_id;
-      req.api_key = { id: row.id, permissions: row.permissions };
+      req.api_key = { id: row.id, permissions: row.permissions, website: row.website };
       req.auth_method = 'api_key';
       next();
     } catch (err) {

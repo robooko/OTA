@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { dueNow, checkStatedPayment, recordStatedPayment } = require('../lib/amountDue');
 const { isValidDate, isValidTime } = require('../middleware/validate');
 const { seedCourseTeeTimes } = require('../lib/teeTimeSeeder');
 const { publishNewGolfBookingForProperty, publishGolfBookingStatusChangedForProperty } = require('../lib/ably');
@@ -50,18 +51,23 @@ async function listCourses(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// golf_course.payment_required: what a website key's booking must carry.
+const PAYMENT_REQUIRED = ['none', 'full'];
+const badPaymentRule = (v) => v !== undefined && !PAYMENT_REQUIRED.includes(v);
+
 async function createCourse(req, res, next) {
   try {
-    const { name, description, holes, price_per_player, first_tee, last_tee, tee_interval_minutes, default_max_players } = req.body;
+    const { name, description, holes, price_per_player, first_tee, last_tee, tee_interval_minutes, default_max_players, payment_required } = req.body;
     if (!name || !holes || price_per_player == null) {
       return res.status(400).json({ error: 'name, holes, and price_per_player are required' });
     }
+    if (badPaymentRule(payment_required)) return res.status(400).json({ error: 'payment_required must be none or full' });
     const scheduleError = scheduleValidationError(req.body);
     if (scheduleError) return res.status(400).json({ error: scheduleError });
     const { rows } = await pool.query(
-      `INSERT INTO golf_course (property_id, name, description, holes, price_per_player, first_tee, last_tee, tee_interval_minutes, default_max_players)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 4)) RETURNING *`,
-      [req.property_id, name, description ?? null, holes, price_per_player, first_tee ?? null, last_tee ?? null, tee_interval_minutes ?? null, default_max_players ?? null]
+      `INSERT INTO golf_course (property_id, name, description, holes, price_per_player, first_tee, last_tee, tee_interval_minutes, default_max_players, payment_required)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 4), $10) RETURNING *`,
+      [req.property_id, name, description ?? null, holes, price_per_player, first_tee ?? null, last_tee ?? null, tee_interval_minutes ?? null, default_max_players ?? null, payment_required ?? 'none']
     );
     seedIfScheduled(rows[0]);
     res.status(201).json(rows[0]);
@@ -70,7 +76,8 @@ async function createCourse(req, res, next) {
 
 async function updateCourse(req, res, next) {
   try {
-    const { name, description, holes, price_per_player, status, first_tee, last_tee, tee_interval_minutes, default_max_players } = req.body;
+    const { name, description, holes, price_per_player, status, first_tee, last_tee, tee_interval_minutes, default_max_players, payment_required } = req.body;
+    if (badPaymentRule(payment_required)) return res.status(400).json({ error: 'payment_required must be none or full' });
     const scheduleError = scheduleValidationError(req.body);
     if (scheduleError) return res.status(400).json({ error: scheduleError });
     // Providing only one end of the window must not invert it against the
@@ -99,9 +106,10 @@ async function updateCourse(req, res, next) {
          first_tee            = COALESCE($6, first_tee),
          last_tee             = COALESCE($7, last_tee),
          tee_interval_minutes = COALESCE($8, tee_interval_minutes),
-         default_max_players  = COALESCE($9, default_max_players)
+         default_max_players  = COALESCE($9, default_max_players),
+         payment_required     = COALESCE($12, payment_required)
        WHERE id = $10 AND property_id = $11 RETURNING *`,
-      [name, description, holes, price_per_player, status, first_tee, last_tee, tee_interval_minutes, default_max_players, req.params.id, req.property_id]
+      [name, description, holes, price_per_player, status, first_tee, last_tee, tee_interval_minutes, default_max_players, req.params.id, req.property_id, payment_required ?? null]
     );
     if (!rows.length) return res.status(404).json({ error: 'Course not found' });
     // Existing tee_time rows are inventory staff may have edited -- a
@@ -308,6 +316,9 @@ async function createBooking(req, res, next) {
   if (!tee_time_id || !contact_name || !players) {
     return res.status(400).json({ error: 'tee_time_id, contact_name, and players are required' });
   }
+  // Who may state a payment, and its shape (lib/amountDue.js).
+  const early = checkStatedPayment(req, null);
+  if (early) return res.status(early.status).json(early.body);
 
   const client = await pool.connect();
   try {
@@ -337,12 +348,19 @@ async function createBooking(req, res, next) {
       return res.status(409).json({ error: `Only ${available} spots remaining` });
     }
 
-    const total_price = parseFloat(tt.price_per_player) * players;
+    // The price, and what a website key's booking must carry of it.
+    const due = await dueNow(client, 'golf_booking', req.property_id, { tee_time_id, players });
+    if (due.status) { await client.query('ROLLBACK'); return res.status(due.status).json({ error: due.error }); }
+    const refusal = checkStatedPayment(req, due);
+    if (refusal) { await client.query('ROLLBACK'); return res.status(refusal.status).json(refusal.body); }
+
+    const total_price = due.price;
     const { rows } = await client.query(
       `INSERT INTO golf_booking (property_id, tee_time_id, guest_id, contact_name, contact_email, contact_phone, players, total_price, notes)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.property_id, tee_time_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, players, total_price.toFixed(2), notes ?? null]
+      [req.property_id, tee_time_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, players, total_price, notes ?? null]
     );
+    await recordStatedPayment(client, 'golf_booking', rows[0].id, req.property_id, req.body.payment);
 
     await client.query('COMMIT');
 

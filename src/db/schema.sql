@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS api_key (
   enabled       BOOLEAN NOT NULL DEFAULT true,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_by    VARCHAR(100),                -- clerk user id; NULL for migrated rows
+  website       BOOLEAN NOT NULL DEFAULT false, -- its bookings must carry payment; see migrate-2026-11-12-website-keys.sql
   CHECK ((property_id IS NULL) <> (clerk_org_id IS NULL))
 );
 
@@ -443,7 +444,7 @@ CREATE INDEX IF NOT EXISTS idx_booking_website_checkout ON booking (property_id,
 CREATE TABLE IF NOT EXISTS payment (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id UUID          NOT NULL REFERENCES property(id),
-  booking_id  UUID          NOT NULL REFERENCES booking(id),
+  booking_id  UUID          REFERENCES booking(id), -- or one of the entity owners added after equipment_hire
   amount      NUMERIC(14,2) NOT NULL,
   method      VARCHAR(30),
   status      VARCHAR(20)   DEFAULT 'pending',
@@ -462,7 +463,7 @@ CREATE INDEX IF NOT EXISTS idx_payment_property           ON payment(property_id
 CREATE TABLE IF NOT EXISTS folio_adjustment (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id UUID          NOT NULL REFERENCES property(id),
-  booking_id  UUID          NOT NULL REFERENCES booking(id),
+  booking_id  UUID          REFERENCES booking(id), -- or one of the entity owners added after equipment_hire
   description VARCHAR(200)  NOT NULL,
   amount      NUMERIC(14,2) NOT NULL,
   created_at  TIMESTAMPTZ   DEFAULT now()
@@ -805,11 +806,13 @@ CREATE TABLE IF NOT EXISTS restaurant (
   timezone                  VARCHAR(50), -- NULL = inherit property.timezone
   payment_protection        VARCHAR(20)  NOT NULL DEFAULT 'none', -- 'none' | 'hold' | 'deposit'
   payment_protection_amount NUMERIC(14,2),
+  payment_protection_basis  VARCHAR(10)  NOT NULL DEFAULT 'per_table', -- payment_protection_amount once per table, or once per guest
   website_id                UUID REFERENCES property_website(id), -- NULL = no guest website; table QR codes then carry only the table id
   require_join_code         BOOLEAN      NOT NULL DEFAULT false, -- opt-in: newly opened table sessions get a 4-digit join code that api-key (guest-rail) callers must present
   menu_category_order       TEXT[]       NOT NULL DEFAULT '{}', -- menu category names in display order; unlisted ones follow, by name
   created_at                TIMESTAMPTZ DEFAULT now(),
-  CONSTRAINT restaurant_payment_protection_check CHECK (payment_protection IN ('none', 'hold', 'deposit'))
+  CONSTRAINT restaurant_payment_protection_check CHECK (payment_protection IN ('none', 'hold', 'deposit')),
+  CONSTRAINT restaurant_payment_protection_basis_check CHECK (payment_protection_basis IN ('per_table', 'per_guest'))
 );
 
 CREATE TABLE IF NOT EXISTS restaurant_table (
@@ -945,7 +948,13 @@ CREATE TABLE IF NOT EXISTS spa (
   -- Minimum notice (hours) for a guest/AI booking; NULL = none. Staff are
   -- exempt. See migrate-2026-09-23-spa-lead-time.sql.
   lead_time_hours       INT CONSTRAINT spa_lead_time_hours_valid CHECK (lead_time_hours IS NULL OR lead_time_hours BETWEEN 1 AND 720),
-  created_at            TIMESTAMPTZ DEFAULT now()
+  -- What a guest pays at booking: nothing, deposit_amount per appointment, or
+  -- the full price. See migrate-2026-11-12-spa-payment-required.sql.
+  payment_required      VARCHAR(10)  NOT NULL DEFAULT 'none'
+                        CONSTRAINT spa_payment_required_valid CHECK (payment_required IN ('none', 'deposit', 'full')),
+  deposit_amount        NUMERIC(14,2) CONSTRAINT spa_deposit_amount_positive CHECK (deposit_amount IS NULL OR deposit_amount > 0),
+  created_at            TIMESTAMPTZ DEFAULT now(),
+  CONSTRAINT spa_deposit_has_amount CHECK (payment_required <> 'deposit' OR deposit_amount IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS spa_treatment (
@@ -1373,7 +1382,11 @@ CREATE TABLE IF NOT EXISTS golf_course (
   first_tee            TIME,
   last_tee             TIME,
   tee_interval_minutes INT,
-  default_max_players  INT NOT NULL DEFAULT 4
+  default_max_players  INT NOT NULL DEFAULT 4,
+  -- What a guest pays at booking: nothing, or the full price. See
+  -- migrate-2026-11-12-golf-equipment-payment-required.sql.
+  payment_required VARCHAR(10) NOT NULL DEFAULT 'none'
+                   CONSTRAINT golf_course_payment_required_valid CHECK (payment_required IN ('none', 'full'))
 );
 
 CREATE TABLE IF NOT EXISTS tee_time (
@@ -1422,7 +1435,11 @@ CREATE TABLE IF NOT EXISTS equipment (
   status         VARCHAR(20)   DEFAULT 'active',
   open_time      TIME,
   close_time     TIME,
-  slot_interval_minutes INT    NOT NULL DEFAULT 60
+  slot_interval_minutes INT    NOT NULL DEFAULT 60,
+  -- What a guest pays at booking: nothing, or the full price. See
+  -- migrate-2026-11-12-golf-equipment-payment-required.sql.
+  payment_required VARCHAR(10) NOT NULL DEFAULT 'none'
+                   CONSTRAINT equipment_payment_required_valid CHECK (payment_required IN ('none', 'full'))
 );
 
 CREATE TABLE IF NOT EXISTS equipment_hire (
@@ -1449,6 +1466,37 @@ CREATE INDEX IF NOT EXISTS idx_equipment_hire_date     ON equipment_hire(hire_da
 CREATE INDEX IF NOT EXISTS idx_equipment_hire_eq       ON equipment_hire(equipment_id);
 CREATE INDEX IF NOT EXISTS idx_equipment_property      ON equipment(property_id);
 CREATE INDEX IF NOT EXISTS idx_equipment_hire_property ON equipment_hire(property_id);
+
+-- Charges on every booking (migrate-2026-11-12-entity-folios.sql): a payment or
+-- folio line belongs to exactly one of a room booking, golf booking, equipment
+-- hire, restaurant reservation or spa appointment. Here, not in the CREATE
+-- TABLEs above, because those tables are created after payment.
+ALTER TABLE payment
+  ADD COLUMN IF NOT EXISTS golf_booking_id           UUID REFERENCES golf_booking(id),
+  ADD COLUMN IF NOT EXISTS equipment_hire_id         UUID REFERENCES equipment_hire(id),
+  ADD COLUMN IF NOT EXISTS restaurant_reservation_id UUID REFERENCES restaurant_reservation(id),
+  ADD COLUMN IF NOT EXISTS spa_appointment_id        UUID REFERENCES spa_appointment(id);
+ALTER TABLE payment DROP CONSTRAINT IF EXISTS payment_one_owner;
+ALTER TABLE payment ADD CONSTRAINT payment_one_owner CHECK
+  (num_nonnulls(booking_id, golf_booking_id, equipment_hire_id, restaurant_reservation_id, spa_appointment_id) = 1);
+
+ALTER TABLE folio_adjustment
+  ADD COLUMN IF NOT EXISTS golf_booking_id           UUID REFERENCES golf_booking(id),
+  ADD COLUMN IF NOT EXISTS equipment_hire_id         UUID REFERENCES equipment_hire(id),
+  ADD COLUMN IF NOT EXISTS restaurant_reservation_id UUID REFERENCES restaurant_reservation(id),
+  ADD COLUMN IF NOT EXISTS spa_appointment_id        UUID REFERENCES spa_appointment(id);
+ALTER TABLE folio_adjustment DROP CONSTRAINT IF EXISTS folio_adjustment_one_owner;
+ALTER TABLE folio_adjustment ADD CONSTRAINT folio_adjustment_one_owner CHECK
+  (num_nonnulls(booking_id, golf_booking_id, equipment_hire_id, restaurant_reservation_id, spa_appointment_id) = 1);
+
+CREATE INDEX IF NOT EXISTS idx_payment_golf_booking_id           ON payment(golf_booking_id)           WHERE golf_booking_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_payment_equipment_hire_id         ON payment(equipment_hire_id)         WHERE equipment_hire_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_payment_restaurant_reservation_id ON payment(restaurant_reservation_id) WHERE restaurant_reservation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_payment_spa_appointment_id        ON payment(spa_appointment_id)        WHERE spa_appointment_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_folio_adjustment_golf_booking_id           ON folio_adjustment(golf_booking_id)           WHERE golf_booking_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_folio_adjustment_equipment_hire_id         ON folio_adjustment(equipment_hire_id)         WHERE equipment_hire_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_folio_adjustment_restaurant_reservation_id ON folio_adjustment(restaurant_reservation_id) WHERE restaurant_reservation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_folio_adjustment_spa_appointment_id        ON folio_adjustment(spa_appointment_id)        WHERE spa_appointment_id IS NOT NULL;
 
 -- ── Restaurant Orders ─────────────────────────────────────────────────────────
 

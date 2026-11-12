@@ -5,9 +5,10 @@ const pool = require('../db');
 // ({ clerk_org_id }). permissions NULL = full key (does everything, as every
 // key did before 2026-10-31); a list = scoped to those names. The legacy
 // property.api_key / organization.api_key columns are no longer read or
-// written -- see migrate-2026-10-31-permissions.sql.
+// written -- see migrate-2026-10-31-permissions.sql. website = a guest-facing
+// site whose bookings must carry payment (migrate-2026-11-12-website-keys.sql).
 
-const COLS = 'id, property_id, clerk_org_id, name, key, permissions, enabled, created_at, created_by';
+const COLS = 'id, property_id, clerk_org_id, name, key, permissions, enabled, created_at, created_by, website';
 
 function ownerCol(owner) {
   if (owner?.property_id) return ['property_id', owner.property_id];
@@ -20,7 +21,7 @@ function generateKey(owner) {
   return (col === 'property_id' ? 'prop_' : 'org_') + crypto.randomBytes(32).toString('hex');
 }
 
-async function create(db = pool, owner, { name = 'Default', permissions = null, enabled = true, created_by = null, key } = {}) {
+async function create(db = pool, owner, { name = 'Default', permissions = null, enabled = true, created_by = null, key, website = false } = {}) {
   const [col, id] = ownerCol(owner);
   // The organization row exists only to be a key's parent; make it on demand
   // so no caller depends on call order (the old ensureOrg did the same).
@@ -28,9 +29,9 @@ async function create(db = pool, owner, { name = 'Default', permissions = null, 
     await db.query('INSERT INTO organization (clerk_org_id) VALUES ($1) ON CONFLICT (clerk_org_id) DO NOTHING', [id]);
   }
   const { rows } = await db.query(
-    `INSERT INTO api_key (${col}, name, key, permissions, enabled, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${COLS}`,
-    [id, name, key ?? generateKey(owner), permissions, enabled, created_by]
+    `INSERT INTO api_key (${col}, name, key, permissions, enabled, created_by, website)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ${COLS}`,
+    [id, name, key ?? generateKey(owner), permissions, enabled, created_by, website]
   );
   return rows[0];
 }
@@ -72,7 +73,7 @@ async function list(db = pool, owner) {
 // full again. null when no row with that id belongs to the owner.
 async function update(db = pool, owner, keyId, patch) {
   const [col, id] = ownerCol(owner);
-  const fields = ['name', 'permissions', 'enabled', 'key'].filter((f) => patch[f] !== undefined);
+  const fields = ['name', 'permissions', 'enabled', 'key', 'website'].filter((f) => patch[f] !== undefined);
   if (!fields.length) {
     const { rows } = await db.query(`SELECT ${COLS} FROM api_key WHERE id = $1 AND ${col} = $2`, [keyId, id]);
     return rows[0] ?? null;

@@ -1,5 +1,11 @@
 const { z } = require('zod');
 
+// Bookings that have their own folio besides room stays (/api/folios/:kind/:id).
+// A booking's payment, stated by a website API key only (lib/amountDue.js).
+const STATED_PAYMENT = z.object({ amount: z.number().positive(), stripe_payment_intent_id: z.string().min(1).max(255) }).optional()
+  .describe("Only with a website API key: what the site took on its own Stripe account, recorded as a payment with the booking. A website key's booking must carry at least the venue's due_now (get_amount_due_now), else 402");
+const ENTITY_KIND = z.enum(['golf_booking', 'equipment_hire', 'restaurant_reservation', 'spa_appointment']).describe('Which kind of booking the id is');
+
 // Optional email styling accepted by spa appointment create/update and by
 // create_event_inquiry. Values come from the venue's website; OTA relays
 // them (or keeps them on the enquiry row until the thread is done).
@@ -558,6 +564,50 @@ function createTools(apiRequest) {
     run: ({ id, adjustment_id }) => apiRequest('DELETE', `/api/bookings/${id}/folio/adjustments/${adjustment_id}`),
   },
   {
+    name: 'get_amount_due_now',
+    description: "What a booking would need paid at booking, by the venue's rule, priced as its create tool would: { mode: none|deposit|full|hold, price, due_now, currency }. Golf: tee_time_id + players. Equipment hire: equipment_id + quantity (rate_type, duration optional). Restaurant: restaurant_id + party_size. Spa: spa_id + treatment_id + date (member_email optional). A website API key's booking must carry at least due_now as payment.",
+    inputSchema: {
+      kind: ENTITY_KIND,
+      tee_time_id: z.string().optional(),
+      players: z.number().int().positive().optional(),
+      equipment_id: z.string().optional(),
+      quantity: z.number().int().positive().optional(),
+      rate_type: z.enum(['per_day', 'per_hour']).optional(),
+      duration: z.number().positive().optional(),
+      restaurant_id: z.string().optional(),
+      party_size: z.number().int().positive().optional(),
+      spa_id: z.string().optional(),
+      treatment_id: z.string().optional(),
+      date: z.string().optional().describe('YYYY-MM-DD (spa)'),
+      member_email: z.string().optional().describe("A regular's verified email (spa)"),
+    },
+    run: ({ kind, ...query }) => apiRequest('GET', `/api/folios/due-now/${kind}`, { query }),
+  },
+  {
+    name: 'get_entity_folio',
+    description: "The folio of a golf booking, equipment hire, restaurant reservation or spa appointment: its own price (dropped once cancelled), golf pro-shop items, manual charges, payments, and balance. A negative balance is a credit. external_payment: true = a card deposit or hold exists on Stripe and is not in the totals. charged_to_booking_id set = a spa appointment carried on that room booking's folio (charges and payments go there)",
+    inputSchema: { kind: ENTITY_KIND, id: z.string().describe('The booking id of that kind') },
+    run: ({ kind, id }) => apiRequest('GET', `/api/folios/${kind}/${id}`),
+  },
+  {
+    name: 'add_entity_folio_adjustment',
+    description: 'Add a manual charge to a golf booking, equipment hire, restaurant reservation or spa appointment folio: positive amount = charge, negative = credit/comp',
+    inputSchema: { kind: ENTITY_KIND, id: z.string(), description: z.string().max(200), amount: z.number() },
+    run: ({ kind, id, ...body }) => apiRequest('POST', `/api/folios/${kind}/${id}/adjustments`, { body }),
+  },
+  {
+    name: 'remove_entity_folio_adjustment',
+    description: 'Remove a manual charge from a golf booking, equipment hire or restaurant reservation folio',
+    inputSchema: { kind: ENTITY_KIND, id: z.string(), adjustment_id: z.string() },
+    run: ({ kind, id, adjustment_id }) => apiRequest('DELETE', `/api/folios/${kind}/${id}/adjustments/${adjustment_id}`),
+  },
+  {
+    name: 'record_entity_payment',
+    description: 'Record a completed payment taken at the desk (cash, card terminal, bank transfer) against a golf booking, equipment hire, restaurant reservation or spa appointment. It reduces that folio balance; more than the balance leaves a credit',
+    inputSchema: { kind: ENTITY_KIND, id: z.string(), amount: z.number().positive(), method: z.string().optional().describe('e.g. card, cash, bank_transfer') },
+    run: ({ kind, id, ...body }) => apiRequest('POST', `/api/folios/${kind}/${id}/payments`, { body }),
+  },
+  {
     name: 'list_booking_payments',
     description: 'List payments recorded against a booking',
     inputSchema: { booking_id: z.string() },
@@ -571,6 +621,7 @@ function createTools(apiRequest) {
       amount: z.number(),
       method: z.string().optional().describe('e.g. card, cash, bank_transfer'),
       status: z.enum(['pending', 'completed', 'refunded']).optional().describe('Default pending'),
+      stripe_payment_intent_id: z.string().min(1).max(255).optional().describe("The Stripe id a website took it on; only with method 'website', which OTA never refunds. One id may pay several bookings"),
     },
     run: (args) => apiRequest('POST', '/api/payments', { body: args }),
   },
@@ -708,6 +759,7 @@ function createTools(apiRequest) {
       timezone: z.string().optional().describe('IANA timezone name, e.g. Europe/London. Omit to inherit the property\'s timezone'),
       payment_protection: z.enum(['none', 'hold', 'deposit']).optional().describe('Whether a reservation requires a card hold or upfront deposit. Defaults to "none"'),
       payment_protection_amount: z.number().min(0).optional().describe('Amount for the hold/deposit, in the restaurant\'s currency'),
+      payment_protection_basis: z.enum(['per_table', 'per_guest']).optional().describe('Whether payment_protection_amount is charged once per table or once per guest. Defaults to "per_table"'),
     },
     run: (args) => apiRequest('POST', '/api/restaurant', { body: args }),
   },
@@ -734,6 +786,7 @@ function createTools(apiRequest) {
       floor_plan: z.record(z.any()).optional().describe('{ tables: [{otaId, number, seats, x, y, shape}], w, h }'),
       payment_protection: z.enum(['none', 'hold', 'deposit']).optional().describe('Whether a reservation requires a card hold or upfront deposit'),
       payment_protection_amount: z.number().min(0).optional().describe('Amount for the hold/deposit, in the restaurant\'s currency'),
+      payment_protection_basis: z.enum(['per_table', 'per_guest']).optional().describe('Whether payment_protection_amount is charged once per table or once per guest. Defaults to "per_table"'),
       website_id: z.string().uuid().nullable().optional().describe('One of the property\'s websites (GET /api/property/websites) that table QR codes link to; null to clear'),
     },
     run: ({ id, ...body }) => apiRequest('PUT', `/api/restaurant/${id}`, { body }),
@@ -1967,6 +2020,8 @@ function createTools(apiRequest) {
       contact_email: z.string().optional(),
       address: z.string().optional(),
       lead_time_hours: z.number().int().min(1).max(720).nullable().optional().describe('Minimum notice in hours for a guest booking (staff bookings are exempt). null = none'),
+      payment_required: z.enum(['none', 'deposit', 'full']).optional().describe('What a guest pays at booking: nothing, deposit_amount per appointment, or the full price. Not enforced yet'),
+      deposit_amount: z.number().positive().optional().describe('Deposit per appointment. Required (sent or already stored) when payment_required is deposit'),
     },
     run: ({ id, ...body }) => apiRequest('PUT', `/api/spa/${id}`, { body }),
   },
@@ -2161,6 +2216,7 @@ function createTools(apiRequest) {
     name: 'bulk_create_spa_appointments',
     description: 'Book up to 50 spa appointments at one spa in one call, each with the same fields and rules as create_spa_appointment. Booked in order, each on its own: one failing does not stop the rest, and nothing is rolled back. Returns created/failed counts and a per-appointment outcome: { index, appointment } or { index, status, error, code, details }.',
     inputSchema: {
+      payment: STATED_PAYMENT,
       spa_id: z.string(),
       appointments: z.array(z.object(SPA_APPOINTMENT_FIELDS)).min(1).max(50),
       send_emails: z.boolean().optional().describe("Default for every appointment; an appointment's own send_emails wins"),
@@ -2206,7 +2262,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'invoice_spa_appointment',
-    description: "Bill a spa appointment by Stripe invoice: emails the appointment's contact_email a payable invoice (due in 7 days) for the booked price and returns hosted_invoice_url. Safe to call again -- it returns the same open invoice rather than sending a second, and once the invoice is paid the call marks the appointment paid (already_paid: true). Call it again to check whether a sent invoice has been paid. 409 if the appointment is cancelled, already paid, has no contact email, or is on the guest's open bill (use invoice_spa_guest_bill then). To bill several appointments on one invoice, use add_spa_appointment_to_bill instead.",
+    description: "Bill a spa appointment by Stripe invoice: emails the appointment's contact_email a payable invoice (due in 7 days) for what the appointment still owes (price plus added charges minus payments, a deposit included) and returns hosted_invoice_url. Safe to call again -- it returns the same open invoice rather than sending a second, and once the invoice is paid the call marks the appointment paid (already_paid: true). Call it again to check whether a sent invoice has been paid. 409 if the appointment is cancelled, already paid, has no contact email, or is on the guest's open bill (use invoice_spa_guest_bill then). To bill several appointments on one invoice, use add_spa_appointment_to_bill instead.",
     inputSchema: { spa_id: z.string(), id: z.string() },
     run: ({ spa_id, id }) => apiRequest('POST', `/api/spa/${spa_id}/appointments/${id}/invoice`),
   },
@@ -2224,7 +2280,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'invoice_spa_guest_bill',
-    description: "Send one Stripe invoice (due in 7 days) for everything on a guest's open bill, by email. Appointments since cancelled or paid by tap are dropped first. Safe to call again: it also marks appointments on paid bills paid (settled_appointment_ids) and lists still-unpaid bills (open_bills); invoice is null when nothing new was pending. 404 if the email has no bill.",
+    description: "Send one Stripe invoice (due in 7 days) for everything on a guest's open bill, by email. Each line is repriced to what its appointment still owes; appointments since cancelled or paid in full are dropped first. Safe to call again: it also marks appointments on paid bills paid (settled_appointment_ids) and lists still-unpaid bills (open_bills); invoice is null when nothing new was pending. 404 if the email has no bill.",
     inputSchema: { spa_id: z.string(), email: z.string().describe("Guest's contact email, as on their appointments") },
     run: ({ spa_id, email }) => apiRequest('POST', `/api/spa/${spa_id}/bills`, { body: { email } }),
   },
@@ -2254,6 +2310,7 @@ function createTools(apiRequest) {
     name: 'create_equipment',
     description: 'Create a hireable equipment item',
     inputSchema: {
+      payment_required: z.enum(['none', 'full']).optional().describe('What a booking from a website API key must carry: nothing, or the full price'),
       name: z.string(),
       type: z.string(),
       description: z.string().optional(),
@@ -2270,6 +2327,7 @@ function createTools(apiRequest) {
     name: 'update_equipment',
     description: 'Update an equipment item. Set status to "inactive" to delete it — there is no hard-delete endpoint.',
     inputSchema: {
+      payment_required: z.enum(['none', 'full']).optional().describe('What a booking from a website API key must carry: nothing, or the full price'),
       id: z.string(),
       name: z.string().optional(),
       type: z.string().optional(),
@@ -2312,6 +2370,7 @@ function createTools(apiRequest) {
     name: 'create_equipment_hire',
     description: 'Hire equipment for a guest. rate_type defaults to "per_day"; total_price is computed server-side from the equipment\'s rate.',
     inputSchema: {
+      payment: STATED_PAYMENT,
       equipment_id: z.string(),
       guest_id: z.string().optional(),
       contact_name: z.string(),
@@ -2343,6 +2402,7 @@ function createTools(apiRequest) {
     name: 'create_golf_course',
     description: 'Create a golf course',
     inputSchema: {
+      payment_required: z.enum(['none', 'full']).optional().describe('What a booking from a website API key must carry: nothing, or the full price'),
       name: z.string(),
       description: z.string().optional(),
       holes: z.number().int(),
@@ -2354,6 +2414,7 @@ function createTools(apiRequest) {
     name: 'update_golf_course',
     description: 'Update a golf course. Set status to "inactive" to delete it — there is no hard-delete endpoint.',
     inputSchema: {
+      payment_required: z.enum(['none', 'full']).optional().describe('What a booking from a website API key must carry: nothing, or the full price'),
       id: z.string(),
       name: z.string().optional(),
       description: z.string().optional(),
@@ -2403,6 +2464,7 @@ function createTools(apiRequest) {
     name: 'create_golf_booking',
     description: 'Book a tee time. total_price is computed server-side from the course rate and player count.',
     inputSchema: {
+      payment: STATED_PAYMENT,
       tee_time_id: z.string(),
       guest_id: z.string().optional(),
       contact_name: z.string(),
@@ -2721,6 +2783,7 @@ function createTools(apiRequest) {
     name: 'create_restaurant_reservation',
     description: 'Book a table. Times are HH:MM local to the restaurant; find one with search_restaurant_availability first.',
     inputSchema: {
+      payment: STATED_PAYMENT,
       restaurant_id: z.string(), reservation_date: z.string().describe('YYYY-MM-DD'), start_time: z.string().describe('HH:MM'),
       party_size: z.number().int().min(1), contact_name: z.string(),
       contact_email: z.string().optional(), contact_phone: z.string().optional(), guest_id: z.string().optional(),

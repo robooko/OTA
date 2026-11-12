@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { dueNow, checkStatedPayment, recordStatedPayment } = require('../lib/amountDue');
 const { isValidDate, isValidTime, isValidUuid, isValidCurrencyCode, isValidTimezone } = require('../middleware/validate');
 const { publishNewReservation, publishReservationStatusChanged, publishTableSessionOpened } = require('../lib/ably');
 const { generateJoinCode } = require('../lib/joinCode');
@@ -26,6 +27,9 @@ function isValidMetadata(v) {
 }
 
 const PAYMENT_PROTECTION_MODES = ['none', 'hold', 'deposit'];
+
+const PAYMENT_PROTECTION_BASES = ['per_table', 'per_guest'];
+const BASIS_ERROR = `payment_protection_basis must be one of: ${PAYMENT_PROTECTION_BASES.join(', ')}`;
 
 function isValidPaymentProtection(v) {
   return PAYMENT_PROTECTION_MODES.includes(v);
@@ -56,7 +60,7 @@ async function getRestaurant(req, res, next) {
 
 async function createRestaurant(req, res, next) {
   try {
-    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone, payment_protection, payment_protection_amount, require_join_code } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone, payment_protection, payment_protection_amount, payment_protection_basis, require_join_code } = req.body;
     if (!name || !default_duration_minutes) {
       return res.status(400).json({ error: 'name and default_duration_minutes are required' });
     }
@@ -75,13 +79,16 @@ async function createRestaurant(req, res, next) {
     if (payment_protection_amount != null && (typeof payment_protection_amount !== 'number' || payment_protection_amount < 0)) {
       return res.status(400).json({ error: 'payment_protection_amount must be a non-negative number' });
     }
+    if (payment_protection_basis !== undefined && !PAYMENT_PROTECTION_BASES.includes(payment_protection_basis)) {
+      return res.status(400).json({ error: BASIS_ERROR });
+    }
     if (require_join_code !== undefined && typeof require_join_code !== 'boolean') {
       return res.status(400).json({ error: 'require_join_code must be a boolean' });
     }
     const { rows } = await pool.query(
-      `INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone, payment_protection, payment_protection_amount, require_join_code)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
-      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? [], currency ?? null, timezone ?? null, payment_protection ?? 'none', payment_protection_amount ?? null, require_join_code ?? false]
+      `INSERT INTO restaurant (property_id, name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, currency, timezone, payment_protection, payment_protection_amount, require_join_code, payment_protection_basis)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+      [req.property_id, name, description ?? null, phone ?? null, slot_interval_minutes ?? 15, default_duration_minutes, closed_days ?? [], currency ?? null, timezone ?? null, payment_protection ?? 'none', payment_protection_amount ?? null, require_join_code ?? false, payment_protection_basis ?? 'per_table']
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -89,7 +96,7 @@ async function createRestaurant(req, res, next) {
 
 async function updateRestaurant(req, res, next) {
   try {
-    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan, payment_protection, payment_protection_amount, website_id, require_join_code } = req.body;
+    const { name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan, payment_protection, payment_protection_amount, payment_protection_basis, website_id, require_join_code } = req.body;
     if (require_join_code !== undefined && typeof require_join_code !== 'boolean') {
       return res.status(400).json({ error: 'require_join_code must be a boolean' });
     }
@@ -125,6 +132,9 @@ async function updateRestaurant(req, res, next) {
         (typeof payment_protection_amount !== 'number' || payment_protection_amount < 0)) {
       return res.status(400).json({ error: 'payment_protection_amount must be a non-negative number' });
     }
+    if (payment_protection_basis !== undefined && !PAYMENT_PROTECTION_BASES.includes(payment_protection_basis)) {
+      return res.status(400).json({ error: BASIS_ERROR });
+    }
     const { rows } = await pool.query(
       `UPDATE restaurant SET
          name                       = COALESCE($1, name),
@@ -140,7 +150,8 @@ async function updateRestaurant(req, res, next) {
          payment_protection         = COALESCE($11, payment_protection),
          payment_protection_amount  = CASE WHEN $12::boolean THEN $13::numeric ELSE payment_protection_amount END,
          website_id                 = CASE WHEN $14::boolean THEN $15::uuid ELSE website_id END,
-         require_join_code          = COALESCE($16, require_join_code)
+         require_join_code          = COALESCE($16, require_join_code),
+         payment_protection_basis   = COALESCE($21, payment_protection_basis)
        WHERE id = $17 AND property_id = $18 RETURNING *`,
       [
         name, description, phone, slot_interval_minutes, default_duration_minutes, closed_days, status, currency, timezone, floor_plan ?? null,
@@ -151,6 +162,7 @@ async function updateRestaurant(req, res, next) {
         req.params.id, req.property_id,
         currency !== undefined,
         timezone !== undefined,
+        payment_protection_basis ?? null,
       ]
     );
     if (!rows.length) return res.status(404).json({ error: 'Restaurant not found' });
@@ -631,6 +643,9 @@ async function createReservation(req, res, next) {
     return res.status(400).json({ error: 'metadata must be a JSON object' });
   }
   if (table_id && !isValidUuid(table_id)) return res.status(400).json({ error: 'table_id must be a UUID' });
+  // Who may state a payment, and its shape (lib/amountDue.js).
+  const early = checkStatedPayment(req, null);
+  if (early) return res.status(early.status).json(early.body);
 
   const client = await pool.connect();
   try {
@@ -645,6 +660,11 @@ async function createReservation(req, res, next) {
       return res.status(404).json({ error: 'Restaurant not found' });
     }
     const restaurant = restaurantRes.rows[0];
+    // A deposit a website key's reservation must carry (a 'hold' is not enforced).
+    const due = await dueNow(client, 'restaurant_reservation', req.property_id, { restaurant_id, party_size });
+    if (due.status) { await client.query('ROLLBACK'); return res.status(due.status).json({ error: due.error }); }
+    const refusal = checkStatedPayment(req, due);
+    if (refusal) { await client.query('ROLLBACK'); return res.status(refusal.status).json(refusal.body); }
 
     if (guest_id) {
       const guestRes = await client.query(
@@ -669,6 +689,7 @@ async function createReservation(req, res, next) {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
       [req.property_id, assignedTableId, reservation_date, start_time, end_time, guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, party_size, notes ?? null, metadata ?? {}, stripe_payment_intent_id ?? null]
     );
+    await recordStatedPayment(client, 'restaurant_reservation', rows[0].id, req.property_id, req.body.payment);
 
     await client.query('COMMIT');
 

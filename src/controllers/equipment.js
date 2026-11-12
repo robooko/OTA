@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { dueNow, checkStatedPayment, recordStatedPayment } = require('../lib/amountDue');
 const { isValidDate, isValidUuid } = require('../middleware/validate');
 const { toMinutes, fmt, hireWindow, peakUse, fitsHours, startTimes } = require('../lib/equipmentWindows');
 
@@ -38,25 +39,27 @@ function equipmentError(e) {
   if (!Number.isInteger(e.slot_interval_minutes) || e.slot_interval_minutes < 5 || e.slot_interval_minutes > 240) {
     return 'slot_interval_minutes must be an integer from 5 to 240';
   }
+  // What a website key's hire must carry: nothing, or the full price.
+  if (!['none', 'full'].includes(e.payment_required)) return 'payment_required must be none or full';
   return null;
 }
 
-const EQUIPMENT_FIELDS = ['name', 'type', 'description', 'quantity', 'price_per_day', 'price_per_hour', 'status', 'open_time', 'close_time', 'slot_interval_minutes'];
+const EQUIPMENT_FIELDS = ['name', 'type', 'description', 'quantity', 'price_per_day', 'price_per_hour', 'status', 'open_time', 'close_time', 'slot_interval_minutes', 'payment_required'];
 const NUMERIC_FIELDS = new Set(['quantity', 'price_per_day', 'price_per_hour', 'slot_interval_minutes']);
 // Form posts send numbers as strings; the old SQL-side cast accepted them.
 const fieldValue = (f, v) => (NUMERIC_FIELDS.has(f) && typeof v === 'string' && v.trim() !== '' ? Number(v) : v);
 
 async function createEquipment(req, res, next) {
   try {
-    const e = { status: 'active', slot_interval_minutes: 60 };
+    const e = { status: 'active', slot_interval_minutes: 60, payment_required: 'none' };
     for (const f of EQUIPMENT_FIELDS) if (req.body[f] != null) e[f] = fieldValue(f, req.body[f]);
     const error = equipmentError(e);
     if (error) return res.status(400).json({ error });
     const { rows } = await pool.query(
-      `INSERT INTO equipment (property_id, name, type, description, quantity, price_per_day, price_per_hour, open_time, close_time, slot_interval_minutes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      `INSERT INTO equipment (property_id, name, type, description, quantity, price_per_day, price_per_hour, open_time, close_time, slot_interval_minutes, payment_required)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
       [req.property_id, e.name, e.type, e.description ?? null, e.quantity, e.price_per_day ?? null, e.price_per_hour ?? null,
-       e.open_time ?? null, e.close_time ?? null, e.slot_interval_minutes]
+       e.open_time ?? null, e.close_time ?? null, e.slot_interval_minutes, e.payment_required]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -85,10 +88,10 @@ async function updateEquipment(req, res, next) {
 
     const { rows } = await client.query(
       `UPDATE equipment SET name = $1, type = $2, description = $3, quantity = $4, price_per_day = $5,
-         price_per_hour = $6, status = $7, open_time = $8, close_time = $9, slot_interval_minutes = $10
+         price_per_hour = $6, status = $7, open_time = $8, close_time = $9, slot_interval_minutes = $10, payment_required = $12
        WHERE id = $11 RETURNING *`,
       [e.name, e.type, e.description, e.quantity, e.price_per_day, e.price_per_hour, e.status,
-       e.open_time, e.close_time, e.slot_interval_minutes, row.id]
+       e.open_time, e.close_time, e.slot_interval_minutes, row.id, e.payment_required]
     );
     await client.query('COMMIT');
     res.json(rows[0]);
@@ -227,6 +230,9 @@ async function createHire(req, res, next) {
   if (!(duration > 0 && duration <= 999.99)) return res.status(400).json({ error: 'duration must be from 0.01 to 999.99' });
   if (rate_type === 'per_hour' && !Number.isInteger(duration * 2)) return res.status(400).json({ error: 'Hourly duration must be a multiple of 0.5' });
   if (start_time != null && !isHour(start_time)) return res.status(400).json({ error: 'start_time must be HH:MM' });
+  // Who may state a payment, and its shape (lib/amountDue.js).
+  const early = checkStatedPayment(req, null);
+  if (early) return res.status(early.status).json(early.body);
 
   const client = await pool.connect();
   try {
@@ -251,15 +257,20 @@ async function createHire(req, res, next) {
     const error = shortfall(eq, hires, window, quantity);
     if (error) { await client.query('ROLLBACK'); return res.status(409).json({ error }); }
 
-    const rate = rate_type === 'per_hour' ? parseFloat(eq.price_per_hour || 0) : parseFloat(eq.price_per_day || 0);
-    const total_price = (rate * quantity * duration).toFixed(2);
+    // The price, and what a website key's hire must carry of it.
+    const due = await dueNow(client, 'equipment_hire', req.property_id, { equipment_id, quantity, rate_type, duration });
+    if (due.status) { await client.query('ROLLBACK'); return res.status(due.status).json({ error: due.error }); }
+    const total_price = due.price;
     if (Number(total_price) > MAX_MONEY) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Total price too large' }); }
+    const refusal = checkStatedPayment(req, due);
+    if (refusal) { await client.query('ROLLBACK'); return res.status(refusal.status).json(refusal.body); }
 
     const { rows } = await client.query(
       `INSERT INTO equipment_hire (property_id, equipment_id, guest_id, contact_name, contact_email, contact_phone, hire_date, start_time, quantity, rate_type, duration, notes, golf_booking_id, total_price)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
       [req.property_id, equipment_id, guest_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, hire_date, start_time ?? null, quantity, rate_type, duration, notes ?? null, golf_booking_id ?? null, total_price]
     );
+    await recordStatedPayment(client, 'equipment_hire', rows[0].id, req.property_id, req.body.payment);
 
     await client.query('COMMIT');
     res.status(201).json(rows[0]);
