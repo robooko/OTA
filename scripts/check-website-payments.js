@@ -280,8 +280,38 @@ const folioCtl = require('../src/controllers/entityFolio');
       assert.equal(ok.status, 201, JSON.stringify(ok.body));
       assert.equal((await paymentOf('spa_appointment_id', ok.body.id)).method, 'website');
     });
+
+    // ---- Room payments from a website ----
+    const payments = require('../src/controllers/payments');
+    const roomPayments = require('../src/lib/roomPayments');
+    const roomType = (await one(`INSERT INTO room_type (property_id, name, max_occupancy, base_rate) VALUES ($1, 'Suite', 2, 300) RETURNING id`, [P])).id;
+    const roomGuest = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'Rob', 'Room', 'rob@example.test') RETURNING id`, [P])).id;
+    const roomBooking = async () => (await one(
+      `INSERT INTO booking (property_id, guest_id, room_type_id, check_in, check_out, total_price) VALUES ($1, $2, $3, '2031-03-10', '2031-03-12', 600) RETURNING id`,
+      [P, roomGuest, roomType])).id;
+    await check('rooms: a website payment carries its Stripe id; one id may pay several bookings', async () => {
+      const a = await roomBooking();
+      const b = await roomBooking();
+      const pay = (booking_id, extra = {}) => call(payments.createPayment, { ...fullKey, body: { booking_id, amount: 600, method: 'website', status: 'completed', stripe_payment_intent_id: 'pi_cart', ...extra } });
+      const ra = await pay(a);
+      assert.equal(ra.status, 201, JSON.stringify(ra.body)); assert.equal(ra.body.stripe_payment_intent_id, 'pi_cart');
+      assert.equal((await pay(b)).status, 201);
+      assert.equal((await pay(a, { stripe_payment_intent_id: 5 })).status, 400);
+      assert.equal((await pay(a, { stripe_payment_intent_id: '' })).status, 400);
+    });
+    await check('rooms: a cancel refunds card payments, never a website one', async () => {
+      const a = await roomBooking();
+      await pool.query(`INSERT INTO payment (property_id, booking_id, amount, method, status, stripe_payment_intent_id, paid_at) VALUES
+        ($1, $2, 600, 'website', 'completed', 'pi_cart_cancel', now()), ($1, $2, 50, 'card', 'completed', 'pi_card_cancel', now())`, [P, a]);
+      fakeStripe.store.set('pi_cart_cancel', { id: 'pi_cart_cancel', status: 'succeeded' });
+      fakeStripe.store.set('pi_card_cancel', { id: 'pi_card_cancel', status: 'succeeded' });
+      const r = await roomPayments.stripeForCancel({ id: a, stripe_payment_intent_id: null, stripe_secret_key: 'sk_test_check', currency: 'GBP', status: 'confirmed', group_id: null }, { refund: true });
+      assert.equal(r.refundedPaymentIds.length, 1);
+      assert.equal(fakeStripe.store.get('pi_card_cancel').refunded, true);
+      assert.equal(fakeStripe.store.get('pi_cart_cancel').refunded, undefined);
+    });
   } finally {
-    for (const t of ['payment', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'service_period', 'restaurant', 'spa_appointment', 'spa_slot', 'spa_therapist_hours', 'spa_therapist', 'spa_treatment', 'spa']) {
+    for (const t of ['payment', 'booking', 'guest', 'room_type', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'service_period', 'restaurant', 'spa_appointment', 'spa_slot', 'spa_therapist_hours', 'spa_therapist', 'spa_treatment', 'spa']) {
       await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
     }
     await pool.query('DELETE FROM api_key WHERE property_id = $1 OR clerk_org_id = $2', [P, ORG]);

@@ -621,6 +621,7 @@ function createTools(apiRequest) {
       amount: z.number(),
       method: z.string().optional().describe('e.g. card, cash, bank_transfer'),
       status: z.enum(['pending', 'completed', 'refunded']).optional().describe('Default pending'),
+      stripe_payment_intent_id: z.string().min(1).max(255).optional().describe('The Stripe id it was taken on; one id may pay several bookings. With method website, OTA never refunds it'),
     },
     run: (args) => apiRequest('POST', '/api/payments', { body: args }),
   },
