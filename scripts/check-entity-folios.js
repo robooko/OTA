@@ -72,6 +72,72 @@ const pool = require('../src/db');
       await pool.query(`INSERT INTO folio_adjustment (property_id, golf_booking_id, description, amount) VALUES ($1, $2, 'Glove', 20)`, [P, g]);
       await assert.rejects(pool.query(`INSERT INTO folio_adjustment (property_id, description, amount) VALUES ($1, 'x', 1)`, [P]), /folio_adjustment_one_owner/);
     });
+
+    // ---- Compute ----
+    const { computeEntityFolio, ENTITY_KINDS, ownerColumn } = require('../src/lib/entityFolio');
+
+    await check('compute: golf base charge and balance', async () => {
+      const g = await golfBooking({ players: 2, price: '180.00' });
+      const f = await computeEntityFolio('golf_booking', g, P);
+      assert.equal(f.items.length, 1);
+      assert.equal(f.items[0].type, 'base');
+      assert.match(f.items[0].description, / · 2 players$/);
+      assert.equal(f.items[0].amount, '360.00');
+      assert.deepEqual([f.charges_total, f.payments_total, f.balance], ['360.00', '0.00', '360.00']);
+      assert.equal(f.external_payment, false);
+      assert.equal(f.currency, 'GBP');
+      assert.deepEqual([f.kind, f.id, f.status], ['golf_booking', g, 'confirmed']);
+    });
+
+    await check('compute: golf purchases, adjustments and payments', async () => {
+      const g = await golfBooking({ players: 1, price: '180.00' });
+      await pool.query(`INSERT INTO golf_booking_item (property_id, booking_id, item_name, quantity, unit_price) VALUES ($1, $2, 'Balls', 2, 15.50)`, [P, g]);
+      await pool.query(`INSERT INTO folio_adjustment (property_id, golf_booking_id, description, amount) VALUES ($1, $2, 'Comp', -10)`, [P, g]);
+      await pool.query(`INSERT INTO payment (property_id, golf_booking_id, amount, status) VALUES ($1, $2, 100, 'completed'), ($1, $2, 50, 'pending')`, [P, g]);
+      const f = await computeEntityFolio('golf_booking', g, P);
+      assert.deepEqual(f.items.map((i) => [i.type, i.amount]), [['base', '180.00'], ['item', '31.00'], ['adjustment', '-10.00']]);
+      assert.match(f.items[0].description, / · 1 player$/);
+      assert.equal(f.items[1].description, 'Balls × 2');
+      assert.deepEqual([f.charges_total, f.payments_total, f.balance], ['201.00', '100.00', '101.00']);
+      assert.equal(f.payments.length, 2);
+    });
+
+    await check('compute: a cancelled booking drops its base charge and shows a credit', async () => {
+      const g = await golfBooking({ players: 2, price: '180.00', status: 'cancelled' });
+      await pool.query(`INSERT INTO payment (property_id, golf_booking_id, amount, status) VALUES ($1, $2, 100, 'completed')`, [P, g]);
+      const f = await computeEntityFolio('golf_booking', g, P);
+      assert.equal(f.items.length, 0);
+      assert.equal(f.balance, '-100.00');
+    });
+
+    await check('compute: hire with no price is a zero base charge', async () => {
+      const h = await hire({ quantity: 3, total: null });
+      const f = await computeEntityFolio('equipment_hire', h, P);
+      assert.equal(f.items[0].amount, '0.00');
+      assert.match(f.items[0].description, /^Buggy × 3$/);
+      const one = await computeEntityFolio('equipment_hire', await hire({ quantity: 1, total: '50.00' }), P);
+      assert.deepEqual([one.items[0].description, one.items[0].amount], ['Buggy', '50.00']);
+    });
+
+    await check('compute: a reservation has no base charge, its own currency, and flags a Stripe deposit', async () => {
+      const r = await reservation({ partySize: 4, intent: 'pi_check_1', currency: 'EUR' });
+      const f = await computeEntityFolio('restaurant_reservation', r, P);
+      assert.deepEqual(f.items, []);
+      assert.equal(f.currency, 'EUR');
+      assert.equal(f.external_payment, true);
+      assert.equal(f.balance, '0.00');
+      assert.equal((await computeEntityFolio('restaurant_reservation', await reservation({}), P)).currency, 'GBP');
+    });
+
+    await check('compute: unknown kind, bad id and another property are all null', async () => {
+      const g = await golfBooking({ players: 1, price: '180.00' });
+      assert.equal(await computeEntityFolio('booking', g, P), null);
+      assert.equal(await computeEntityFolio('golf_booking', 'abc', P), null);
+      assert.equal(await computeEntityFolio('golf_booking', g, '00000000-0000-0000-0000-000000000000'), null);
+      assert.equal(ownerColumn('golf_booking'), 'golf_booking_id');
+      assert.equal(ownerColumn('booking'), null);
+      assert.deepEqual(ENTITY_KINDS, ['golf_booking', 'equipment_hire', 'restaurant_reservation']);
+    });
   } finally {
     for (const t of ['payment', 'folio_adjustment', 'golf_booking_item', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'restaurant']) {
       await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
