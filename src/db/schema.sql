@@ -443,7 +443,7 @@ CREATE INDEX IF NOT EXISTS idx_booking_website_checkout ON booking (property_id,
 CREATE TABLE IF NOT EXISTS payment (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id UUID          NOT NULL REFERENCES property(id),
-  booking_id  UUID          NOT NULL REFERENCES booking(id),
+  booking_id  UUID          REFERENCES booking(id), -- or one of the entity owners added after equipment_hire
   amount      NUMERIC(14,2) NOT NULL,
   method      VARCHAR(30),
   status      VARCHAR(20)   DEFAULT 'pending',
@@ -462,7 +462,7 @@ CREATE INDEX IF NOT EXISTS idx_payment_property           ON payment(property_id
 CREATE TABLE IF NOT EXISTS folio_adjustment (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   property_id UUID          NOT NULL REFERENCES property(id),
-  booking_id  UUID          NOT NULL REFERENCES booking(id),
+  booking_id  UUID          REFERENCES booking(id), -- or one of the entity owners added after equipment_hire
   description VARCHAR(200)  NOT NULL,
   amount      NUMERIC(14,2) NOT NULL,
   created_at  TIMESTAMPTZ   DEFAULT now()
@@ -1449,6 +1449,37 @@ CREATE INDEX IF NOT EXISTS idx_equipment_hire_date     ON equipment_hire(hire_da
 CREATE INDEX IF NOT EXISTS idx_equipment_hire_eq       ON equipment_hire(equipment_id);
 CREATE INDEX IF NOT EXISTS idx_equipment_property      ON equipment(property_id);
 CREATE INDEX IF NOT EXISTS idx_equipment_hire_property ON equipment_hire(property_id);
+
+-- Charges on every booking (migrate-2026-11-12-entity-folios.sql): a payment or
+-- folio line belongs to exactly one of a room booking, golf booking, equipment
+-- hire, restaurant reservation or spa appointment. Here, not in the CREATE
+-- TABLEs above, because those tables are created after payment.
+ALTER TABLE payment
+  ADD COLUMN IF NOT EXISTS golf_booking_id           UUID REFERENCES golf_booking(id),
+  ADD COLUMN IF NOT EXISTS equipment_hire_id         UUID REFERENCES equipment_hire(id),
+  ADD COLUMN IF NOT EXISTS restaurant_reservation_id UUID REFERENCES restaurant_reservation(id),
+  ADD COLUMN IF NOT EXISTS spa_appointment_id        UUID REFERENCES spa_appointment(id);
+ALTER TABLE payment DROP CONSTRAINT IF EXISTS payment_one_owner;
+ALTER TABLE payment ADD CONSTRAINT payment_one_owner CHECK
+  (num_nonnulls(booking_id, golf_booking_id, equipment_hire_id, restaurant_reservation_id, spa_appointment_id) = 1);
+
+ALTER TABLE folio_adjustment
+  ADD COLUMN IF NOT EXISTS golf_booking_id           UUID REFERENCES golf_booking(id),
+  ADD COLUMN IF NOT EXISTS equipment_hire_id         UUID REFERENCES equipment_hire(id),
+  ADD COLUMN IF NOT EXISTS restaurant_reservation_id UUID REFERENCES restaurant_reservation(id),
+  ADD COLUMN IF NOT EXISTS spa_appointment_id        UUID REFERENCES spa_appointment(id);
+ALTER TABLE folio_adjustment DROP CONSTRAINT IF EXISTS folio_adjustment_one_owner;
+ALTER TABLE folio_adjustment ADD CONSTRAINT folio_adjustment_one_owner CHECK
+  (num_nonnulls(booking_id, golf_booking_id, equipment_hire_id, restaurant_reservation_id, spa_appointment_id) = 1);
+
+CREATE INDEX IF NOT EXISTS idx_payment_golf_booking_id           ON payment(golf_booking_id)           WHERE golf_booking_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_payment_equipment_hire_id         ON payment(equipment_hire_id)         WHERE equipment_hire_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_payment_restaurant_reservation_id ON payment(restaurant_reservation_id) WHERE restaurant_reservation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_payment_spa_appointment_id        ON payment(spa_appointment_id)        WHERE spa_appointment_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_folio_adjustment_golf_booking_id           ON folio_adjustment(golf_booking_id)           WHERE golf_booking_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_folio_adjustment_equipment_hire_id         ON folio_adjustment(equipment_hire_id)         WHERE equipment_hire_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_folio_adjustment_restaurant_reservation_id ON folio_adjustment(restaurant_reservation_id) WHERE restaurant_reservation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_folio_adjustment_spa_appointment_id        ON folio_adjustment(spa_appointment_id)        WHERE spa_appointment_id IS NOT NULL;
 
 -- ── Restaurant Orders ─────────────────────────────────────────────────────────
 
