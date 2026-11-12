@@ -192,6 +192,13 @@ const { computeFolio } = require('../src/lib/folio');
       assert.equal(a2.end_time, '11:00:00'); assert.equal(a2.price, '300000.00'); assert.equal(a2.contact_name, 'Walk-in');
       const again = await imp([{ external_ref: 'SP2', treatment_id: TR, therapist_id: TH, date: '2026-09-03', start_time: '09:00' }]);
       assert.equal(again.body.results[0].outcome, 'duplicate'); assert.equal(again.body.results[0].appointment_id, a2.id);
+      // A paid import is on record as a payment; an unpaid one and a re-import add none.
+      const paymentsOf = async (id) => (await pool.query('SELECT amount, method, status, paid_at FROM payment WHERE spa_appointment_id = $1', [id])).rows;
+      assert.deepEqual((await paymentsOf(a1.id)).map((p) => [p.amount, p.method, p.status, p.paid_at.toISOString()]),
+        [['450000.00', 'cash', 'completed', '2026-09-01T02:00:00.000Z']]);
+      assert.deepEqual(await paymentsOf(a2.id), []);
+      await imp([{ external_ref: 'SP1', treatment_id: TR, therapist_id: TH, date: '2026-09-01', start_time: '10:00' }]);
+      assert.equal((await paymentsOf(a1.id)).length, 1);
       assert.equal((await imp([])).status, 400);
       assert.equal((await call(importAppointments, { appointments: [{}] }, { spa_id: TR })).status, 404);
       const big = Array.from({ length: 500 }, (_, i) => ({ external_ref: `SB${i}`, treatment_id: TR, therapist_id: TH, date: '2026-08-01', start_time: '09:00' }));
@@ -271,6 +278,7 @@ const { computeFolio } = require('../src/lib/folio');
       assert.equal(f.balance, '3030000.00');
     });
   } finally {
+    await pool.query('DELETE FROM payment WHERE property_id = $1', [P]);
     await pool.query('DELETE FROM spa_appointment WHERE property_id = $1', [P]);
     for (const t of ['spa_treatment', 'spa_therapist', 'spa']) await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
     await pool.query('DELETE FROM restaurant_order_item WHERE order_id IN (SELECT id FROM restaurant_order WHERE property_id = $1)', [P]);

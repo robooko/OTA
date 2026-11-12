@@ -2,7 +2,7 @@ const pool = require('../db');
 const { toCents, fromCents } = require('./folio');
 
 // The folio of a booking that isn't a room stay -- a golf booking, an
-// equipment hire, a restaurant reservation -- in the same shape as
+// equipment hire, a restaurant reservation, a spa appointment -- in the same shape as
 // computeFolio (lib/folio.js): computed live, never stored. Charges are the
 // booking's own price (dropped once it is cancelled, so anything taken shows
 // as a credit), golf's pro-shop items, and staff adjustments; payments are
@@ -26,8 +26,8 @@ const KINDS = {
           JOIN property p    ON p.id = gb.property_id
           WHERE gb.id = $1 AND gb.property_id = $2`,
     base: (r) => ({ description: `${r.course_name} · ${plural(r.players, 'player')}`, amount: r.total_price }),
-    async lines(id) {
-      const { rows } = await pool.query(
+    async lines(id, db) {
+      const { rows } = await db.query(
         'SELECT id, item_name, quantity, unit_price FROM golf_booking_item WHERE booking_id = $1 ORDER BY item_name, id',
         [id]
       );
@@ -60,6 +60,19 @@ const KINDS = {
           JOIN property p          ON p.id = rr.property_id
           WHERE rr.id = $1 AND rr.property_id = $2`,
   },
+  spa_appointment: {
+    // The price frozen at booking (folio.js reads it the same way). A
+    // stay-linked appointment is carried on that room's folio:
+    // charged_to_booking_id says so, and the routes refuse charges and
+    // payments on it here so nothing is owed in two places.
+    row: `SELECT sa.id, sa.status, COALESCE(sa.price, st.price, 0) AS price, st.name AS treatment_name,
+                 sa.booking_id AS charged_to_booking_id, p.currency, false AS external_payment
+          FROM spa_appointment sa
+          JOIN spa_treatment st ON st.id = sa.treatment_id
+          JOIN property p       ON p.id = sa.property_id
+          WHERE sa.id = $1 AND sa.property_id = $2`,
+    base: (r) => ({ description: r.treatment_name, amount: fromCents(toCents(r.price)) }),
+  },
 };
 
 const ENTITY_KINDS = Object.keys(KINDS);
@@ -71,27 +84,28 @@ function ownerColumn(kind) {
 }
 
 // The entity's row, or null for an unknown kind, a malformed id, or an id in
-// another property -- callers 404 on all three.
-async function findEntity(kind, id, propertyId) {
+// another property -- callers 404 on all three. db: a pg client, so a caller
+// inside a transaction sees its own writes.
+async function findEntity(kind, id, propertyId, db = pool) {
   if (!Object.hasOwn(KINDS, kind) || typeof id !== 'string' || !UUID_RE.test(id)) return null;
-  const { rows } = await pool.query(KINDS[kind].row, [id, propertyId]);
+  const { rows } = await db.query(KINDS[kind].row, [id, propertyId]);
   return rows[0] ?? null;
 }
 
-async function computeEntityFolio(kind, id, propertyId) {
-  const entity = await findEntity(kind, id, propertyId);
+async function computeEntityFolio(kind, id, propertyId, db = pool) {
+  const entity = await findEntity(kind, id, propertyId, db);
   if (!entity) return null;
   const config = KINDS[kind];
   const column = ownerColumn(kind);
 
   const [own, adjustmentsRes, paymentsRes] = await Promise.all([
-    config.lines ? config.lines(id) : [],
-    pool.query(
+    config.lines ? config.lines(id, db) : [],
+    db.query(
       `SELECT id, description, amount, created_at FROM folio_adjustment
        WHERE ${column} = $1 AND property_id = $2 ORDER BY created_at, id`,
       [id, propertyId]
     ),
-    pool.query(
+    db.query(
       `SELECT * FROM payment WHERE ${column} = $1 AND property_id = $2
        ORDER BY paid_at DESC NULLS LAST, id`,
       [id, propertyId]
@@ -126,6 +140,7 @@ async function computeEntityFolio(kind, id, propertyId) {
     payments_total: fromCents(paymentsCents),
     balance: fromCents(chargesCents - paymentsCents),
     external_payment: entity.external_payment,
+    charged_to_booking_id: entity.charged_to_booking_id ?? null,
   };
 }
 

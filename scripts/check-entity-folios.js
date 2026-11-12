@@ -57,6 +57,28 @@ const pool = require('../src/db');
       [P, t, partySize, intent])).id;
   };
 
+  const spaId = (await one(`INSERT INTO spa (property_id, name) VALUES ($1, 'Spa') RETURNING id`, [P])).id;
+  const therapist = (await one(`INSERT INTO spa_therapist (property_id, spa_id, name) VALUES ($1, $2, 'Tia') RETURNING id`, [P, spaId])).id;
+  const treatment = (await one(`INSERT INTO spa_treatment (property_id, spa_id, name, duration_mins, price) VALUES ($1, $2, 'Massage', 60, 90) RETURNING id`, [P, spaId])).id;
+  // price is the frozen price (the treatment lists 90, so the frozen one must win).
+  // paid = marked paid the old way: payment_status only, no payment row.
+  let spaHour = 6;
+  const spaAppointment = async ({ price = '80.00', paid = false, bookingId = null, status = 'confirmed' } = {}) => {
+    const h = spaHour++;
+    return (await one(
+      `INSERT INTO spa_appointment (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time, contact_name, price, status,
+                                    payment_status, paid_at, payment_method, booking_id)
+       VALUES ($1, $2, $3, '2030-07-15', make_time($4, 0, 0), make_time($4 + 1, 0, 0), 'Sia', $5, $6,
+               CASE WHEN $7 THEN 'paid' ELSE 'unpaid' END, CASE WHEN $7 THEN now() END, CASE WHEN $7 THEN 'cash' END, $8)
+       RETURNING id`,
+      [P, treatment, therapist, h % 24, price, status, paid, bookingId])).id;
+  };
+  const roomType = (await one(`INSERT INTO room_type (property_id, name, max_occupancy, base_rate) VALUES ($1, 'Suite', 2, 300) RETURNING id`, [P])).id;
+  const roomGuest = (await one(`INSERT INTO guest (property_id, first_name, last_name, email) VALUES ($1, 'Rob', 'Room', 'rob@example.test') RETURNING id`, [P])).id;
+  const roomBooking = async () => (await one(
+    `INSERT INTO booking (property_id, guest_id, room_type_id, check_in, check_out, total_price) VALUES ($1, $2, $3, '2030-07-14', '2030-07-16', 600) RETURNING id`,
+    [P, roomGuest, roomType])).id;
+
   try {
     // ---- Schema ----
     await check('schema: a payment has exactly one owner', async () => {
@@ -136,7 +158,7 @@ const pool = require('../src/db');
       assert.equal(await computeEntityFolio('golf_booking', g, '00000000-0000-0000-0000-000000000000'), null);
       assert.equal(ownerColumn('golf_booking'), 'golf_booking_id');
       assert.equal(ownerColumn('booking'), null);
-      assert.deepEqual(ENTITY_KINDS, ['golf_booking', 'equipment_hire', 'restaurant_reservation']);
+      assert.deepEqual(ENTITY_KINDS, ['golf_booking', 'equipment_hire', 'restaurant_reservation', 'spa_appointment']);
     });
 
     // ---- Routes ----
@@ -202,6 +224,38 @@ const pool = require('../src/db');
       assert.ok(await one('SELECT id FROM folio_adjustment WHERE id = $1', [adj]));
     });
 
+    // ---- Spa appointments ----
+    const fs = require('node:fs');
+    await check('spa: folio charges the frozen price, payments come from payment rows', async () => {
+      const a = await spaAppointment({ price: '80.00' });
+      await pool.query(`INSERT INTO payment (property_id, spa_appointment_id, amount, status, paid_at) VALUES ($1, $2, 20, 'completed', now())`, [P, a]);
+      const f = await computeEntityFolio('spa_appointment', a, P);
+      assert.deepEqual(f.items.map((i) => [i.type, i.amount]), [['base', '80.00']]);
+      assert.equal(f.items[0].description, 'Massage');
+      assert.equal(f.payments_total, '20.00'); assert.equal(f.balance, '60.00');
+      assert.equal(f.currency, 'GBP');
+      assert.equal(f.charged_to_booking_id, null);
+    });
+
+    await check('spa: stay-linked appointment names its room booking', async () => {
+      const b = await roomBooking();
+      const a = await spaAppointment({ bookingId: b });
+      assert.equal((await computeEntityFolio('spa_appointment', a, P)).charged_to_booking_id, b);
+      assert.equal((await computeEntityFolio('golf_booking', await golfBooking(), P)).charged_to_booking_id, null);
+    });
+
+    await check('spa: backfill records a paid appointment once, and only once', async () => {
+      const a = await spaAppointment({ price: '80.00', paid: true });
+      const b = await spaAppointment({ price: '80.00', paid: true });
+      await pool.query(`INSERT INTO payment (property_id, spa_appointment_id, amount, status, paid_at) VALUES ($1, $2, 80, 'completed', now())`, [P, b]);
+      const sql = fs.readFileSync(require('node:path').join(__dirname, '../src/db/migrate-2026-11-12-spa-payments-backfill.sql'), 'utf8');
+      await pool.query(sql); await pool.query(sql);
+      const rows = async (id) => (await pool.query('SELECT amount, method, status FROM payment WHERE spa_appointment_id = $1', [id])).rows;
+      assert.deepEqual(await rows(a), [{ amount: '80.00', method: 'cash', status: 'completed' }]);
+      assert.equal((await rows(b)).length, 1);
+      assert.equal((await computeEntityFolio('spa_appointment', a, P)).balance, '0.00');
+    });
+
     // ---- Restaurant deposit basis ----
     const restaurants = require('../src/controllers/restaurant');
     await check('restaurant: deposit basis defaults to per_table and can be set to per_guest', async () => {
@@ -218,7 +272,8 @@ const pool = require('../src/db');
       assert.equal(guest.body.payment_protection_basis, 'per_guest');
     });
   } finally {
-    for (const t of ['payment', 'folio_adjustment', 'golf_booking_item', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'restaurant']) {
+    for (const t of ['payment', 'folio_adjustment', 'golf_booking_item', 'golf_booking', 'tee_time', 'golf_course', 'equipment_hire', 'equipment', 'restaurant_reservation', 'restaurant_table', 'restaurant',
+      'spa_appointment', 'spa_treatment', 'spa_therapist', 'spa', 'booking', 'guest', 'room_type']) {
       await pool.query(`DELETE FROM ${t} WHERE property_id = $1`, [P]);
     }
     await pool.query('DELETE FROM property WHERE id = $1', [P]);

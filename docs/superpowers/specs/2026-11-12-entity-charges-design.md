@@ -157,9 +157,25 @@ Answered by Robert (2026-11-12):
    appointment's balance: price plus added charges minus what is already
    paid. `payment` rows become the record of what a spa appointment has
    paid. `payment_status` stays for existing readers and becomes `paid`
-   when the balance reaches zero. An appointment already marked paid with
-   no `payment` row shows a Paid line for its price at read time; there is
-   no backfill. (Approach is a call; the decision to do it is Robert's.)
+   when the balance reaches zero. (Approach is a call; the decision to do
+   it is Robert's.)
+
+   Calls made in plan 2 (`docs/superpowers/plans/2026-11-12-entity-charges-2-spa.md`):
+   - **Backfill, not a read-time Paid line.** Appointments already marked
+     paid get one `payment` row each (migration
+     `migrate-2026-11-12-spa-payments-backfill.sql`), and the import writes
+     one per paid row. A read-time line would vanish at the appointment's
+     first real payment and make its price owed again.
+   - **`payment_status`** is `paid` exactly when the appointment has
+     completed payments and owes nothing; it is recomputed after every
+     payment or charge change, so a charge added later makes it unpaid.
+   - **Stay-linked appointments** keep the spa flows (which charge the
+     balance and set `payment_status`, which the room folio reads); the
+     folio routes refuse charges and payments on them.
+   - **Stripe reference.** A tap stores its PaymentIntent id and a paid
+     invoice its Invoice id in `payment.stripe_payment_intent_id`, the key
+     that stops one Stripe payment being recorded twice. Money Stripe took
+     is recorded at Stripe's amount; the old "must equal the price" 409s go.
 2. **Deposit rules are enforced.** OTA refuses a booking that does not
    carry the payment its venue requires. See "Enforcement" below.
 

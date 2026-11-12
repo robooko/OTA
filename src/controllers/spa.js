@@ -1756,8 +1756,11 @@ async function importAppointments(req, res, next) {
     }
 
     if (rows.length) {
+      // A paid row is also on record as a payment (what its folio's Paid
+      // reads). Rows lost to ON CONFLICT insert nothing, so neither does a re-import.
       const inserted = await q(
-        `INSERT INTO spa_appointment (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time, guest_id,
+        `WITH ins AS (
+         INSERT INTO spa_appointment (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time, guest_id,
                                       contact_name, status, notes, price, payment_status, paid_at, payment_method, send_emails, external_ref)
          SELECT $1, r.treatment_id, r.therapist_id, r.date, r.start_time,
                 COALESCE(r.end_time, r.start_time + make_interval(mins => r.duration_mins)), r.guest_id,
@@ -1770,7 +1773,13 @@ async function importAppointments(req, res, next) {
                 notes text, price numeric, paid boolean, payment_method varchar)
            JOIN property p ON p.id = $1
          ON CONFLICT (property_id, external_ref) WHERE external_ref IS NOT NULL DO NOTHING
-         RETURNING id, external_ref`,
+         RETURNING id, external_ref, property_id, price, payment_status, payment_method, paid_at
+         ), paid AS (
+           INSERT INTO payment (property_id, spa_appointment_id, amount, method, status, paid_at)
+           SELECT property_id, id, price, payment_method, 'completed', paid_at FROM ins
+           WHERE payment_status = 'paid' AND price > 0
+         )
+         SELECT id, external_ref FROM ins`,
         [propertyId, JSON.stringify(rows)]);
       const created = new Set(inserted.map((r) => r.external_ref));
       for (const r of inserted) refIds.set(r.external_ref, r.id);
