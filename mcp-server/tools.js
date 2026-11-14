@@ -1900,6 +1900,12 @@ function createTools(apiRequest) {
     run: () => apiRequest('GET', '/api/property/vercel/status'),
   },
   {
+    name: 'get_google_drive_status',
+    description: "Whether the organization's Google Drive is connected (marina guest documents are stored there; without it guests can't upload). Returns configured, connected, account_email, reconnect_required, connected_at. Connecting is done on the dashboard.",
+    inputSchema: { provider: z.enum(['google_drive']).optional().describe('Defaults to google_drive') },
+    run: ({ provider = 'google_drive' } = {}) => apiRequest('GET', `/api/integrations/${provider}/status`),
+  },
+  {
     name: 'list_vercel_projects',
     description: "Projects in the property's connected Vercel account, to pick a vercel_project_id for a website",
     inputSchema: {},

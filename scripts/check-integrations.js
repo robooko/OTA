@@ -119,6 +119,10 @@ async function seedIntegration(fields = {}) {
         assert.equal(r.status, 404); assert.equal((await r.json()).error, 'Unknown integration');
       } finally { server.close(); }
     });
+    await check('status: no org (multi-org agent, no property_id) → 400, not a false "not connected"', async () => {
+      const r = await call(ctrl.getStatus, { clerk_org_id: undefined });
+      assert.equal(r.statusCode, 400);
+    });
     await check('connect: 503 naming a missing env var; otherwise a Google URL with drive.file + offline', async () => {
       delete process.env.GOOGLE_REDIRECT_URI;
       const r = await call(ctrl.getConnectUrl, {});

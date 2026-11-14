@@ -27,7 +27,8 @@ const EXCLUDE = [
   /sailor-versions/,                                   // shared passport docs: bearer only, records who decided
   /\/images\/upload$/,                                 // raw file upload
   /^\S+ \/api\/restaurant-table-sessions\b/,           // the table QR app (guest devices)
-  /^\S+ \/api\/(buxs|integrations|quickbooks|site|sailor)\b/, // service secret, org website rail and sailor app rails
+  /^\S+ \/api\/(buxs|quickbooks|site|sailor)\b/,     // service secret, org website rail and sailor app rails
+  /^POST \/api\/integrations\/:p\/disconnect$/,       // connections stay on the dashboard; get_google_drive_status reads
   /^PUT \/api\/billing$/,                              // billing settings, admin dashboard
   /^PUT \/api\/proshop\/baskets$|\/baskets\/mine$/,    // a shopper's own basket
   /^GET \/api\/golf\/bookings\/live$/,                 // dashboard feed; list_golf_bookings covers it

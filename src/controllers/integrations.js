@@ -77,6 +77,8 @@ async function connectCallback(req, res, next) {
 }
 
 async function getStatus(req, res, next) {
+  // An agent account in several orgs has no org until it names a property.
+  if (!req.clerk_org_id) return res.status(400).json({ error: 'This account is in several organizations: pass a property_id (see list_properties)' });
   try {
     const row = await integ.getIntegration(req.clerk_org_id, req.params.provider);
     res.json({
