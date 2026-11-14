@@ -187,6 +187,8 @@ const BOOK_FAILURES = {
   day_not_offered: 'That is not offered on that day.',
   booking_limit: 'That email already has the most upcoming bookings allowed.',
   members_only: 'That is only available to regulars.',
+  boat_length_required: 'That is priced by boat length, so it has to be booked online or with the team.',
+  boat_too_long: 'That is not offered for a boat that long.',
 };
 
 async function bookAppointment(property, caller, input, channel = 'phone') {

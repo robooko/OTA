@@ -78,19 +78,19 @@ const KINDS = {
   },
 
   // The price bookFromAvailability freezes (regulars' rate included).
-  async spa_appointment(db, propertyId, { spa_id, treatment_id, date, member_email = null }) {
+  async spa_appointment(db, propertyId, { spa_id, treatment_id, date, member_email = null, boat_length_m = null }) {
     if (!isValidDate(date)) return bad('date must be YYYY-MM-DD');
     if (!isValidUuid(spa_id) || !isValidUuid(treatment_id)) return notFound('Treatment');
     const { rows: [t] } = await db.query(
-      `SELECT st.price, st.member_price, st.duration_mins, st.member_duration_mins,
+      `SELECT st.price, st.member_price, st.duration_mins, st.member_duration_mins, st.length_prices,
               s.payment_required, s.deposit_amount, p.currency
        FROM spa_treatment st JOIN spa s ON s.id = st.spa_id JOIN property p ON p.id = st.property_id
        WHERE st.id = $1 AND st.spa_id = $2 AND st.property_id = $3 AND st.status = 'active'`,
       [treatment_id, spa_id, propertyId]
     );
     if (!t) return notFound('Treatment');
-    const rate = resolveRate(t, await memberRateUntil(db, propertyId, member_email), date);
-    if (!rate.ok) return { status: 409, error: rate.code };
+    const rate = resolveRate(t, await memberRateUntil(db, propertyId, member_email), date, boat_length_m);
+    if (!rate.ok) return { status: rate.code === 'boat_length_required' ? 400 : 409, error: rate.code };
     return spaAnswer(t, toCents(rate.price));
   },
 };

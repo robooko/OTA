@@ -972,6 +972,9 @@ CREATE TABLE IF NOT EXISTS spa_treatment (
   -- Days this treatment is offered, ISO day-of-week (1 = Mon .. 7 = Sun).
   -- NULL = every day. See migrate-2026-09-22-spa-treatment-days.sql.
   days_of_week  INT[],
+  -- Price bands by boat length, ascending [{ max_length_m, price }]; NULL =
+  -- one price. See migrate-2026-11-14-spa-length-prices.sql.
+  length_prices JSONB,
   status        VARCHAR(20)   DEFAULT 'active',
   CONSTRAINT spa_treatment_has_price CHECK (price IS NOT NULL OR member_price IS NOT NULL),
   CONSTRAINT spa_treatment_days_of_week_valid CHECK (
@@ -1083,6 +1086,10 @@ CREATE TABLE IF NOT EXISTS spa_appointment (
   -- false = the guest gets no confirmation, cancellation, reminder (email or
   -- SMS) or review request for this appointment.
   send_emails              BOOLEAN NOT NULL DEFAULT true,
+  -- The boat a boatyard service is for; boat_length_m prices a treatment
+  -- with length_prices.
+  boat_name                VARCHAR(100),
+  boat_length_m            NUMERIC(6,2),
   created_at                    TIMESTAMPTZ  DEFAULT now(),
   CONSTRAINT spa_appointment_payment_status CHECK (payment_status IN ('unpaid', 'paid')),
   CONSTRAINT spa_appointment_payment_method CHECK (payment_method IN ('card', 'cash'))

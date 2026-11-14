@@ -63,6 +63,30 @@ function normalizeDaysOfWeek(value) {
   return { value: days.length === 7 ? null : days };
 }
 
+// length_prices: price bands by boat length overall, e.g. a boatyard's lift.
+// [{ max_length_m, price }], max inclusive; stored ascending so the first
+// band a length fits is its price (lib/spaMemberRate.js resolveRate). null =
+// one price for everyone.
+const MAX_LENGTH_BANDS = 50;
+function normalizeLengthPrices(value) {
+  if (value == null) return { value: null };
+  const shapeError = { error: `length_prices must be 1-${MAX_LENGTH_BANDS} bands of { max_length_m: metres > 0, price: >= 0 }, or null` };
+  if (!Array.isArray(value) || !value.length || value.length > MAX_LENGTH_BANDS) return shapeError;
+  const bands = value.map((b) => ({ max_length_m: Number(b?.max_length_m), price: Number(b?.price) }));
+  if (bands.some((b) => !(b.max_length_m > 0 && b.max_length_m <= 9999.99) || !(b.price >= 0 && b.price <= 999999999999.99))) return shapeError;
+  bands.sort((a, b) => a.max_length_m - b.max_length_m);
+  if (bands.some((b, i) => i && b.max_length_m === bands[i - 1].max_length_m)) return { error: 'length_prices has two bands with the same max_length_m' };
+  return { value: bands };
+}
+
+// boat_name / boat_length_m on an appointment: optional, but a treatment
+// with length_prices needs the length to price it.
+function invalidBoat({ boat_name, boat_length_m }) {
+  if (boat_name != null && (typeof boat_name !== 'string' || boat_name.length > 100)) return 'boat_name must be text of at most 100 characters';
+  if (boat_length_m != null && !(typeof boat_length_m === 'number' && boat_length_m > 0 && boat_length_m <= 9999.99)) return 'boat_length_m must be a number of metres above 0';
+  return null;
+}
+
 // Is a 'YYYY-MM-DD' date one of a treatment's days_of_week? UTC epoch math
 // for the same reason as addDaysUTC -- getDay() would read the date in the
 // server process's local timezone. Postgres does this inline via
@@ -214,7 +238,11 @@ async function listTreatments(req, res, next) {
 async function createTreatment(req, res, next) {
   try {
     const { spa_id } = req.params;
-    const { name, description, duration_mins, price, member_price, member_duration_mins } = req.body;
+    const { name, description, duration_mins, member_price, member_duration_mins } = req.body;
+    const bands = normalizeLengthPrices(req.body.length_prices);
+    if (bands.error) return res.status(400).json({ error: bands.error });
+    // A banded treatment's price is its "from" price: the smallest boat's.
+    const price = req.body.price ?? bands.value?.[0].price;
     // price may be null for a regulars-only treatment, as long as it has a
     // member_price -- see lib/spaMemberRate.js.
     if (!name || duration_mins == null || (price == null && member_price == null)) {
@@ -227,9 +255,10 @@ async function createTreatment(req, res, next) {
     if (!spaRes.rows.length) return res.status(404).json({ error: 'Spa not found' });
 
     const { rows } = await pool.query(
-      `INSERT INTO spa_treatment (property_id, spa_id, name, description, duration_mins, price, member_price, member_duration_mins, days_of_week)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.property_id, spa_id, name, description ?? null, duration_mins, price ?? null, member_price ?? null, member_duration_mins ?? null, days.value]
+      `INSERT INTO spa_treatment (property_id, spa_id, name, description, duration_mins, price, member_price, member_duration_mins, days_of_week, length_prices)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [req.property_id, spa_id, name, description ?? null, duration_mins, price ?? null, member_price ?? null, member_duration_mins ?? null, days.value,
+        bands.value && JSON.stringify(bands.value)]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -250,6 +279,8 @@ async function updateTreatment(req, res, next) {
     // days_of_week is clearable the same way (null = offered every day).
     const days = normalizeDaysOfWeek(req.body.days_of_week);
     if (days.error) return res.status(400).json({ error: days.error });
+    const bands = normalizeLengthPrices(req.body.length_prices);
+    if (bands.error) return res.status(400).json({ error: bands.error });
     const { rows } = await pool.query(
       `UPDATE spa_treatment SET
          name                 = COALESCE($1, name),
@@ -259,7 +290,8 @@ async function updateTreatment(req, res, next) {
          status               = COALESCE($6, status),
          member_price         = CASE WHEN $7 THEN $8::numeric ELSE member_price END,
          member_duration_mins = CASE WHEN $9 THEN $10::int ELSE member_duration_mins END,
-         days_of_week         = CASE WHEN $11 THEN $12::int[] ELSE days_of_week END
+         days_of_week         = CASE WHEN $11 THEN $12::int[] ELSE days_of_week END,
+         length_prices        = CASE WHEN $16 THEN $17::jsonb ELSE length_prices END
        WHERE id = $13 AND spa_id = $14 AND property_id = $15 RETURNING *`,
       [
         name, description, duration_mins,
@@ -269,6 +301,7 @@ async function updateTreatment(req, res, next) {
         has('member_duration_mins'), req.body.member_duration_mins ?? null,
         has('days_of_week'), days.value,
         id, spa_id, req.property_id,
+        has('length_prices'), bands.value && JSON.stringify(bands.value),
       ]
     );
     if (!rows.length) return res.status(404).json({ error: 'Treatment not found' });
@@ -1095,7 +1128,7 @@ async function createAppointmentFromSlot(req, res, next) {
     if (conflictRes.rows.length) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Slot already booked' }); }
 
     // The legacy slot flow has no regulars' rate -- standard price only.
-    const treatmentRes = await client.query('SELECT duration_mins, price, days_of_week FROM spa_treatment WHERE id = $1', [slot.treatment_id]);
+    const treatmentRes = await client.query('SELECT duration_mins, price, days_of_week, length_prices FROM spa_treatment WHERE id = $1', [slot.treatment_id]);
     // A slot generated before the treatment's days were restricted is
     // still sitting there bookable -- refuse it rather than let the legacy
     // flow be the one way round the restriction.
@@ -1107,9 +1140,16 @@ async function createAppointmentFromSlot(req, res, next) {
       const leadTimeHours = await withinLeadTime(client, spa_id, slot.slot_date_text, slot.slot_time);
       if (leadTimeHours) { await client.query('ROLLBACK'); return res.status(409).json({ error: leadTimeError(leadTimeHours) }); }
     }
-    // What a website key's booking must carry: the spa's rule on the
-    // standard price this flow books at.
-    const due = spaAnswer(await spaRule(client, spa_id), toCents(treatmentRes.rows[0].price ?? 0));
+    // The standard price (or the boat's length band): no regulars' rate here.
+    const rate = resolveRate(treatmentRes.rows[0], null, slot.slot_date_text, req.body.boat_length_m);
+    if (!rate.ok && rate.code !== 'members_only') {
+      await client.query('ROLLBACK');
+      const [status, error] = BOOK_FAILURE_HTTP[rate.code];
+      return res.status(status).json({ error, code: rate.code });
+    }
+    const price = rate.ok ? rate.price : null;
+    // What a website key's booking must carry: the spa's rule on that price.
+    const due = spaAnswer(await spaRule(client, spa_id), toCents(price ?? 0));
     const refusal = checkStatedPayment(req, due);
     if (refusal) { await client.query('ROLLBACK'); return res.status(refusal.status).json(refusal.body); }
     // A website's stated payment proves the guest as a card would.
@@ -1126,13 +1166,15 @@ async function createAppointmentFromSlot(req, res, next) {
       `INSERT INTO spa_appointment
          (property_id, slot_id, treatment_id, therapist_id, appointment_date, start_time, end_time,
           guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, price,
-          status, contact_email_key, confirm_token_hash, hold_expires_at, pending_email_opts, send_emails)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING *`,
+          status, contact_email_key, confirm_token_hash, hold_expires_at, pending_email_opts, send_emails,
+          boat_name, boat_length_m)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) RETURNING *`,
       [
         req.property_id, slot_id, slot.treatment_id, slot.therapist_id, slot.slot_date, slot.slot_time, endTime,
         guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
-        treatmentRes.rows[0].price,
+        price,
         ...holdColumns(hold, contact_email, branding, cancel_url), send_emails ?? true,
+        req.body.boat_name ?? null, req.body.boat_length_m ?? null,
       ]
     );
     await recordStatedPayment(client, 'spa_appointment', rows[0].id, req.property_id, req.body.payment);
@@ -1197,7 +1239,8 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // no cleverness). Returns { ok: true, appointment } or { ok: false, code }
 // with code one of 'treatment_not_found' | 'guest_not_found' |
 // 'therapist_not_found' | 'members_only' | 'day_not_offered' | 'too_soon' |
-// 'unavailable' ('too_soon' also carries leadTimeHours).
+// 'unavailable' | 'boat_length_required' | 'boat_too_long' ('too_soon' also
+// carries leadTimeHours).
 //
 // enforceLeadTime refuses a time inside the salon's lead_time_hours -- the
 // guest rail sets it; staff (dashboard, approving an AI draft) don't.
@@ -1212,7 +1255,7 @@ async function isTherapistFree(client, therapistId, date, time, durationMins, ti
 // see lib/spaMemberRate.js); when it qualifies for the regulars' rate on
 // `date`, the appointment books at member_price/member_duration_mins. The
 // price is frozen onto the appointment either way.
-async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, payment_verified = false, branding, cancel_url, enforceLeadTime = false, guestRail = false, send_emails = true, hold_sms = null, statedPayment = undefined, enforcePayment = false }) {
+async function bookFromAvailability({ property_id, spa_id, treatment_id, therapist_id = null, date, time, guest_id = null, clerk_user_id = null, contact_name, contact_email = null, contact_phone = null, notes = null, member_email = null, payment_verified = false, branding, cancel_url, enforceLeadTime = false, guestRail = false, send_emails = true, hold_sms = null, statedPayment = undefined, enforcePayment = false, boat_name = null, boat_length_m = null }) {
   // A website's stated payment proves the guest as a card would.
   if (Number(statedPayment?.amount) > 0) payment_verified = true;
   // A texted hold has no email to cap bookings by, so the caller's number stands in.
@@ -1222,7 +1265,7 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
     await client.query('BEGIN');
 
     const treatmentRes = await client.query(
-      `SELECT id, duration_mins, price, member_price, member_duration_mins, days_of_week
+      `SELECT id, duration_mins, price, member_price, member_duration_mins, days_of_week, length_prices
        FROM spa_treatment WHERE id = $1 AND spa_id = $2 AND property_id = $3 AND status = 'active'`,
       [treatment_id, spa_id, property_id]
     );
@@ -1246,7 +1289,7 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
       if (!check.ok) { await client.query('ROLLBACK'); return { ok: false, code: check.code }; }
       hold = check.hold;
     }
-    const rate = resolveRate(treatmentRes.rows[0], await memberRateUntil(client, property_id, member_email), date);
+    const rate = resolveRate(treatmentRes.rows[0], await memberRateUntil(client, property_id, member_email), date, boat_length_m);
     if (!rate.ok) { await client.query('ROLLBACK'); return { ok: false, code: rate.code }; }
     const durationMins = rate.durationMins;
     // What a website key's booking must carry of the price it freezes.
@@ -1303,13 +1346,15 @@ async function bookFromAvailability({ property_id, spa_id, treatment_id, therapi
       `INSERT INTO spa_appointment
          (property_id, treatment_id, therapist_id, appointment_date, start_time, end_time,
           guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, price, member_rate,
-          status, contact_email_key, confirm_token_hash, hold_expires_at, pending_email_opts, send_emails)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING *`,
+          status, contact_email_key, confirm_token_hash, hold_expires_at, pending_email_opts, send_emails,
+          boat_name, boat_length_m)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) RETURNING *`,
       [
         property_id, treatment_id, chosenTherapistId, date, time, endTime,
         guest_id ?? null, clerk_user_id ?? null, contact_name, contact_email ?? null, contact_phone ?? null, notes ?? null,
         rate.price, rate.memberRate,
         ...holdColumns(hold, railKey, branding, cancel_url), send_emails,
+        boat_name, boat_length_m,
       ]
     );
     await recordStatedPayment(client, 'spa_appointment', rows[0].id, property_id, statedPayment);
@@ -1333,11 +1378,13 @@ const BOOK_FAILURE_HTTP = {
   day_not_offered: [409, 'That treatment is not offered on that day'],
   unavailable: [409, 'Time is not available'],
   booking_limit: [429, BOOKING_LIMIT_ERROR],
+  boat_length_required: [400, 'boat_length_m is required: this treatment is priced by boat length'],
+  boat_too_long: [409, 'This treatment has no price for a boat that long; contact the venue'],
 };
 
 async function createAppointmentFromAvailability(req, res, next) {
   const { spa_id } = req.params;
-  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, payment_verified, branding, cancel_url, send_emails } = req.body;
+  const { treatment_id, therapist_id, date, time, guest_id, clerk_user_id, contact_name, contact_email, contact_phone, notes, member_email, payment_verified, branding, cancel_url, send_emails, boat_name, boat_length_m } = req.body;
 
   if (!isValidDate(date)) return res.status(400).json({ error: 'Invalid date format' });
   if (!isValidTime(time)) return res.status(400).json({ error: 'Invalid time format, use HH:MM' });
@@ -1352,6 +1399,7 @@ async function createAppointmentFromAvailability(req, res, next) {
       guestRail: isGuestRail(req),
       statedPayment: req.body.payment,
       enforcePayment: req.api_key?.website === true,
+      boat_name, boat_length_m,
     });
     if (!result.ok) {
       if (result.code === 'payment_required') return res.status(result.refusal.status).json(result.refusal.body);
@@ -1392,6 +1440,9 @@ async function createAppointment(req, res, next) {
 
   const cancelUrlError = validateCancelUrl(cancel_url);
   if (cancelUrlError) return res.status(400).json({ error: cancelUrlError });
+
+  const boatError = invalidBoat(req.body);
+  if (boatError) return res.status(400).json({ error: boatError });
 
   // Who may state a payment, and its shape (lib/amountDue.js).
   const early = checkStatedPayment(req, null);
@@ -1759,7 +1810,7 @@ async function importAppointments(req, res, next) {
     const [existing, treatments, therapists, guests] = await Promise.all([
       q('SELECT id, external_ref, guest_id, booking_id FROM spa_appointment WHERE property_id = $1 AND external_ref = ANY($2::varchar[])',
         [propertyId, uniq(valid.map((e) => e.a.external_ref))]),
-      q('SELECT id, lower(name) AS lname, duration_mins, COALESCE(price, member_price) AS price FROM spa_treatment WHERE property_id = $1 AND spa_id = $2', [propertyId, spaId]),
+      q('SELECT id, lower(name) AS lname, duration_mins, COALESCE(price, member_price) AS price, length_prices FROM spa_treatment WHERE property_id = $1 AND spa_id = $2', [propertyId, spaId]),
       q('SELECT id, lower(name) AS lname FROM spa_therapist WHERE property_id = $1 AND spa_id = $2', [propertyId, spaId]),
       q('SELECT id, first_name, last_name, email FROM guest WHERE property_id = $1 AND email = ANY($2::varchar[])',
         [propertyId, uniq(valid.filter((e) => e.a.guest_email).map((e) => e.a.guest_email.trim().toLowerCase()))]),
@@ -1794,8 +1845,9 @@ async function importAppointments(req, res, next) {
       if (!treatment) { e.out = { outcome: 'rejected', reason: 'treatment not found' }; continue; }
       const therapist = findTherapist(a.therapist_id, a.therapist_name);
       if (!therapist) { e.out = { outcome: 'rejected', reason: 'therapist not found' }; continue; }
-      const price = a.price ?? (treatment.price == null ? null : Number(treatment.price));
-      if (price == null) { e.out = { outcome: 'rejected', reason: 'price required: the treatment has no price' }; continue; }
+      // A banded treatment's price depends on the boat: the import must state it.
+      const price = a.price ?? (treatment.price == null || treatment.length_prices ? null : Number(treatment.price));
+      if (price == null) { e.out = { outcome: 'rejected', reason: 'price required: the treatment has no single price' }; continue; }
       const guest = a.guest_email ? guestByEmail.get(a.guest_email.trim().toLowerCase()) : undefined;
       seen.add(a.external_ref);
       rows.push({

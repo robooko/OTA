@@ -32,6 +32,8 @@ const SPA_APPOINTMENT_FIELDS = {
   member_email: z.string().optional().describe("Computed flow: an email you've verified belongs to the client; books at the regulars' rate if it qualifies. Never inferred from contact_email."),
   branding: BRANDING_SCHEMA.describe('Styles the confirmation email; relayed, never stored'),
   cancel_url: z.string().optional().describe('http(s) URL for the guest to cancel; may contain {id}'),
+  boat_name: z.string().max(100).optional().describe('The boat a boatyard service is for'),
+  boat_length_m: z.number().positive().optional().describe('Boat length overall in metres; required for a treatment with length_prices, which it prices'),
   send_emails: z.boolean().optional().describe('Default true. false (staff or a full api key; a scoped key gets 403) = the guest gets no confirmation, cancellation, reminder (email or SMS) or review request for this appointment, and a full key books it as staff (no email-confirmation hold)'),
 };
 
@@ -565,7 +567,7 @@ function createTools(apiRequest) {
   },
   {
     name: 'get_amount_due_now',
-    description: "What a booking would need paid at booking, by the venue's rule, priced as its create tool would: { mode: none|deposit|full|hold, price, due_now, currency }. Golf: tee_time_id + players. Equipment hire: equipment_id + quantity (rate_type, duration optional). Restaurant: restaurant_id + party_size. Spa: spa_id + treatment_id + date (member_email optional). A website API key's booking must carry at least due_now as payment.",
+    description: "What a booking would need paid at booking, by the venue's rule, priced as its create tool would: { mode: none|deposit|full|hold, price, due_now, currency }. Golf: tee_time_id + players. Equipment hire: equipment_id + quantity (rate_type, duration optional). Restaurant: restaurant_id + party_size. Spa: spa_id + treatment_id + date (member_email optional; boat_length_m for a treatment priced by boat length). A website API key's booking must carry at least due_now as payment.",
     inputSchema: {
       kind: ENTITY_KIND,
       tee_time_id: z.string().optional(),
@@ -580,6 +582,7 @@ function createTools(apiRequest) {
       treatment_id: z.string().optional(),
       date: z.string().optional().describe('YYYY-MM-DD (spa)'),
       member_email: z.string().optional().describe("A regular's verified email (spa)"),
+      boat_length_m: z.number().positive().optional().describe('Boat length overall in metres (spa treatment priced by boat length)'),
     },
     run: ({ kind, ...query }) => apiRequest('GET', `/api/folios/due-now/${kind}`, { query }),
   },
@@ -2106,6 +2109,7 @@ function createTools(apiRequest) {
       member_price: z.number().optional(),
       member_duration_mins: z.number().int().optional().describe('Omit when the regulars\' booking is the same length'),
       days_of_week: z.array(z.number().int().min(1).max(7)).optional().describe('Days the treatment is offered, 1 = Monday .. 7 = Sunday. Omit for every day'),
+      length_prices: z.array(z.object({ max_length_m: z.number().positive(), price: z.number().min(0) })).optional().describe('Price bands by boat length overall (max_length_m inclusive), e.g. a boatyard lift. Bookings then need boat_length_m and pay its band. price defaults to the first band'),
     },
     run: ({ spa_id, ...body }) => apiRequest('POST', `/api/spa/${spa_id}/treatments`, { body }),
   },
@@ -2122,6 +2126,7 @@ function createTools(apiRequest) {
       member_price: z.number().nullable().optional(),
       member_duration_mins: z.number().int().nullable().optional(),
       days_of_week: z.array(z.number().int().min(1).max(7)).nullable().optional().describe('Days the treatment is offered, 1 = Monday .. 7 = Sunday. null = every day'),
+      length_prices: z.array(z.object({ max_length_m: z.number().positive(), price: z.number().min(0) })).nullable().optional().describe('Price bands by boat length overall (max_length_m inclusive); null = one price for every booking'),
       status: z.enum(['active', 'inactive']).optional(),
     },
     run: ({ spa_id, id, ...body }) => apiRequest('PUT', `/api/spa/${spa_id}/treatments/${id}`, { body }),

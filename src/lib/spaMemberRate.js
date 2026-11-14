@@ -46,9 +46,11 @@ async function memberRateUntil(db, propertyId, email) {
 // Which price/duration a treatment books at on `date` for someone whose
 // rate runs through `memberUntil` (from memberRateUntil, or null).
 // Returns { ok: true, price, durationMins, memberRate } or
-// { ok: false, code: 'members_only' } for a regulars-only treatment the
-// client doesn't qualify for on that date.
-function resolveRate(treatment, memberUntil, date) {
+// { ok: false, code } -- 'members_only' for a regulars-only treatment the
+// client doesn't qualify for on that date; for a treatment priced by boat
+// length (length_prices, ascending [{ max_length_m, price }], max inclusive)
+// 'boat_length_required' without a length, 'boat_too_long' past the last band.
+function resolveRate(treatment, memberUntil, date, boatLengthM = null) {
   const member = treatment.member_price != null && memberUntil != null && date <= memberUntil;
   if (member) {
     return {
@@ -59,6 +61,13 @@ function resolveRate(treatment, memberUntil, date) {
     };
   }
   if (treatment.price == null) return { ok: false, code: 'members_only' };
+  if (treatment.length_prices) {
+    const len = Number(boatLengthM);
+    if (boatLengthM == null || !(len > 0)) return { ok: false, code: 'boat_length_required' };
+    const band = treatment.length_prices.find((b) => len <= Number(b.max_length_m));
+    if (!band) return { ok: false, code: 'boat_too_long' };
+    return { ok: true, price: band.price, durationMins: treatment.duration_mins, memberRate: false };
+  }
   return { ok: true, price: treatment.price, durationMins: treatment.duration_mins, memberRate: false };
 }
 
