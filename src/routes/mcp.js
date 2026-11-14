@@ -2,7 +2,7 @@ const router = require('express').Router();
 const { z } = require('zod');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
-const { createApiClient, ApiError } = require('../../mcp-server/apiClient');
+const { createApiClient } = require('../../mcp-server/apiClient');
 const { createTools, ORG_TOOLS } = require('../../mcp-server/tools');
 const { authenticateCaller, clerkClient } = require('../middleware/auth');
 
@@ -86,9 +86,6 @@ router.post('/', oauthChallenge, authenticateCaller, async (req, res, next) => {
           const result = await toolsFor(perHotel ? property_id : null).get(tool.name).run(perHotel ? rest : args);
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };
         } catch (err) {
-          if (err instanceof ApiError && err.status === 401) {
-            return { isError: true, content: [{ type: 'text', text: 'API key is invalid, missing, or has been disabled. Contact your property admin.' }] };
-          }
           return { isError: true, content: [{ type: 'text', text: err.message }] };
         }
       });
