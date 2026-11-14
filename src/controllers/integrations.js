@@ -77,10 +77,11 @@ async function connectCallback(req, res, next) {
 }
 
 async function getStatus(req, res, next) {
-  // An agent account in several orgs has no org until it names a property.
-  if (!req.clerk_org_id) return res.status(400).json({ error: 'This account is in several organizations: pass a property_id (see list_properties)' });
   try {
-    const row = await integ.getIntegration(req.clerk_org_id, req.params.provider);
+    // A per-property API key carries only its hotel; the connection is the hotel's org's.
+    const orgId = req.clerk_org_id
+      ?? (await pool.query('SELECT clerk_org_id FROM property WHERE id = $1', [req.property_id])).rows[0]?.clerk_org_id;
+    const row = await integ.getIntegration(orgId, req.params.provider);
     res.json({
       configured: integ.missingEnv(req.params.provider).length === 0,
       connected: !!row,

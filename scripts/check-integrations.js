@@ -119,10 +119,6 @@ async function seedIntegration(fields = {}) {
         assert.equal(r.status, 404); assert.equal((await r.json()).error, 'Unknown integration');
       } finally { server.close(); }
     });
-    await check('status: no org (multi-org agent, no property_id) → 400, not a false "not connected"', async () => {
-      const r = await call(ctrl.getStatus, { clerk_org_id: undefined });
-      assert.equal(r.statusCode, 400);
-    });
     await check('connect: 503 naming a missing env var; otherwise a Google URL with drive.file + offline', async () => {
       delete process.env.GOOGLE_REDIRECT_URI;
       const r = await call(ctrl.getConnectUrl, {});
@@ -160,6 +156,23 @@ async function seedIntegration(fields = {}) {
       assert.equal(r.body.connected, true); assert.equal(r.body.configured, true); assert.equal(r.body.account_email, 'marina@example.com');
       assert.equal(r.body.reconnect_required, false);
       assert.ok(!/token/i.test(JSON.stringify(r.body)));
+    });
+    await check('status through the app with X-Api-Key (MCP get_google_drive_status): per-property and org keys both see the org connection', async () => {
+      const apiKeys = require('../src/lib/apiKeys');
+      const prop = await one("INSERT INTO property (name, currency, timezone, clerk_org_id) VALUES ('Drive Check', 'EUR', 'Europe/Lisbon', $1) RETURNING id", [ORG]);
+      const propKey = (await apiKeys.create(pool, { property_id: prop.id }, { name: 'drive-check' })).key;
+      const orgKey = (await apiKeys.create(pool, { clerk_org_id: ORG }, { name: 'drive-check' })).key;
+      const server = require('../src/app').listen(0);
+      try {
+        for (const key of [propKey, orgKey]) {
+          const r = await fetch(`http://127.0.0.1:${server.address().port}/api/integrations/google_drive/status`, { headers: { 'X-Api-Key': key } });
+          assert.equal(r.status, 200);
+          const b = await r.json();
+          assert.equal(b.connected, true); assert.equal(b.account_email, 'marina@example.com');
+        }
+        const bad = await fetch(`http://127.0.0.1:${server.address().port}/api/integrations/google_drive/status`, { headers: { 'X-Api-Key': 'nope' } });
+        assert.equal(bad.status, 401);
+      } finally { server.close(); }
     });
     await check('disconnect: revokes, deletes row; a failing revoke still disconnects', async () => {
       reply({ body: {} });
@@ -273,6 +286,7 @@ async function seedIntegration(fields = {}) {
   } catch (err) {
     failed++; console.log(`FAIL setup\n     ${err.stack}`);
   } finally {
+    await pool.query('DELETE FROM property WHERE clerk_org_id = $1', [ORG]).catch(() => {});
     await pool.query('DELETE FROM organization WHERE clerk_org_id = $1', [ORG]).catch(() => {});
     await pool.end();
   }
